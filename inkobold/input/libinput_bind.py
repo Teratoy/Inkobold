@@ -232,15 +232,28 @@ class Libinput:
         raw = self._lib.libinput_device_get_name(dev) if dev else None
         return (raw or b"").decode(errors="replace")
 
+    _POINTER_EVENTS = frozenset((int(EventType.POINTER_MOTION_ABSOLUTE), int(EventType.POINTER_BUTTON)))
+    _TABLET_EVENTS = frozenset(
+        (
+            int(EventType.TABLET_TOOL_AXIS),
+            int(EventType.TABLET_TOOL_PROXIMITY),
+            int(EventType.TABLET_TOOL_TIP),
+            int(EventType.TABLET_TOOL_BUTTON),
+        )
+    )
+
     def _event_to_sample(self, ev: int, width: int, height: int) -> Optional[PointerSample]:
         L = self._lib
-        et = EventType(L.libinput_event_get_type(ev))
-        name = self._device_name(ev)
+        # Compare raw ints: libinput emits types this enum doesn't list (gesture
+        # hold, switch, pad key…) and constructing EventType would raise,
+        # dropping the rest of the queue for this poll.
+        et = int(L.libinput_event_get_type(ev))
 
-        if et in (EventType.POINTER_MOTION_ABSOLUTE, EventType.POINTER_BUTTON):
+        if et in self._POINTER_EVENTS:
             pe = L.libinput_event_get_pointer_event(ev)
             if not pe:
                 return None
+            name = self._device_name(ev)
             x = L.libinput_event_pointer_get_absolute_x_transformed(pe, width)
             y = L.libinput_event_pointer_get_absolute_y_transformed(pe, height)
             pressed = False
@@ -248,15 +261,11 @@ class Libinput:
                 pressed = L.libinput_event_pointer_get_button_state(pe) == ButtonState.PRESSED
             return PointerSample(x=x, y=y, button_pressed=pressed, tip_down=pressed, source="pointer", device_name=name)
 
-        if et in (
-            EventType.TABLET_TOOL_AXIS,
-            EventType.TABLET_TOOL_PROXIMITY,
-            EventType.TABLET_TOOL_TIP,
-            EventType.TABLET_TOOL_BUTTON,
-        ):
+        if et in self._TABLET_EVENTS:
             te = L.libinput_event_get_tablet_tool_event(ev)
             if not te:
                 return None
+            name = self._device_name(ev)
             x = L.libinput_event_tablet_tool_get_x_transformed(te, width)
             y = L.libinput_event_tablet_tool_get_y_transformed(te, height)
             pressure = float(L.libinput_event_tablet_tool_get_pressure(te))

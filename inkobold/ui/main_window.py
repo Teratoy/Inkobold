@@ -97,6 +97,10 @@ class _DocTab:
     pan_y: float = 40.0
     root: Optional[Gtk.Widget] = field(default=None, repr=False)
     label: Optional[Gtk.Label] = field(default=None, repr=False)
+    # Last (text, tooltip) pushed to the tab widget and whether it carried the
+    # "active" CSS class — avoids redundant GTK property sets on every event.
+    shown: Optional[tuple[str, str]] = field(default=None, repr=False)
+    shown_active: Optional[bool] = field(default=None, repr=False)
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -126,6 +130,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self._anim_playing = False
         self._anim_timer_id: Optional[int] = None
         self._effect_session: Optional[dict] = None
+        self._shown_title: Optional[str] = None
+        self._shown_status: Optional[str] = None
+        self._layers_sig: Optional[tuple] = None
         self.mirror = MirrorModifier()
         self.grid = GridOverlay()
         self.input_hub = InputHub()
@@ -1789,6 +1796,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         tab.root = root
         tab.label = label
+        tab.shown = None
+        tab.shown_active = None
         self.doc_tabs.append(root)
         self._refresh_tab_label(tab)
 
@@ -1836,6 +1845,9 @@ class MainWindow(Gtk.ApplicationWindow):
         if tab.label is None:
             return
         text, tip, _ = self._tab_title_text(tab.document)
+        if (text, tip) == tab.shown:
+            return  # runs on every stroke event; skip redundant GTK property sets
+        tab.shown = (text, tip)
         tab.label.set_text(text)
         tab.label.set_tooltip_text(tip)
         if tab.root is not None:
@@ -1845,10 +1857,13 @@ class MainWindow(Gtk.ApplicationWindow):
         for i, tab in enumerate(self._tabs):
             if tab.root is None:
                 continue
-            if i == self._active_tab:
-                tab.root.add_css_class("active")
-            else:
-                tab.root.remove_css_class("active")
+            active = i == self._active_tab
+            if tab.shown_active is not active:
+                tab.shown_active = active
+                if active:
+                    tab.root.add_css_class("active")
+                else:
+                    tab.root.remove_css_class("active")
             self._refresh_tab_label(tab)
 
     def _request_close_tab(self, index: int) -> None:
@@ -2093,10 +2108,13 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.document:
             return
         self.document.set_current_frame(index)
-        self.canvas.renderer.invalidate()
         if rebuild_list:
+            self.canvas.renderer.invalidate()
             self._rebuild_frames()
+            self._rebuild_layers()
         else:
+            # Playback tick: textures are keyed by layer id + unique revision, so
+            # the other frame's layers are already resident — no invalidation.
             self._syncing_frames = True
             try:
                 row = self.frame_list.get_row_at_index(index)
@@ -2104,7 +2122,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.frame_list.select_row(row)
             finally:
                 self._syncing_frames = False
-        self._rebuild_layers()
+            self._rebuild_layers(only_if_changed=True)
         self.canvas.queue_render()
         self._set_status()
 
@@ -2187,7 +2205,29 @@ class MainWindow(Gtk.ApplicationWindow):
         self._goto_frame(nxt, rebuild_list=False)
         return True
 
-    def _rebuild_layers(self) -> None:
+    def _layers_signature(self) -> Optional[tuple]:
+        """Cheap identity of what the layer panel shows (for playback ticks).
+
+        Rows bind callbacks by index, not layer id, so identical-looking
+        stacks on different frames can share the same widgets.
+        """
+        if not self.document:
+            return None
+        return (
+            self.document.active_layer_index,
+            tuple((ly.name, ly.visible, round(ly.opacity, 4)) for ly in self.document.layers),
+        )
+
+    def _rebuild_layers(self, *, only_if_changed: bool = False) -> None:
+        sig = self._layers_signature()
+        if (
+            only_if_changed
+            and sig is not None
+            and sig == self._layers_sig
+            and getattr(self, "_layer_rename_entry", None) is None
+        ):
+            return
+        self._layers_sig = sig
         self._dismiss_layer_context_menu()
         self._layer_rename_entry = None
         self._layer_rename_done = True
@@ -2488,35 +2528,40 @@ class MainWindow(Gtk.ApplicationWindow):
     def _update_doc_title(self) -> None:
         self._refresh_tab_styles()
         if not self.document:
-            self.set_title("Inkobold")
-            return
-        _text, _tip, marked = self._tab_title_text(self.document)
-        self.set_title(f"Inkobold — {marked}")
+            title = "Inkobold"
+        else:
+            _text, _tip, marked = self._tab_title_text(self.document)
+            title = f"Inkobold — {marked}"
+        if title != self._shown_title:
+            self._shown_title = title
+            self.set_title(title)
+
+    _DEPTH_LABELS = {64: "16bpc", 32: "8bpc", 24: "RGB8", 8: "Gray8"}
 
     def _set_status(self) -> None:
+        # Called after every pointer event; only touch GTK when the text changes.
         self._update_doc_title()
         if not self.document:
-            self.status.set_text(self.input_hub.status)
-            return
-        d = self.document
-        path = d.path.name if d.path else "untitled.inkobold"
-        dirty = "*" if d.dirty else ""
-        ly = d.active_layer
-        gl = "GLES" if self.canvas.renderer.es else "GL"
-        if not self.canvas.renderer.ready:
-            gl = "GL-FAIL"
-        depth_label = {
-            64: "16bpc",
-            32: "8bpc",
-            24: "RGB8",
-            8: "Gray8",
-        }.get(int(d.color_depth), f"{d.color_depth}-bit")
-        self.status.set_text(
-            f"{path}{dirty}  {d.width}×{d.height}  {d.dpi}dpi  {depth_label}  "
-            f"frame={d.current_frame_index + 1}/{d.frame_count}@{d.fps:g}fps  "
-            f"layer={ly.name}  tool={self.tool_id}  "
-            f"zoom={self.canvas.renderer.zoom:.2f}  {gl}  |  {self.input_hub.status}"
-        )
+            text = self.input_hub.status
+        else:
+            d = self.document
+            path = d.path.name if d.path else "untitled.inkobold"
+            dirty = "*" if d.dirty else ""
+            ly = d.active_layer
+            renderer = self.canvas.renderer
+            gl = "GLES" if renderer.es else "GL"
+            if not renderer.ready:
+                gl = "GL-FAIL"
+            depth_label = self._DEPTH_LABELS.get(int(d.color_depth), f"{d.color_depth}-bit")
+            text = (
+                f"{path}{dirty}  {d.width}×{d.height}  {d.dpi}dpi  {depth_label}  "
+                f"frame={d.current_frame_index + 1}/{d.frame_count}@{d.fps:g}fps  "
+                f"layer={ly.name}  tool={self.tool_id}  "
+                f"zoom={renderer.zoom:.2f}  {gl}  |  {self.input_hub.status}"
+            )
+        if text != self._shown_status:
+            self._shown_status = text
+            self.status.set_text(text)
 
     def _apply_theme_css(self, rgb: tuple[int, int, int] | None = None) -> None:
         if rgb is not None:

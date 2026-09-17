@@ -8,7 +8,7 @@ from typing import Optional
 
 import numpy as np
 
-from inkobold.core.animation import DEFAULT_FPS, DEFAULT_ONION_OPACITY, AnimFrame
+from inkobold.core.animation import DEFAULT_FPS, DEFAULT_ONION_OPACITY, AnimFrame, blank_frame
 from inkobold.core.document import Document, Selection
 from inkobold.core.layer import Layer
 
@@ -58,6 +58,13 @@ class History:
     _undo: list[_DocSnap] = field(default_factory=list)
     _redo: list[_DocSnap] = field(default_factory=list)
     _busy: bool = False  # suppress pushes while restoring
+    # (layer.id, layer.revision) -> compressed snapshot. Layer revisions are
+    # process-unique (see Layer.bump), so a hit means the pixels are unchanged
+    # since that snapshot was taken and the zlib work can be skipped. Pruned to
+    # the layers referenced by the newest snapshot on every push.
+    _layer_cache: dict[tuple[str, int], _LayerSnap] = field(default_factory=dict, repr=False)
+    # (selection.revision, compressed mask) for the most recent snapshot.
+    _sel_cache: Optional[tuple[int, bytes]] = field(default=None, repr=False)
 
     @property
     def can_undo(self) -> bool:
@@ -70,20 +77,22 @@ class History:
     def clear(self) -> None:
         self._undo.clear()
         self._redo.clear()
+        self._layer_cache.clear()
+        self._sel_cache = None
 
     def set_max_steps(self, steps: int) -> None:
         self.max_steps = max(1, int(steps))
-        while len(self._undo) > self.max_steps:
-            self._undo.pop(0)
-        while len(self._redo) > self.max_steps:
-            self._redo.pop(0)
+        if len(self._undo) > self.max_steps:
+            del self._undo[: len(self._undo) - self.max_steps]
+        if len(self._redo) > self.max_steps:
+            del self._redo[: len(self._redo) - self.max_steps]
 
     def push(self, doc: Document) -> None:
         if self._busy or doc is None:
             return
         self._undo.append(self._snapshot(doc))
-        while len(self._undo) > self.max_steps:
-            self._undo.pop(0)
+        if len(self._undo) > self.max_steps:
+            del self._undo[: len(self._undo) - self.max_steps]
         self._redo.clear()
 
     def discard_last_push(self) -> bool:
@@ -109,10 +118,34 @@ class History:
         self._restore(doc, snap)
         return True
 
-    @staticmethod
-    def _snap_layer(ly: Layer) -> _LayerSnap:
+    def _snap_layer(self, ly: Layer, fresh: dict[tuple[str, int], _LayerSnap]) -> _LayerSnap:
+        key = (ly.id, ly.revision)
+        cached = self._layer_cache.get(key)
+        if cached is not None:
+            # Pixels unchanged since the cached snapshot; only metadata may differ.
+            if (
+                cached.name != ly.name
+                or cached.visible != ly.visible
+                or cached.opacity != ly.opacity
+                or cached.offset_x != ly.offset_x
+                or cached.offset_y != ly.offset_y
+            ):
+                cached = _LayerSnap(
+                    id=ly.id,
+                    name=ly.name,
+                    visible=ly.visible,
+                    opacity=ly.opacity,
+                    offset_x=ly.offset_x,
+                    offset_y=ly.offset_y,
+                    width=cached.width,
+                    height=cached.height,
+                    pixels_z=cached.pixels_z,
+                    dtype=cached.dtype,
+                )
+            fresh[key] = cached
+            return cached
         px = np.ascontiguousarray(ly.pixels)
-        return _LayerSnap(
+        snap = _LayerSnap(
             id=ly.id,
             name=ly.name,
             visible=ly.visible,
@@ -124,9 +157,10 @@ class History:
             pixels_z=zlib.compress(px.tobytes(), 1),
             dtype=str(px.dtype),
         )
+        fresh[key] = snap
+        return snap
 
-    @staticmethod
-    def _restore_layer(ls: _LayerSnap, color_depth: int) -> Layer:
+    def _restore_layer(self, ls: _LayerSnap, color_depth: int) -> Layer:
         ly = Layer(
             name=ls.name,
             width=ls.width,
@@ -142,6 +176,9 @@ class History:
         dtype = np.dtype(getattr(ls, "dtype", "uint8"))
         ly.pixels = np.frombuffer(raw, dtype=dtype).reshape(ls.height, ls.width, 4).copy()
         ly.bump()
+        # The restored layer's pixels are exactly this snapshot: remember that so
+        # the next push (e.g. redo bookkeeping) doesn't recompress them.
+        self._layer_cache[(ly.id, ly.revision)] = ls
         return ly
 
     def _snapshot(self, doc: Document) -> _DocSnap:
@@ -153,21 +190,29 @@ class History:
                 active_layer_index=doc.active_layer_index,
             )
         ]
+        fresh: dict[tuple[str, int], _LayerSnap] = {}
         frame_snaps: list[_FrameSnap] = []
         for fr in frames_src:
             frame_snaps.append(
                 _FrameSnap(
                     name=fr.name,
                     active_layer_index=fr.active_layer_index,
-                    layers=[self._snap_layer(ly) for ly in fr.layers],
+                    layers=[self._snap_layer(ly, fresh) for ly in fr.layers],
                 )
             )
+        # Keep only what the document currently references (bounded memory).
+        self._layer_cache = fresh
         # Legacy flat layers = current frame (compat with older snap readers)
         cur = frame_snaps[doc.current_frame_index] if frame_snaps else None
         layers = list(cur.layers) if cur is not None else []
         sel_z = None
-        if doc.selection.mask is not None:
-            sel_z = zlib.compress(np.ascontiguousarray(doc.selection.mask).tobytes(), 1)
+        sel = doc.selection
+        if sel.mask is not None:
+            if self._sel_cache is not None and self._sel_cache[0] == sel.revision:
+                sel_z = self._sel_cache[1]
+            else:
+                sel_z = zlib.compress(np.ascontiguousarray(sel.mask).tobytes(), 1)
+                self._sel_cache = (sel.revision, sel_z)
         return _DocSnap(
             width=doc.width,
             height=doc.height,
@@ -212,8 +257,6 @@ class History:
                     layers=[self._restore_layer(ls, doc.color_depth) for ls in fs.layers],
                 )
                 if not fr.layers:
-                    from inkobold.core.animation import blank_frame
-
                     fr = blank_frame(
                         doc.width,
                         doc.height,
@@ -223,8 +266,6 @@ class History:
                 doc.frames.append(fr)
 
             if not doc.frames:
-                from inkobold.core.animation import blank_frame
-
                 doc.frames = [blank_frame(doc.width, doc.height, color_depth=doc.color_depth)]
 
             idx = int(getattr(snap, "current_frame_index", 0))
@@ -236,6 +277,7 @@ class History:
                 raw = zlib.decompress(snap.selection_z)
                 mask = np.frombuffer(raw, dtype=np.uint8).reshape(snap.height, snap.width).copy()
                 doc.selection = Selection(mask=mask)
+                self._sel_cache = (doc.selection.revision, snap.selection_z)
             doc.dirty = True
         finally:
             self._busy = False

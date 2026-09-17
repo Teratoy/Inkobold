@@ -137,20 +137,48 @@ def _gaussian_kernel_1d(radius: int) -> np.ndarray:
     return k
 
 
+_BLUR_BLOCK_ROWS = 16
+
+
 def _separable_convolve(src: np.ndarray, kernel: np.ndarray) -> np.ndarray:
-    """Apply a symmetric 1D kernel separably (H then V) with edge padding."""
+    """Apply a symmetric 1D kernel separably (H then V) with edge padding.
+
+    The tap loop is memory-bandwidth bound, so work is done on cache-sized
+    blocks (rows for the horizontal pass, column strips for the vertical one)
+    with a reused scratch buffer. Accumulation order per element is unchanged,
+    so the result is bit-identical to the straightforward full-image loop.
+    """
     r = len(kernel) // 2
-    h, w, _c = src.shape
-    # Horizontal
+    h, w, c = src.shape
+    taps = list(enumerate(kernel))
+
+    # Horizontal pass, blocked over rows.
     padded = np.pad(src, ((0, 0), (r, r), (0, 0)), mode="edge")
-    horiz = np.zeros_like(src, dtype=np.float64)
-    for i, k in enumerate(kernel):
-        horiz += padded[:, i : i + w, :] * k
-    # Vertical
+    horiz = np.zeros((h, w, c), dtype=np.float64)
+    rows = min(h, _BLUR_BLOCK_ROWS)
+    tmp = np.empty((rows, w, c), dtype=np.float64)
+    for y0 in range(0, h, rows):
+        y1 = min(h, y0 + rows)
+        t = tmp[: y1 - y0]
+        acc = horiz[y0:y1]
+        pb = padded[y0:y1]
+        for i, k in taps:
+            np.multiply(pb[:, i : i + w, :], k, out=t)
+            np.add(acc, t, out=acc)
+
+    # Vertical pass, blocked over column strips of similar byte size.
     padded = np.pad(horiz, ((r, r), (0, 0), (0, 0)), mode="edge")
-    out = np.zeros_like(src, dtype=np.float64)
-    for i, k in enumerate(kernel):
-        out += padded[i : i + h, :, :] * k
+    out = np.zeros((h, w, c), dtype=np.float64)
+    cols = max(8, min(w, (rows * w) // max(1, h)))
+    tmp = np.empty((h, cols, c), dtype=np.float64)
+    for x0 in range(0, w, cols):
+        x1 = min(w, x0 + cols)
+        t = tmp[:, : x1 - x0]
+        acc = out[:, x0:x1]
+        pb = padded[:, x0:x1]
+        for i, k in taps:
+            np.multiply(pb[i : i + h], k, out=t)
+            np.add(acc, t, out=acc)
     return out
 
 
@@ -192,6 +220,53 @@ def _quantize_levels(value: np.ndarray, levels: int, vmax: float) -> np.ndarray:
     t = np.clip(value / max(vmax, 1e-6), 0.0, 1.0)
     q = np.round(t * (n - 1)) / (n - 1)
     return q * vmax
+
+
+def _floyd_steinberg(rgb: np.ndarray, n_levels: int, vmax: float) -> np.ndarray:
+    """Left-to-right / top-to-bottom Floyd–Steinberg error diffusion.
+
+    Pixel (y, x) depends only on (y, x-1), (y-1, x-1), (y-1, x) and
+    (y-1, x+1), i.e. on pixels with a smaller ``x + 2y``. Every pixel on one
+    anti-diagonal ``k = x + 2y`` is therefore independent, so the whole
+    diagonal is quantised in one vectorised step (w + 2h steps total instead
+    of w*h Python iterations). Error is scattered in the same order the
+    sequential scan would add it, so results are bit-identical.
+    """
+    h, w = rgb.shape[:2]
+    work = rgb.astype(np.float64, copy=True)
+    out = np.empty_like(work)
+    ys_all = np.arange(h, dtype=np.intp)
+    for k in range(w + 2 * (h - 1)):
+        y_lo = max(0, (k - (w - 1) + 1) // 2)
+        y_hi = min(h - 1, k // 2)
+        if y_lo > y_hi:
+            continue
+        ys = ys_all[y_lo : y_hi + 1]
+        xs = k - 2 * ys
+        old = work[ys, xs]
+        new = _quantize_levels(old, n_levels, vmax)
+        out[ys, xs] = new
+        err = old - new
+
+        below = ys + 1
+        has_below = below < h
+        if has_below.any():
+            by = below[has_below]
+            bx = xs[has_below]
+            be = err[has_below]
+            # Sequential scan adds the (y-1, x+1) share to a pixel before the
+            # (y, x-1) share; keep that order (3/16 before 7/16).
+            left = bx > 0
+            if left.any():
+                work[by[left], bx[left] - 1] += be[left] * (3.0 / 16.0)
+            work[by, bx] += be * (5.0 / 16.0)
+            right = bx + 1 < w
+            if right.any():
+                work[by[right], bx[right] + 1] += be[right] * (1.0 / 16.0)
+        nxt = xs + 1 < w
+        if nxt.any():
+            work[ys[nxt], xs[nxt] + 1] += err[nxt] * (7.0 / 16.0)
+    return out
 
 
 def dither(
@@ -242,22 +317,7 @@ def dither(
             biased = rgb + (thresh[..., None] - 0.5) * step
             out[..., :3] = _quantize_levels(biased, n_levels, vmax)
     else:
-        # Floyd–Steinberg error diffusion (serpentine optional: left-to-right only).
-        work = rgb.copy()
-        for y in range(h):
-            for x in range(w):
-                old = work[y, x].copy()
-                new = _quantize_levels(old, n_levels, vmax)
-                out[y, x, :3] = new
-                err = old - new
-                if x + 1 < w:
-                    work[y, x + 1] += err * (7.0 / 16.0)
-                if y + 1 < h:
-                    if x > 0:
-                        work[y + 1, x - 1] += err * (3.0 / 16.0)
-                    work[y + 1, x] += err * (5.0 / 16.0)
-                    if x + 1 < w:
-                        work[y + 1, x + 1] += err * (1.0 / 16.0)
+        out[..., :3] = _floyd_steinberg(rgb, n_levels, vmax)
 
     lo, hi = 0.0, vmax
     out[..., :3] = np.clip(out[..., :3], lo, hi)
@@ -275,12 +335,14 @@ def _bilinear_sample(src: np.ndarray, y: np.ndarray, x: np.ndarray) -> np.ndarra
     x1 = np.minimum(x0 + 1, w - 1)
     wy = (y_cl - y0)[..., None]
     wx = (x_cl - x0)[..., None]
-    s = src.astype(np.float64, copy=False)
+    # Gather first, cast after: converting only the sampled neighbours (not the
+    # whole image) keeps small brush stamps O(stamp) instead of O(image).
+    # Integer -> float64 conversion is exact, so results are unchanged.
     return (
-        s[y0, x0] * (1 - wy) * (1 - wx)
-        + s[y0, x1] * (1 - wy) * wx
-        + s[y1, x0] * wy * (1 - wx)
-        + s[y1, x1] * wy * wx
+        src[y0, x0].astype(np.float64) * (1 - wy) * (1 - wx)
+        + src[y0, x1].astype(np.float64) * (1 - wy) * wx
+        + src[y1, x0].astype(np.float64) * wy * (1 - wx)
+        + src[y1, x1].astype(np.float64) * wy * wx
     )
 
 

@@ -11,6 +11,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from inkobold.core.document import Document
 from inkobold.core.grid import GridOverlay
+from inkobold.core.image_meta import constrain_pixels, has_alpha, is_gray
 from inkobold.core.mirror import MirrorModifier
 from inkobold.gpu.renderer import GpuRenderer
 from inkobold.input import InputHub
@@ -193,6 +194,9 @@ class Canvas(Gtk.Overlay):
         return x + ly.offset_x, y + ly.offset_y
 
     def _tick(self) -> bool:
+        if self._input.libinput is None:
+            # Nothing to poll (GDK-only input): stop the 60 Hz idle timer.
+            return False
         doc = self._get_document()
         w = doc.width if doc else 1
         h = doc.height if doc else 1
@@ -333,8 +337,6 @@ class Canvas(Gtk.Overlay):
 
     def _after_tool(self, ctx: ToolContext, tool: object) -> None:
         if getattr(tool, "modifies_pixels", True):
-            from inkobold.core.image_meta import constrain_pixels, has_alpha, is_gray
-
             depth = ctx.document.color_depth
             if is_gray(depth) or not has_alpha(depth):
                 constrain_pixels(ctx.document.active_layer.pixels, depth)

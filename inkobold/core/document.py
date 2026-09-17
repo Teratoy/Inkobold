@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import itertools
 import json
+import uuid
 import zipfile
 from dataclasses import dataclass, field
 from io import BytesIO
@@ -31,23 +33,60 @@ from inkobold.core.image_meta import (
 from inkobold.core.layer import Layer
 
 
-@dataclass
 class Selection:
-    """Binary mask matching document size; 255 = selected."""
+    """Binary mask matching document size; 255 = selected.
 
-    mask: Optional[np.ndarray] = None
+    ``revision`` changes whenever the mask is (re)assigned, so per-frame
+    consumers (GPU upload, ``active`` scans) can skip work when nothing moved.
+    Callers that mutate the mask array in place must call ``bump()``.
+    """
+
+    __slots__ = ("_mask", "revision", "_active_rev", "_active")
+
+    # Process-unique so a revision identifies mask contents even across the
+    # Selection objects that undo/redo swap in.
+    _counter = itertools.count(1)
+
+    def __init__(self, mask: Optional[np.ndarray] = None) -> None:
+        self._mask: Optional[np.ndarray] = mask
+        self.revision = next(Selection._counter)
+        self._active_rev = -1
+        self._active = False
+
+    @property
+    def mask(self) -> Optional[np.ndarray]:
+        return self._mask
+
+    @mask.setter
+    def mask(self, value: Optional[np.ndarray]) -> None:
+        self._mask = value
+        self.revision = next(Selection._counter)
+
+    def bump(self) -> None:
+        """Mark the mask contents as changed (after in-place edits)."""
+        self.revision = next(Selection._counter)
 
     def clear(self) -> None:
         self.mask = None
 
     def ensure(self, width: int, height: int) -> np.ndarray:
-        if self.mask is None or self.mask.shape != (height, width):
+        if self._mask is None or self._mask.shape != (height, width):
             self.mask = np.zeros((height, width), dtype=np.uint8)
-        return self.mask
+        else:
+            self.bump()
+        return self._mask
 
     @property
     def active(self) -> bool:
-        return self.mask is not None and bool(self.mask.any())
+        if self._active_rev != self.revision:
+            m = self._mask
+            self._active = m is not None and bool(m.any())
+            self._active_rev = self.revision
+        return self._active
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        shape = None if self._mask is None else self._mask.shape
+        return f"Selection(mask={shape}, revision={self.revision})"
 
 
 @dataclass
@@ -203,6 +242,7 @@ class Document:
             h, w = src.shape[:2]
             layer.pixels[:h, :w] = src[:h, :w]
             constrain_pixels(layer.pixels, self.color_depth)
+            layer.bump()
         self.layers.append(layer)
         self.active_layer_index = len(self.layers) - 1
         self.dirty = True
@@ -398,13 +438,13 @@ class Document:
         """Axis-aligned bounds of the selection as (x, y, width, height), or None."""
         if not self.selection.active or self.selection.mask is None:
             return None
-        ys, xs = np.nonzero(self.selection.mask)
-        if ys.size == 0:
+        mask = self.selection.mask
+        rows = np.flatnonzero(mask.any(axis=1))
+        if rows.size == 0:
             return None
-        x0 = int(xs.min())
-        y0 = int(ys.min())
-        x1 = int(xs.max())
-        y1 = int(ys.max())
+        cols = np.flatnonzero(mask.any(axis=0))
+        x0, x1 = int(cols[0]), int(cols[-1])
+        y0, y1 = int(rows[0]), int(rows[-1])
         return x0, y0, x1 - x0 + 1, y1 - y0 + 1
 
     def crop(self, x: int, y: int, width: int, height: int) -> None:
@@ -477,7 +517,7 @@ class Document:
             opacity=float(entry.get("opacity", 1.0)),
             offset_x=int(entry.get("offset_x", 0)),
             offset_y=int(entry.get("offset_y", 0)),
-            id=entry.get("id") or __import__("uuid").uuid4().hex[:10],
+            id=entry.get("id") or uuid.uuid4().hex[:10],
             color_depth=depth,
         )
         raw = zf.read(entry["file"])
@@ -610,6 +650,7 @@ class Document:
                 canvas[:hh, :ww] = rgba[:hh, :ww]
                 rgba = canvas
             fr.layers[0].pixels[:] = rgba
+            fr.layers[0].bump()
             frames.append(fr)
 
         doc = cls(width=width, height=height, color_depth=COLOR_DEPTH_RGBA32)
@@ -632,6 +673,7 @@ class Document:
             arr = np.array(img, dtype=np.uint8)
             doc = cls.blank(img.width, img.height, name=path.stem)
             doc.layers[0].pixels[:] = arr
+            doc.layers[0].bump()
             doc.path = path
             doc.dirty = False
             return doc
@@ -707,7 +749,6 @@ class Document:
                 max_v = 255.0
             else:
                 max_v = float(np.iinfo(ly.pixels.dtype).max)
-            src = ly.pixels.astype(np.float32) / max_v
             ox, oy = int(ly.offset_x), int(ly.offset_y)
             sx0 = max(0, -ox)
             sy0 = max(0, -oy)
@@ -717,7 +758,8 @@ class Document:
             sy1 = min(ly.height, self.height - oy)
             if sx1 <= sx0 or sy1 <= sy0:
                 continue
-            tile = src[sy0:sy1, sx0:sx1]
+            # Convert only the visible tile (not the whole layer) to float.
+            tile = ly.pixels[sy0:sy1, sx0:sx1].astype(np.float32) / max_v
             a = tile[..., 3:4] * ly.opacity
             dest = out[dy0 : dy0 + (sy1 - sy0), dx0 : dx0 + (sx1 - sx0)]
             dest[..., :3] = tile[..., :3] * a + dest[..., :3] * (1.0 - a)

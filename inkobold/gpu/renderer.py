@@ -8,6 +8,7 @@ import numpy as np
 from OpenGL import GL
 
 from inkobold.core.document import Document
+from inkobold.core.image_meta import to_display_u8
 
 VERT_BODY = """
 layout(location = 0) in vec2 a_pos;
@@ -114,6 +115,9 @@ def _gl_string(name: int) -> str:
     return str(raw)
 
 
+_COMMON_UNIFORMS = ("u_view_size", "u_doc_size", "u_pan", "u_zoom", "u_layer_offset")
+
+
 class GpuRenderer:
     def __init__(self) -> None:
         self.ready = False
@@ -125,7 +129,15 @@ class GpuRenderer:
         self.vbo = 0
         self.textures: dict[str, int] = {}
         self.tex_stamps: dict[str, int] = {}
+        # Allocated (w, h) per texture so re-uploads can use glTexSubImage2D
+        # (no driver-side reallocation) when the layer size is unchanged.
+        self.tex_sizes: dict[str, tuple[int, int]] = {}
         self.sel_tex = 0
+        self._sel_size: tuple[int, int] | None = None
+        self._sel_stamp: int | None = None
+        self._sel_use_rgba = False
+        # program id -> {uniform name -> location}
+        self._uniforms: dict[int, dict[str, int]] = {}
         self.view_w = 1
         self.view_h = 1
         self.pan_x = 40.0
@@ -133,6 +145,15 @@ class GpuRenderer:
         self.zoom = 1.0
         self.checker_light = False
         self.init_error: str | None = None
+
+    def _loc(self, prog: int, name: str) -> int:
+        table = self._uniforms.get(prog)
+        if table is None:
+            table = self._uniforms[prog] = {}
+        loc = table.get(name)
+        if loc is None:
+            loc = table[name] = int(GL.glGetUniformLocation(prog, name))
+        return loc
 
     def init_gl(self) -> None:
         version = _gl_string(GL.GL_VERSION)
@@ -183,11 +204,14 @@ class GpuRenderer:
 
         GL.glEnable(GL.GL_BLEND)
         GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        self._uniforms.clear()
         self.ready = True
         self.init_error = None
 
     def _tex_for(self, key: str) -> int:
-        if key not in self.textures:
+        tid = self.textures.get(key)
+        if tid is None:
             tid = int(GL.glGenTextures(1))
             GL.glBindTexture(GL.GL_TEXTURE_2D, tid)
             GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
@@ -195,72 +219,93 @@ class GpuRenderer:
             GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
             GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
             self.textures[key] = tid
-        return self.textures[key]
+        return tid
 
     def upload_layer(self, layer_id: str, pixels: np.ndarray, stamp: int) -> None:
         if self.tex_stamps.get(layer_id) == stamp:
             return
         tid = self._tex_for(layer_id)
         h, w = pixels.shape[:2]
-        from inkobold.core.image_meta import to_display_u8
-
         contiguous = np.ascontiguousarray(to_display_u8(pixels))
         GL.glBindTexture(GL.GL_TEXTURE_2D, tid)
         GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
-        GL.glTexImage2D(
-            GL.GL_TEXTURE_2D,
-            0,
-            GL.GL_RGBA,
-            w,
-            h,
-            0,
-            GL.GL_RGBA,
-            GL.GL_UNSIGNED_BYTE,
-            contiguous,
-        )
+        if self.tex_sizes.get(layer_id) == (w, h):
+            # Same storage: update in place instead of reallocating the texture.
+            GL.glTexSubImage2D(
+                GL.GL_TEXTURE_2D, 0, 0, 0, w, h, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, contiguous
+            )
+        else:
+            GL.glTexImage2D(
+                GL.GL_TEXTURE_2D,
+                0,
+                GL.GL_RGBA,
+                w,
+                h,
+                0,
+                GL.GL_RGBA,
+                GL.GL_UNSIGNED_BYTE,
+                contiguous,
+            )
+            self.tex_sizes[layer_id] = (w, h)
         self.tex_stamps[layer_id] = stamp
 
-    def upload_selection(self, mask: Optional[np.ndarray]) -> None:
+    def upload_selection(self, mask: Optional[np.ndarray], stamp: int | None = None) -> None:
+        """Upload the selection mask; skipped when ``stamp`` matches the last upload."""
         if mask is None:
+            return
+        if stamp is not None and stamp == self._sel_stamp:
             return
         h, w = mask.shape
         contiguous = np.ascontiguousarray(mask)
         GL.glBindTexture(GL.GL_TEXTURE_2D, self.sel_tex)
         GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
-        # GL_R8 / GL_RED can be flaky on some GLES; use RGBA upload of expanded mask if needed
-        try:
-            GL.glTexImage2D(
-                GL.GL_TEXTURE_2D,
-                0,
-                GL.GL_R8,
-                w,
-                h,
-                0,
-                GL.GL_RED,
-                GL.GL_UNSIGNED_BYTE,
-                contiguous,
-            )
-        except Exception:
-            rgba = np.zeros((h, w, 4), dtype=np.uint8)
-            rgba[..., 0] = contiguous
-            rgba[..., 3] = contiguous
-            GL.glTexImage2D(
-                GL.GL_TEXTURE_2D,
-                0,
-                GL.GL_RGBA,
-                w,
-                h,
-                0,
-                GL.GL_RGBA,
-                GL.GL_UNSIGNED_BYTE,
-                rgba,
-            )
+        same_size = self._sel_size == (w, h)
+        if not self._sel_use_rgba:
+            # GL_R8 / GL_RED can be flaky on some GLES; fall back to an RGBA
+            # upload of the expanded mask (and remember that for next time).
+            try:
+                if same_size:
+                    GL.glTexSubImage2D(
+                        GL.GL_TEXTURE_2D, 0, 0, 0, w, h, GL.GL_RED, GL.GL_UNSIGNED_BYTE, contiguous
+                    )
+                else:
+                    GL.glTexImage2D(
+                        GL.GL_TEXTURE_2D, 0, GL.GL_R8, w, h, 0, GL.GL_RED, GL.GL_UNSIGNED_BYTE, contiguous
+                    )
+                self._sel_size = (w, h)
+                self._sel_stamp = stamp
+                return
+            except Exception:
+                self._sel_use_rgba = True
+                same_size = False
+        rgba = np.zeros((h, w, 4), dtype=np.uint8)
+        rgba[..., 0] = contiguous
+        rgba[..., 3] = contiguous
+        if same_size:
+            GL.glTexSubImage2D(GL.GL_TEXTURE_2D, 0, 0, 0, w, h, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, rgba)
+        else:
+            GL.glTexImage2D(GL.GL_TEXTURE_2D, 0, GL.GL_RGBA, w, h, 0, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, rgba)
+        self._sel_size = (w, h)
+        self._sel_stamp = stamp
 
     def invalidate(self, layer_id: str | None = None) -> None:
         if layer_id is None:
             self.tex_stamps.clear()
+            self._sel_stamp = None
         else:
             self.tex_stamps.pop(layer_id, None)
+
+    def prune_textures(self, keep: set[str]) -> None:
+        """Free GPU textures for layers that no longer exist in the document."""
+        dead = [key for key in self.textures if key not in keep]
+        if not dead:
+            return
+        ids = np.array([self.textures[k] for k in dead], dtype=np.uint32)
+        GL.glDeleteTextures(len(dead), ids)
+        for k in dead:
+            del self.textures[k]
+            self.tex_stamps.pop(k, None)
+            self.tex_sizes.pop(k, None)
 
     def set_view(self, w: int, h: int) -> None:
         self.view_w = max(1, w)
@@ -303,63 +348,73 @@ class GpuRenderer:
             checker_b = (0.10, 0.10, 0.10)
         GL.glClear(GL.GL_COLOR_BUFFER_BIT)
         GL.glBindVertexArray(self.vao)
+        GL.glActiveTexture(GL.GL_TEXTURE0)
+
+        view_w, view_h = float(self.view_w), float(self.view_h)
+        doc_w, doc_h = float(doc.width), float(doc.height)
+        pan_x, pan_y, zoom = float(self.pan_x), float(self.pan_y), float(self.zoom)
+        loc = self._loc
 
         def set_common(prog: int, ox: float = 0.0, oy: float = 0.0) -> None:
             GL.glUseProgram(prog)
-            GL.glUniform2f(GL.glGetUniformLocation(prog, "u_view_size"), float(self.view_w), float(self.view_h))
-            GL.glUniform2f(GL.glGetUniformLocation(prog, "u_doc_size"), float(doc.width), float(doc.height))
-            GL.glUniform2f(GL.glGetUniformLocation(prog, "u_pan"), float(self.pan_x), float(self.pan_y))
-            GL.glUniform1f(GL.glGetUniformLocation(prog, "u_zoom"), float(self.zoom))
-            GL.glUniform2f(GL.glGetUniformLocation(prog, "u_layer_offset"), ox, oy)
+            GL.glUniform2f(loc(prog, "u_view_size"), view_w, view_h)
+            GL.glUniform2f(loc(prog, "u_doc_size"), doc_w, doc_h)
+            GL.glUniform2f(loc(prog, "u_pan"), pan_x, pan_y)
+            GL.glUniform1f(loc(prog, "u_zoom"), zoom)
+            GL.glUniform2f(loc(prog, "u_layer_offset"), ox, oy)
+
+        prog_layer = self.prog_layer
+        loc_tex = loc(prog_layer, "u_tex")
+        loc_opacity = loc(prog_layer, "u_opacity")
+        loc_offset = loc(prog_layer, "u_layer_offset")
 
         def draw_layers(layers, opacity_scale: float = 1.0) -> None:
             if opacity_scale <= 0.001:
                 return
+            first = True
             for ly in layers:
                 if not ly.visible:
                     continue
                 self.upload_layer(ly.id, ly.pixels, ly.dirty_stamp())
-                set_common(self.prog_layer, float(ly.offset_x), float(ly.offset_y))
-                GL.glActiveTexture(GL.GL_TEXTURE0)
+                if first:
+                    # View uniforms are shared by every layer; set them once.
+                    set_common(prog_layer, float(ly.offset_x), float(ly.offset_y))
+                    GL.glUniform1i(loc_tex, 0)
+                    first = False
+                else:
+                    GL.glUniform2f(loc_offset, float(ly.offset_x), float(ly.offset_y))
                 GL.glBindTexture(GL.GL_TEXTURE_2D, self.textures[ly.id])
-                GL.glUniform1i(GL.glGetUniformLocation(self.prog_layer, "u_tex"), 0)
-                GL.glUniform1f(
-                    GL.glGetUniformLocation(self.prog_layer, "u_opacity"),
-                    float(ly.opacity) * float(opacity_scale),
-                )
+                GL.glUniform1f(loc_opacity, float(ly.opacity) * float(opacity_scale))
                 GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
 
         set_common(self.prog_checker)
-        GL.glUniform3f(
-            GL.glGetUniformLocation(self.prog_checker, "u_checker_a"),
-            *checker_a,
-        )
-        GL.glUniform3f(
-            GL.glGetUniformLocation(self.prog_checker, "u_checker_b"),
-            *checker_b,
-        )
+        GL.glUniform3f(loc(self.prog_checker, "u_checker_a"), *checker_a)
+        GL.glUniform3f(loc(self.prog_checker, "u_checker_b"), *checker_b)
         GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
 
         # Onion skin: previous frame faintly under the current cel while editing
-        show_onion = (
-            (not playing)
-            and bool(getattr(doc, "onion_skin", True))
-            and float(getattr(doc, "onion_opacity", 0.0)) > 0.001
-        )
+        show_onion = (not playing) and bool(doc.onion_skin) and float(doc.onion_opacity) > 0.001
         if show_onion:
-            prev = doc.previous_frame() if hasattr(doc, "previous_frame") else None
+            prev = doc.previous_frame()
             if prev is not None and prev.layers:
                 draw_layers(prev.layers, opacity_scale=float(doc.onion_opacity))
 
         draw_layers(doc.layers, opacity_scale=1.0)
 
-        if doc.selection.active and doc.selection.mask is not None:
-            self.upload_selection(doc.selection.mask)
+        sel = doc.selection
+        if sel.active and sel.mask is not None:
+            self.upload_selection(sel.mask, sel.revision)
             set_common(self.prog_sel)
-            GL.glActiveTexture(GL.GL_TEXTURE0)
             GL.glBindTexture(GL.GL_TEXTURE_2D, self.sel_tex)
-            GL.glUniform1i(GL.glGetUniformLocation(self.prog_sel, "u_tex"), 0)
+            GL.glUniform1i(loc(self.prog_sel, "u_tex"), 0)
             GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
 
         GL.glBindVertexArray(0)
         GL.glUseProgram(0)
+
+        # Drop textures for layers that no longer exist anywhere in the document
+        # (deleted layers / frames, undo). Cheap: one set build per frame.
+        if len(self.textures) > sum(len(fr.layers) for fr in doc.frames):
+            keep = {ly.id for fr in doc.frames for ly in fr.layers}
+            keep.update(ly.id for ly in doc.layers)
+            self.prune_textures(keep)

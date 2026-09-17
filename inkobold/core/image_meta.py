@@ -35,10 +35,12 @@ def is_gray(depth: int) -> bool:
     return int(depth) == COLOR_DEPTH_GRAY8
 
 
+_ALLOWED_DEPTHS = frozenset(d for d, _ in COLOR_DEPTH_CHOICES)
+
+
 def valid_color_depth(depth: int) -> int:
-    allowed = {d for d, _ in COLOR_DEPTH_CHOICES}
     d = int(depth)
-    return d if d in allowed else COLOR_DEPTH_RGBA32
+    return d if d in _ALLOWED_DEPTHS else COLOR_DEPTH_RGBA32
 
 
 def scale_u8_color(color: tuple[int, int, int, int], depth: int) -> tuple[int, int, int, int]:
@@ -75,13 +77,20 @@ def constrain_pixels(pixels: np.ndarray, depth: int) -> None:
     depth = valid_color_depth(depth)
     max_v = channel_max(depth)
     if is_gray(depth):
-        # Rec. 601 luma in channel units
-        y = (
-            0.299 * pixels[..., 0].astype(np.float64)
-            + 0.587 * pixels[..., 1].astype(np.float64)
-            + 0.114 * pixels[..., 2].astype(np.float64)
-        )
-        y = np.clip(np.rint(y), 0, max_v).astype(pixels.dtype)
+        # Rec. 601 luma in channel units, computed in fixed point
+        # ((299R + 587G + 114B + 500) // 1000). This runs on the whole active
+        # layer after every paint event, so avoid the three float64 temporaries.
+        # The weights sum to 1000, so the result never exceeds max_v and the
+        # operation is idempotent on already-gray pixels.
+        y = pixels[..., 0].astype(np.uint32)
+        y *= 299
+        y += pixels[..., 1].astype(np.uint32) * 587
+        y += pixels[..., 2].astype(np.uint32) * 114
+        y += 500
+        y //= 1000
+        if pixels.dtype != np.uint8:
+            np.minimum(y, max_v, out=y)
+        y = y.astype(pixels.dtype)
         pixels[..., 0] = y
         pixels[..., 1] = y
         pixels[..., 2] = y
@@ -118,5 +127,15 @@ def to_display_u8(pixels: np.ndarray) -> np.ndarray:
     """Downconvert any layer buffer to uint8 RGBA for GPU preview / 8-bit export helpers."""
     if pixels.dtype == np.uint8:
         return np.ascontiguousarray(pixels)
+    if pixels.dtype == np.uint16:
+        # Round-to-nearest in fixed point: (p * 255 + 32767) // 65535. A tie
+        # (p*255/65535 == n + 0.5) would need 2*255*p == 65535*(2n+1), which is
+        # even == odd — impossible — so this matches rint() exactly while
+        # avoiding the float64 temporaries on every GPU upload.
+        y = pixels.astype(np.uint32)
+        y *= 255
+        y += 32767
+        y //= 65535
+        return y.astype(np.uint8)
     max_v = float(np.iinfo(pixels.dtype).max)
     return np.clip(np.rint(pixels.astype(np.float64) * (255.0 / max_v)), 0, 255).astype(np.uint8)

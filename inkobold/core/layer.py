@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import itertools
 import uuid
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from inkobold.core.image_meta import COLOR_DEPTH_RGBA32, storage_dtype, valid_color_depth
+
+# Process-wide monotonic revision source. Every bump() yields a value never
+# handed out before, so (layer.id, layer.revision) uniquely identifies a pixel
+# state even across undo/redo (which recreates Layer objects with the same id).
+# GPU texture and history-snapshot caches rely on this.
+_revision_counter = itertools.count(1)
+
+
+def next_revision() -> int:
+    return next(_revision_counter)
 
 
 @dataclass
@@ -29,13 +40,14 @@ class Layer:
             (self.height, self.width, 4),
             dtype=storage_dtype(self.color_depth),
         )
+        self.revision = next_revision()
 
     def clear(self) -> None:
         self.pixels.fill(0)
         self.bump()
 
     def bump(self) -> None:
-        self.revision += 1
+        self.revision = next_revision()
 
     def resize_canvas(self, width: int, height: int) -> None:
         """Top-left crop or pad to a new document size."""

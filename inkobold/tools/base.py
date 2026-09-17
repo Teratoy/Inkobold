@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from inkobold.core.document import Document
+from inkobold.core.image_meta import prepare_paint_color, scale_threshold
 
 
 @dataclass
@@ -122,13 +123,9 @@ class BaseTool:
 
     def _paint_color(self, ctx: ToolContext) -> tuple[int, int, int, int]:
         """Tool color scaled to document depth, with opacity on alpha."""
-        from inkobold.core.image_meta import prepare_paint_color
-
         r, g, b, a = ctx.color
         color = (r, g, b, int(round(a * self._opacity_factor(ctx))))
         return prepare_paint_color(color, ctx.document.color_depth)
 
     def _threshold(self, ctx: ToolContext) -> int:
-        from inkobold.core.image_meta import scale_threshold
-
         return scale_threshold(int(ctx.threshold), ctx.document.color_depth)

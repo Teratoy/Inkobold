@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import math
 
 import numpy as np
@@ -10,6 +11,22 @@ from PIL import Image
 
 def _max_v(pixels: np.ndarray) -> float:
     return 65535.0 if pixels.dtype == np.uint16 else 255.0
+
+
+# Direct ufunc calls: ``np.clip`` is a thin Python wrapper around exactly
+# minimum(maximum(x, lo), hi) but costs several microseconds per call, which
+# adds up at ~1000 stamps per fast stroke.
+_maximum = np.maximum
+_minimum = np.minimum
+
+
+def _clip(a: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    return _minimum(_maximum(a, lo), hi)
+
+
+def _grid(y0: int, y1: int, x0: int, x1: int) -> tuple[np.ndarray, np.ndarray]:
+    """Broadcastable (yy, xx) integer coordinate columns/rows (like ``np.ogrid``, cheaper)."""
+    return np.arange(y0, y1)[:, None], np.arange(x0, x1)[None, :]
 
 
 def stamp_disk(
@@ -33,16 +50,21 @@ def stamp_disk(
     y1 = min(h, int(y + r + 2))
     if x0 >= x1 or y0 >= y1:
         return
-    yy, xx = np.ogrid[y0:y1, x0:x1]
+    op = min(1.0, max(0.0, float(opacity)))
+    if op <= 0.0:
+        return
+    yy, xx = _grid(y0, y1, x0, x1)
     dist = np.sqrt((xx + 0.5 - x) ** 2 + (yy + 0.5 - y) ** 2)
-    cov = np.clip(1.0 - (dist - (r - 0.5)), 0.0, 1.0)
+    cov = _clip(1.0 - (dist - (r - 0.5)), 0.0, 1.0)
     if mask is not None:
         cov = cov * (mask[y0:y1, x0:x1] > 0).astype(np.float32)
-    op = float(np.clip(opacity, 0.0, 1.0))
-    if op <= 0.0 or not np.any(cov):
+    if not cov.any():
         return
-    patch = pixels[y0:y1, x0:x1].astype(np.float32)
     max_v = _max_v(pixels)
+    region = pixels[y0:y1, x0:x1]
+    needs_rgb = not erase or (key_color is not None and threshold is not None)
+    # Erasing only touches alpha; skip converting RGB unless a colour key needs it.
+    patch = region.astype(np.float32) if needs_rgb else None
 
     # Optional color match weight (0..1) for thresholded erase / replace
     if key_color is not None and threshold is not None:
@@ -54,24 +76,27 @@ def stamp_disk(
             match = (np.max(np.abs(patch - key), axis=2) < 0.5).astype(np.float32)
         else:
             diff = np.max(np.abs(patch - key), axis=2)
-            match = np.clip(1.0 - diff / float(tol), 0.0, 1.0)
+            match = _clip(1.0 - diff / float(tol), 0.0, 1.0)
         strength = cov * match * op
     else:
         strength = cov * op
 
     if erase:
-        patch[..., 3] *= 1.0 - strength
+        alpha = region[..., 3].astype(np.float32)
+        alpha *= 1.0 - strength
+        region[..., 3] = _clip(alpha, 0, max_v).astype(pixels.dtype)
+        return
     elif replace:
         src = np.array(color, dtype=np.float32)
         a = (src[3] / max_v) * strength[..., None]
         patch[..., :3] = src[:3] * a + patch[..., :3] * (1.0 - a)
-        patch[..., 3:4] = np.maximum(patch[..., 3:4], src[3] * a)
+        patch[..., 3:4] = _maximum(patch[..., 3:4], src[3] * a)
     else:
         src = np.array(color, dtype=np.float32)
         a = (src[3] / max_v) * strength[..., None]
         patch[..., :3] = src[:3] * a + patch[..., :3] * (1.0 - a)
         patch[..., 3:4] = src[3] * a + patch[..., 3:4] * (1.0 - a)
-    pixels[y0:y1, x0:x1] = np.clip(patch, 0, _max_v(pixels)).astype(pixels.dtype)
+    region[...] = _clip(patch, 0, max_v).astype(pixels.dtype)
 
 
 def stroke_segment(
@@ -1246,9 +1271,9 @@ def smear_stamp(
     y1 = y0 + (tip_y1 - tip_y0)
     x1 = x0 + (tip_x1 - tip_x0)
 
-    yy, xx = np.ogrid[y0:y1, x0:x1]
+    yy, xx = _grid(y0, y1, x0, x1)
     dist = np.sqrt((xx + 0.5 - x) ** 2 + (yy + 0.5 - y) ** 2)
-    falloff = np.clip(1.0 - dist / r, 0.0, 1.0).astype(np.float32)
+    falloff = _clip(1.0 - dist / r, 0.0, 1.0).astype(np.float32)
     if mask is not None:
         falloff *= (mask[y0:y1, x0:x1] > 0).astype(np.float32)
     if not np.any(falloff):
@@ -1295,7 +1320,7 @@ def background_erase_stroke(
         yb = min(h, int(y + r + 2))
         if xa >= xb or ya >= yb:
             continue
-        yy, xx = np.ogrid[ya:yb, xa:xb]
+        yy, xx = _grid(ya, yb, xa, xb)
         disk = np.sqrt((xx + 0.5 - x) ** 2 + (yy + 0.5 - y) ** 2) <= r
         patch = pixels[ya:yb, xa:xb]
         diff = np.max(np.abs(patch[..., :3].astype(np.int32) - key), axis=2)
@@ -1323,7 +1348,9 @@ def fill_polygon_mask(mask: np.ndarray, points: list[tuple[float, float]]) -> No
     mask[:] = np.array(img, dtype=np.uint8)
 
 
+@functools.lru_cache(maxsize=32)
 def _load_truetype(font_path: str | None, size: int):
+    """Load (and cache) a font face; the Type tool calls this on every keystroke."""
     from PIL import ImageFont
 
     size = max(1, int(size))

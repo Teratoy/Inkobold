@@ -18,20 +18,32 @@ _CORNER_LOCAL = (
 )
 
 
+def _bool_bounds(m: np.ndarray) -> tuple[int, int, int, int] | None:
+    """(x0, y0, x1_inclusive, y1_inclusive) of True cells, or None if empty.
+
+    Uses row/column reductions instead of materialising every nonzero index.
+    """
+    rows = np.flatnonzero(m.any(axis=1))
+    if rows.size == 0:
+        return None
+    cols = np.flatnonzero(m.any(axis=0))
+    return int(cols[0]), int(rows[0]), int(cols[-1]), int(rows[-1])
+
+
 def layer_content_box(ly) -> tuple[float, float, float, float, float]:
     """Axis-aligned content box in document space: (cx, cy, w, h, angle=0)."""
-    alpha = ly.pixels[..., 3]
-    ys, xs = np.nonzero(alpha)
     ox = float(ly.offset_x)
     oy = float(ly.offset_y)
-    if ys.size == 0:
+    bounds = _bool_bounds(ly.pixels[..., 3] != 0)
+    if bounds is None:
         w = float(max(1, ly.width))
         h = float(max(1, ly.height))
         return ox + w * 0.5, oy + h * 0.5, w, h, 0.0
-    x0 = float(xs.min()) + ox
-    y0 = float(ys.min()) + oy
-    x1 = float(xs.max()) + ox + 1.0
-    y1 = float(ys.max()) + oy + 1.0
+    bx0, by0, bx1, by1 = bounds
+    x0 = float(bx0) + ox
+    y0 = float(by0) + oy
+    x1 = float(bx1) + ox + 1.0
+    y1 = float(by1) + oy + 1.0
     w = max(1.0, x1 - x0)
     h = max(1.0, y1 - y0)
     return x0 + w * 0.5, y0 + h * 0.5, w, h, 0.0
@@ -58,21 +70,23 @@ def selection_content_box(
         inb = (lx >= 0) & (lx < w) & (ly_i >= 0) & (ly_i < h)
         if inb.any():
             usable[ly_i[inb], lx[inb]] = alpha[ly_i[inb], lx[inb]]
-    if not usable.any():
+    bounds = _bool_bounds(usable)
+    if bounds is None:
         # Fall back to selection AABB in document space.
-        ys, xs = np.nonzero(m)
-        if ys.size == 0:
+        bounds = _bool_bounds(m)
+        if bounds is None:
             return layer_content_box(ly)
-        x0 = float(xs.min())
-        y0 = float(ys.min())
-        x1 = float(xs.max()) + 1.0
-        y1 = float(ys.max()) + 1.0
+        bx0, by0, bx1, by1 = bounds
+        x0 = float(bx0)
+        y0 = float(by0)
+        x1 = float(bx1) + 1.0
+        y1 = float(by1) + 1.0
     else:
-        ys, xs = np.nonzero(usable)
-        x0 = float(xs.min()) + float(ox)
-        y0 = float(ys.min()) + float(oy)
-        x1 = float(xs.max()) + float(ox) + 1.0
-        y1 = float(ys.max()) + float(oy) + 1.0
+        bx0, by0, bx1, by1 = bounds
+        x0 = float(bx0) + float(ox)
+        y0 = float(by0) + float(oy)
+        x1 = float(bx1) + float(ox) + 1.0
+        y1 = float(by1) + float(oy) + 1.0
     w = max(1.0, x1 - x0)
     h = max(1.0, y1 - y0)
     return x0 + w * 0.5, y0 + h * 0.5, w, h, 0.0
@@ -228,6 +242,9 @@ class TransformTool(BaseTool):
         self._source_mask: Optional[np.ndarray] = None
         self._base: Optional[np.ndarray] = None  # unselected pixels when clipping
         self._box_valid = False
+        # Identity of the (layer, selection) state the idle box was computed
+        # from; lets guide redraws skip the full-layer content scan.
+        self._box_key: Optional[tuple] = None
 
     def set_view_scale(self, zoom: float) -> None:
         self._view_scale = max(1e-6, float(zoom))
@@ -242,11 +259,16 @@ class TransformTool(BaseTool):
             return
         ly = ctx.document.active_layer
         sel = ctx.document.selection
-        if sel.active and sel.mask is not None:
+        use_sel = sel.active and sel.mask is not None
+        key = (ly.id, ly.revision, ly.offset_x, ly.offset_y, sel.revision if use_sel else None)
+        if self._box_valid and key == self._box_key:
+            return
+        if use_sel:
             self._cx, self._cy, self._w, self._h, self._angle = selection_content_box(ly, sel.mask)
         else:
             self._cx, self._cy, self._w, self._h, self._angle = layer_content_box(ly)
         self._box_valid = True
+        self._box_key = key
 
     def guide_box(self) -> Optional[tuple[float, float, float, float, float]]:
         if not self._box_valid:
@@ -477,6 +499,7 @@ class TransformTool(BaseTool):
         self._source_mask = None
         self._base = None
         self._box_valid = False
+        self._box_key = None
         self.modifies_pixels = False
 
 
