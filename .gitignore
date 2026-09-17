@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.inkobold
+*.scribbler
+.pytest_cache/
+dist/
+*.egg-info/
+.tools/
+.directory

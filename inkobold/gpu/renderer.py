@@ -1,0 +1,365 @@
+"""OpenGL / OpenGL ES compositor for layered RGBA documents."""
+
+from __future__ import annotations
+
+from typing import Optional
+
+import numpy as np
+from OpenGL import GL
+
+from inkobold.core.document import Document
+
+VERT_BODY = """
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+uniform vec2 u_view_size;
+uniform vec2 u_doc_size;
+uniform vec2 u_pan;
+uniform float u_zoom;
+uniform vec2 u_layer_offset;
+out vec2 v_uv;
+void main() {
+    vec2 pixel = a_pos * u_doc_size + u_layer_offset;
+    vec2 screen = (pixel * u_zoom) + u_pan;
+    vec2 ndc = vec2(
+        (screen.x / u_view_size.x) * 2.0 - 1.0,
+        1.0 - (screen.y / u_view_size.y) * 2.0
+    );
+    gl_Position = vec4(ndc, 0.0, 1.0);
+    v_uv = a_uv;
+}
+"""
+
+FRAG_LAYER_BODY = """
+in vec2 v_uv;
+uniform sampler2D u_tex;
+uniform float u_opacity;
+out vec4 frag;
+void main() {
+    vec4 c = texture(u_tex, v_uv);
+    frag = vec4(c.rgb, c.a * u_opacity);
+}
+"""
+
+FRAG_CHECKER_BODY = """
+in vec2 v_uv;
+uniform vec2 u_doc_size;
+uniform float u_zoom;
+uniform vec3 u_checker_a;
+uniform vec3 u_checker_b;
+out vec4 frag;
+void main() {
+    vec2 p = v_uv * u_doc_size;
+    float cell = 16.0;
+    vec2 g = floor(p / cell);
+    float checker = mod(g.x + g.y, 2.0);
+    frag = vec4(mix(u_checker_a, u_checker_b, checker), 1.0);
+}
+"""
+
+FRAG_SEL_BODY = """
+in vec2 v_uv;
+uniform sampler2D u_tex;
+out vec4 frag;
+void main() {
+    float m = texture(u_tex, v_uv).r;
+    if (m < 0.5) discard;
+    float march = step(0.5, fract((gl_FragCoord.x + gl_FragCoord.y) * 0.08));
+    frag = vec4(0.9, 0.9, 0.95, 0.35 * march + 0.15);
+}
+"""
+
+
+def _prelude(es: bool) -> str:
+    if es:
+        return "#version 300 es\nprecision highp float;\nprecision highp int;\nprecision highp sampler2D;\n"
+    return "#version 330 core\n"
+
+
+def _compile(src: str, kind: int) -> int:
+    sid = GL.glCreateShader(kind)
+    GL.glShaderSource(sid, src)
+    GL.glCompileShader(sid)
+    if not GL.glGetShaderiv(sid, GL.GL_COMPILE_STATUS):
+        log = GL.glGetShaderInfoLog(sid)
+        if isinstance(log, bytes):
+            log = log.decode(errors="replace")
+        raise RuntimeError(log)
+    return sid
+
+
+def _program(vert: str, frag: str) -> int:
+    vs = _compile(vert, GL.GL_VERTEX_SHADER)
+    fs = _compile(frag, GL.GL_FRAGMENT_SHADER)
+    prog = GL.glCreateProgram()
+    GL.glAttachShader(prog, vs)
+    GL.glAttachShader(prog, fs)
+    GL.glLinkProgram(prog)
+    GL.glDeleteShader(vs)
+    GL.glDeleteShader(fs)
+    if not GL.glGetProgramiv(prog, GL.GL_LINK_STATUS):
+        log = GL.glGetProgramInfoLog(prog)
+        if isinstance(log, bytes):
+            log = log.decode(errors="replace")
+        raise RuntimeError(log)
+    return prog
+
+
+def _gl_string(name: int) -> str:
+    raw = GL.glGetString(name)
+    if raw is None:
+        return ""
+    if isinstance(raw, bytes):
+        return raw.decode(errors="replace")
+    return str(raw)
+
+
+class GpuRenderer:
+    def __init__(self) -> None:
+        self.ready = False
+        self.es = False
+        self.prog_layer = 0
+        self.prog_checker = 0
+        self.prog_sel = 0
+        self.vao = 0
+        self.vbo = 0
+        self.textures: dict[str, int] = {}
+        self.tex_stamps: dict[str, int] = {}
+        self.sel_tex = 0
+        self.view_w = 1
+        self.view_h = 1
+        self.pan_x = 40.0
+        self.pan_y = 40.0
+        self.zoom = 1.0
+        self.checker_light = False
+        self.init_error: str | None = None
+
+    def init_gl(self) -> None:
+        version = _gl_string(GL.GL_VERSION)
+        self.es = "ES" in version.upper()
+        pre = _prelude(self.es)
+        try:
+            self.prog_layer = _program(pre + VERT_BODY, pre + FRAG_LAYER_BODY)
+            self.prog_checker = _program(pre + VERT_BODY, pre + FRAG_CHECKER_BODY)
+            self.prog_sel = _program(pre + VERT_BODY, pre + FRAG_SEL_BODY)
+        except RuntimeError as exc:
+            # Retry the other dialect if the first guess was wrong
+            self.es = not self.es
+            pre = _prelude(self.es)
+            try:
+                self.prog_layer = _program(pre + VERT_BODY, pre + FRAG_LAYER_BODY)
+                self.prog_checker = _program(pre + VERT_BODY, pre + FRAG_CHECKER_BODY)
+                self.prog_sel = _program(pre + VERT_BODY, pre + FRAG_SEL_BODY)
+            except RuntimeError as exc2:
+                self.init_error = f"{exc} | retry: {exc2}"
+                raise RuntimeError(self.init_error) from exc2
+
+        verts = np.array(
+            [
+                0, 0, 0, 0,
+                1, 0, 1, 0,
+                0, 1, 0, 1,
+                1, 1, 1, 1,
+            ],
+            dtype=np.float32,
+        )
+        self.vao = int(GL.glGenVertexArrays(1))
+        self.vbo = int(GL.glGenBuffers(1))
+        GL.glBindVertexArray(self.vao)
+        GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo)
+        GL.glBufferData(GL.GL_ARRAY_BUFFER, verts.nbytes, verts, GL.GL_STATIC_DRAW)
+        GL.glEnableVertexAttribArray(0)
+        GL.glVertexAttribPointer(0, 2, GL.GL_FLOAT, GL.GL_FALSE, 16, GL.ctypes.c_void_p(0))
+        GL.glEnableVertexAttribArray(1)
+        GL.glVertexAttribPointer(1, 2, GL.GL_FLOAT, GL.GL_FALSE, 16, GL.ctypes.c_void_p(8))
+        GL.glBindVertexArray(0)
+
+        self.sel_tex = int(GL.glGenTextures(1))
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.sel_tex)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+        GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+
+        GL.glEnable(GL.GL_BLEND)
+        GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
+        self.ready = True
+        self.init_error = None
+
+    def _tex_for(self, key: str) -> int:
+        if key not in self.textures:
+            tid = int(GL.glGenTextures(1))
+            GL.glBindTexture(GL.GL_TEXTURE_2D, tid)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MIN_FILTER, GL.GL_NEAREST)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_MAG_FILTER, GL.GL_NEAREST)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_S, GL.GL_CLAMP_TO_EDGE)
+            GL.glTexParameteri(GL.GL_TEXTURE_2D, GL.GL_TEXTURE_WRAP_T, GL.GL_CLAMP_TO_EDGE)
+            self.textures[key] = tid
+        return self.textures[key]
+
+    def upload_layer(self, layer_id: str, pixels: np.ndarray, stamp: int) -> None:
+        if self.tex_stamps.get(layer_id) == stamp:
+            return
+        tid = self._tex_for(layer_id)
+        h, w = pixels.shape[:2]
+        from inkobold.core.image_meta import to_display_u8
+
+        contiguous = np.ascontiguousarray(to_display_u8(pixels))
+        GL.glBindTexture(GL.GL_TEXTURE_2D, tid)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        GL.glTexImage2D(
+            GL.GL_TEXTURE_2D,
+            0,
+            GL.GL_RGBA,
+            w,
+            h,
+            0,
+            GL.GL_RGBA,
+            GL.GL_UNSIGNED_BYTE,
+            contiguous,
+        )
+        self.tex_stamps[layer_id] = stamp
+
+    def upload_selection(self, mask: Optional[np.ndarray]) -> None:
+        if mask is None:
+            return
+        h, w = mask.shape
+        contiguous = np.ascontiguousarray(mask)
+        GL.glBindTexture(GL.GL_TEXTURE_2D, self.sel_tex)
+        GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+        # GL_R8 / GL_RED can be flaky on some GLES; use RGBA upload of expanded mask if needed
+        try:
+            GL.glTexImage2D(
+                GL.GL_TEXTURE_2D,
+                0,
+                GL.GL_R8,
+                w,
+                h,
+                0,
+                GL.GL_RED,
+                GL.GL_UNSIGNED_BYTE,
+                contiguous,
+            )
+        except Exception:
+            rgba = np.zeros((h, w, 4), dtype=np.uint8)
+            rgba[..., 0] = contiguous
+            rgba[..., 3] = contiguous
+            GL.glTexImage2D(
+                GL.GL_TEXTURE_2D,
+                0,
+                GL.GL_RGBA,
+                w,
+                h,
+                0,
+                GL.GL_RGBA,
+                GL.GL_UNSIGNED_BYTE,
+                rgba,
+            )
+
+    def invalidate(self, layer_id: str | None = None) -> None:
+        if layer_id is None:
+            self.tex_stamps.clear()
+        else:
+            self.tex_stamps.pop(layer_id, None)
+
+    def set_view(self, w: int, h: int) -> None:
+        self.view_w = max(1, w)
+        self.view_h = max(1, h)
+
+    def screen_to_doc(self, sx: float, sy: float) -> tuple[float, float]:
+        z = self.zoom if self.zoom else 1.0
+        return ((sx - self.pan_x) / z, (sy - self.pan_y) / z)
+
+    def doc_to_screen(self, dx: float, dy: float) -> tuple[float, float]:
+        z = self.zoom if self.zoom else 1.0
+        return (dx * z + self.pan_x, dy * z + self.pan_y)
+
+    def fit_canvas(self, doc: Document) -> None:
+        margin = 48
+        vw = max(1, self.view_w)
+        vh = max(1, self.view_h)
+        if vw <= 32 or vh <= 32:
+            self.zoom = 1.0
+            self.pan_x = 0.0
+            self.pan_y = 0.0
+            return
+        zx = (vw - margin * 2) / max(1, doc.width)
+        zy = (vh - margin * 2) / max(1, doc.height)
+        self.zoom = max(0.05, min(zx, zy, 8.0))
+        self.pan_x = (vw - doc.width * self.zoom) * 0.5
+        self.pan_y = (vh - doc.height * self.zoom) * 0.5
+
+    def draw(self, doc: Document, *, playing: bool = False) -> None:
+        if not self.ready:
+            return
+        GL.glViewport(0, 0, int(self.view_w), int(self.view_h))
+        if self.checker_light:
+            GL.glClearColor(0.72, 0.72, 0.72, 1.0)
+            checker_a = (0.85, 0.85, 0.85)
+            checker_b = (0.55, 0.55, 0.55)
+        else:
+            GL.glClearColor(0.0, 0.0, 0.0, 1.0)
+            checker_a = (0.16, 0.16, 0.16)
+            checker_b = (0.10, 0.10, 0.10)
+        GL.glClear(GL.GL_COLOR_BUFFER_BIT)
+        GL.glBindVertexArray(self.vao)
+
+        def set_common(prog: int, ox: float = 0.0, oy: float = 0.0) -> None:
+            GL.glUseProgram(prog)
+            GL.glUniform2f(GL.glGetUniformLocation(prog, "u_view_size"), float(self.view_w), float(self.view_h))
+            GL.glUniform2f(GL.glGetUniformLocation(prog, "u_doc_size"), float(doc.width), float(doc.height))
+            GL.glUniform2f(GL.glGetUniformLocation(prog, "u_pan"), float(self.pan_x), float(self.pan_y))
+            GL.glUniform1f(GL.glGetUniformLocation(prog, "u_zoom"), float(self.zoom))
+            GL.glUniform2f(GL.glGetUniformLocation(prog, "u_layer_offset"), ox, oy)
+
+        def draw_layers(layers, opacity_scale: float = 1.0) -> None:
+            if opacity_scale <= 0.001:
+                return
+            for ly in layers:
+                if not ly.visible:
+                    continue
+                self.upload_layer(ly.id, ly.pixels, ly.dirty_stamp())
+                set_common(self.prog_layer, float(ly.offset_x), float(ly.offset_y))
+                GL.glActiveTexture(GL.GL_TEXTURE0)
+                GL.glBindTexture(GL.GL_TEXTURE_2D, self.textures[ly.id])
+                GL.glUniform1i(GL.glGetUniformLocation(self.prog_layer, "u_tex"), 0)
+                GL.glUniform1f(
+                    GL.glGetUniformLocation(self.prog_layer, "u_opacity"),
+                    float(ly.opacity) * float(opacity_scale),
+                )
+                GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
+
+        set_common(self.prog_checker)
+        GL.glUniform3f(
+            GL.glGetUniformLocation(self.prog_checker, "u_checker_a"),
+            *checker_a,
+        )
+        GL.glUniform3f(
+            GL.glGetUniformLocation(self.prog_checker, "u_checker_b"),
+            *checker_b,
+        )
+        GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
+
+        # Onion skin: previous frame faintly under the current cel while editing
+        show_onion = (
+            (not playing)
+            and bool(getattr(doc, "onion_skin", True))
+            and float(getattr(doc, "onion_opacity", 0.0)) > 0.001
+        )
+        if show_onion:
+            prev = doc.previous_frame() if hasattr(doc, "previous_frame") else None
+            if prev is not None and prev.layers:
+                draw_layers(prev.layers, opacity_scale=float(doc.onion_opacity))
+
+        draw_layers(doc.layers, opacity_scale=1.0)
+
+        if doc.selection.active and doc.selection.mask is not None:
+            self.upload_selection(doc.selection.mask)
+            set_common(self.prog_sel)
+            GL.glActiveTexture(GL.GL_TEXTURE0)
+            GL.glBindTexture(GL.GL_TEXTURE_2D, self.sel_tex)
+            GL.glUniform1i(GL.glGetUniformLocation(self.prog_sel, "u_tex"), 0)
+            GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
+
+        GL.glBindVertexArray(0)
+        GL.glUseProgram(0)

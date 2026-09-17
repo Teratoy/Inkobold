@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Inkobold
+GenericName=Drawing
+Comment=GPU-accelerated layered drawing with tablet support
+Exec=/home/aki/Trinkets/Inkobold/scripts/run.sh
+Path=/home/aki/Trinkets/Inkobold
+Icon=trinkets-inkobold
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=draw;paint;tablet;layers;libinput;wacom;
+Terminal=false
+StartupNotify=true
+StartupWMClass=trinkets-inkobold
+TryExec=/home/aki/Trinkets/Inkobold/scripts/run.sh
+DBusActivatable=false
