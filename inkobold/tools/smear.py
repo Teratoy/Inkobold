@@ -39,7 +39,9 @@ class SmearTool(BaseTool):
     def on_press(self, ctx: ToolContext, x: float, y: float, shift: bool = False, alt: bool = False) -> None:
         self._drawing = True
         self._lx, self._ly = x, y
-        self._tip = smear_sample_tip(ctx.document.active_layer.pixels, x, y, self._radius(ctx))
+        self._tip = smear_sample_tip(
+            ctx.document.active_layer.pixels, x, y, self._radius(ctx), wrap=ctx.tile_wrap,
+        )
 
     def on_drag(self, ctx: ToolContext, x: float, y: float, shift: bool = False, alt: bool = False) -> None:
         if not self._drawing or self._tip is None:
@@ -53,11 +55,12 @@ class SmearTool(BaseTool):
         steps = max(1, int(dist / max(0.5, r * 0.35)))
         pixels = ctx.document.active_layer.pixels
         mask = self._mask(ctx)
+        wrap = ctx.tile_wrap
         for i in range(1, steps + 1):
             t = i / steps
             px = self._lx + (x - self._lx) * t
             py = self._ly + (y - self._ly) * t
-            smear_stamp(pixels, px, py, r, self._tip, strength=strength, mask=mask)
+            smear_stamp(pixels, px, py, r, self._tip, strength=strength, mask=mask, wrap=wrap)
         self._lx, self._ly = x, y
         ctx.document.mark_dirty()
 

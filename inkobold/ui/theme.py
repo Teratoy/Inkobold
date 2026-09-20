@@ -150,6 +150,13 @@ window {{
     box-shadow: inset 0 1px 0 {p["inset_hi"]};
 }}
 
+.app-icon {{
+    margin-right: 6px;
+    border-radius: 6px;
+    min-width: 28px;
+    min-height: 28px;
+}}
+
 .doc-title {{
     color: {p["text"]};
     font-weight: 600;
@@ -243,6 +250,26 @@ window {{
     background: {p["button_hover"]};
     border-color: {p["border"]};
     box-shadow: 0 0 10px {p["accent_glow"]};
+}}
+
+.pattern-thumb {{
+    min-width: 56px;
+    min-height: 56px;
+    padding: 2px;
+    background: {p["button"]};
+    border: 1px solid {p["border_soft"]};
+    border-radius: 8px;
+    box-shadow: none;
+}}
+
+.pattern-thumb:hover {{
+    background: {p["button_hover"]};
+    border-color: {p["border"]};
+}}
+
+.pattern-thumb:checked {{
+    border-color: {p["accent"]};
+    box-shadow: 0 0 8px {p["accent_glow"]};
 }}
 
 .toolbox flowboxchild {{

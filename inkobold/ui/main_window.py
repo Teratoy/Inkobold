@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -11,20 +13,29 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
 from inkobold.core.document import Document
 from inkobold.core.effects import (
     DITHER_MODES,
+    EDGE_STYLES,
     LIQUIFY_BRUSH_MODES,
     LIQUIFY_MODES,
+    METAL_PRESETS,
+    NORMAL_MAP_Y,
     blend_effect,
     dither,
+    edge_detect,
     gaussian_blur,
     kuwahara,
     liquify,
+    metal_relief,
+    milk,
+    normal_map,
     pixelate,
     posterize,
+    threshold,
 )
 from inkobold.core.grid import GridOverlay
 from inkobold.core.history import History
@@ -32,6 +43,7 @@ from inkobold.core.libraries import (
     CATEGORIES,
     category_dir,
     ensure_libraries,
+    list_brushes,
     list_fonts,
     list_patterns,
     list_system_fonts,
@@ -64,25 +76,27 @@ from inkobold.ui.dialogs import (
     ShortcutsDialog,
     StartupDialog,
     ThemeColorDialog,
+    VisibleToolsDialog,
 )
 from inkobold.ui.theme import DEFAULT_CSS, build_theme_css
 
 
 TOOL_ORDER = [
-    ("pen", "Pen", "P", "1"),
-    ("line", "Line", "L", ""),
-    ("curve", "Curve", "U", ""),
-    ("brush", "Brush", "B", ""),
-    ("fill", "Fill", "G", "2"),
-    ("pen3d", "3D Pen", "D", "8"),
-    ("fill3d", "3D Fill", "F", "9"),
-    ("eraser", "Eraser", "E", "3"),
-    ("smear", "Smear", "M", ""),
-    ("liquify", "Liquify", "Y", ""),
-    ("replace", "Replace", "C/R", "0/5"),
-    ("move", "Transform", "V", "6"),
-    ("lasso", "Lasso", "Q", "7"),
-    ("type", "Type", "T", ""),
+    ("pen", "Pen"),
+    ("line", "Line"),
+    ("curve", "Curve"),
+    ("brush", "Brush"),
+    ("weld_brush", "Weld Brush"),
+    ("fill", "Fill"),
+    ("pen3d", "3D Pen"),
+    ("fill3d", "3D Fill"),
+    ("eraser", "Eraser"),
+    ("smear", "Smear"),
+    ("liquify", "Liquify"),
+    ("replace", "Replace"),
+    ("move", "Transform"),
+    ("lasso", "Lasso"),
+    ("type", "Type"),
 ]
 
 
@@ -113,6 +127,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.tool_id = "pen"
         self._syncing_tool_ui = False
         self.app_settings = load_settings()
+        # Shared paint color when color_follows_tools is on
+        self._shared_color: tuple[int, int, int, int] = self.tools["pen"].color
         self.shortcuts = merge_shortcuts(self.app_settings.shortcut_overrides)
         self.history = History(max_steps=self.app_settings.history_steps)
         self._tabs: list[_DocTab] = []
@@ -135,6 +151,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._layers_sig: Optional[tuple] = None
         self.mirror = MirrorModifier()
         self.grid = GridOverlay()
+        self.tile_wrap = False
         self.input_hub = InputHub()
         self.input_hub.start()
         ensure_libraries()
@@ -178,8 +195,14 @@ class MainWindow(Gtk.ApplicationWindow):
             "effect_gaussian_blur": self.action_effect_gaussian_blur,
             "effect_dither": self.action_effect_dither,
             "effect_posterize": self.action_effect_posterize,
+            "effect_threshold": self.action_effect_threshold,
             "effect_liquify": self.action_effect_liquify,
+            "effect_edge_detect": self.action_effect_edge_detect,
+            "effect_normal_map": self.action_effect_normal_map,
+            "effect_metal_relief": self.action_effect_metal_relief,
+            "effect_milk": self.action_effect_milk,
             "add_layer": self.action_add_layer,
+            "duplicate_layer": self.action_duplicate_layer,
             "delete_layer": self.action_delete_layer,
             "rename_layer": self.action_rename_layer,
             "merge_layer_down": self.action_merge_layer_down,
@@ -194,6 +217,7 @@ class MainWindow(Gtk.ApplicationWindow):
             "theme_color": self.action_theme_color,
             "theme_reset": self.action_theme_reset,
             "memory_steps": self.action_memory_steps,
+            "visible_tools": self.action_visible_tools,
             "image_dpi": self.action_image_dpi,
             "image_color_depth": self.action_image_color_depth,
             "crop_canvas": self.action_crop_canvas,
@@ -212,6 +236,18 @@ class MainWindow(Gtk.ApplicationWindow):
         show_grid.connect("change-state", self._on_show_grid_change)
         self.add_action(show_grid)
 
+        tile_preview = Gio.SimpleAction.new_stateful(
+            "tile_preview", None, GLib.Variant.new_boolean(False)
+        )
+        tile_preview.connect("change-state", self._on_tile_preview_change)
+        self.add_action(tile_preview)
+
+        tile_wrap = Gio.SimpleAction.new_stateful(
+            "tile_wrap", None, GLib.Variant.new_boolean(False)
+        )
+        tile_wrap.connect("change-state", self._on_tile_wrap_change)
+        self.add_action(tile_wrap)
+
         checker_light = Gio.SimpleAction.new_stateful(
             "checker_light",
             None,
@@ -219,6 +255,22 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         checker_light.connect("change-state", self._on_checker_light_change)
         self.add_action(checker_light)
+
+        color_follows = Gio.SimpleAction.new_stateful(
+            "color_follows_tools",
+            None,
+            GLib.Variant.new_boolean(bool(self.app_settings.color_follows_tools)),
+        )
+        color_follows.connect("change-state", self._on_color_follows_tools_change)
+        self.add_action(color_follows)
+
+        debug_mode = Gio.SimpleAction.new_stateful(
+            "debug_mode",
+            None,
+            GLib.Variant.new_boolean(bool(self.app_settings.debug_mode)),
+        )
+        debug_mode.connect("change-state", self._on_debug_mode_change)
+        self.add_action(debug_mode)
 
         grid_settings = Gio.SimpleAction.new("grid_settings", None)
         grid_settings.connect("activate", self.action_grid_settings)
@@ -228,7 +280,7 @@ class MainWindow(Gtk.ApplicationWindow):
         rebind.connect("activate", self._on_shortcut_rebind_action)
         self.add_action(rebind)
 
-        for tid, _label, _letter, _num in TOOL_ORDER:
+        for tid, _label in TOOL_ORDER:
             action = Gio.SimpleAction.new(f"tool_{tid}", None)
             action.connect("activate", self._action_select_tool, tid)
             self.add_action(action)
@@ -285,6 +337,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self.size_row.set_visible(show_size)
             if show_size:
                 self.brush_spin.set_value(tool.brush_size)
+            if self.app_settings.color_follows_tools:
+                tool.color = self._shared_color
             rgba = self.color_btn.get_rgba()
             r, g, b, a = tool.color
             rgba.red, rgba.green, rgba.blue, rgba.alpha = r / 255.0, g / 255.0, b / 255.0, a / 255.0
@@ -318,14 +372,43 @@ class MainWindow(Gtk.ApplicationWindow):
             self.fill_opts_row.set_visible(show_fill)
             if show_fill:
                 mode = getattr(tool, "fill_mode", "color")
-                self.fill_mode_dropdown.set_selected(1 if mode == "pattern" else 0)
+                self.fill_mode_dropdown.set_selected(
+                    {"color": 0, "pattern": 1, "maze": 2, "puzzle": 3}.get(mode, 0)
+                )
                 self.tile_scale_spin.set_value(float(getattr(tool, "tile_scale", 1.0)))
+                self.maze_cell_spin.set_value(float(getattr(tool, "maze_cell_size", 8.0)))
+                cr, cg, cb, ca = getattr(tool, "corridor_color", (255, 255, 255, 255))
+                corridor_rgba = self.corridor_color_btn.get_rgba()
+                corridor_rgba.red, corridor_rgba.green = cr / 255.0, cg / 255.0
+                corridor_rgba.blue, corridor_rgba.alpha = cb / 255.0, ca / 255.0
+                self.corridor_color_btn.set_rgba(corridor_rgba)
                 self._refresh_pattern_dropdown(select_path=getattr(tool, "pattern_path", None))
             self._update_fill_mode_visibility()
+            show_brush_opts = bool(getattr(tool, "uses_brush_options", False))
+            self.brush_opts_row.set_visible(show_brush_opts)
+            if show_brush_opts:
+                bmode = getattr(tool, "brush_mode", "round")
+                self.brush_mode_dropdown.set_selected(
+                    {"round": 0, "custom": 1, "bubbles": 2}.get(bmode, 0)
+                )
+                self.brush_density_spin.set_value(float(getattr(tool, "density", 50)))
+                self._refresh_brush_dropdown(select_path=getattr(tool, "brush_path", None))
+            self._update_brush_mode_visibility()
             show_intensity = bool(getattr(tool, "uses_intensity", False))
             self.intensity_row.set_visible(show_intensity)
             if show_intensity:
+                is_weld = getattr(tool, "id", "") == "weld_brush"
+                self.intensity_label.set_label("Weld" if is_weld else "Intensity")
+                # Weld goes to 300 (larger junction fillets); smear/liquify stay 0–100.
+                self.intensity_spin.set_range(0, 300 if is_weld else 100)
                 self.intensity_spin.set_value(float(getattr(tool, "intensity", 50)))
+                self.intensity_spin.set_tooltip_text(
+                    "Junction fillet size. 0 = sharp corners, 100 ≈ brush width, "
+                    "300 = very large weld."
+                    if is_weld
+                    else "Smear / liquify strength. 0 = none, 100 = strong. "
+                    "Pen pressure fine-tunes within this."
+                )
             show_liquify = bool(getattr(tool, "uses_liquify_modes", False))
             self.liquify_mode_row.set_visible(show_liquify)
             if show_liquify:
@@ -348,6 +431,13 @@ class MainWindow(Gtk.ApplicationWindow):
                 )
                 self.arc_degrees_spin.set_value(float(getattr(tool, "arc_degrees", 180)))
             self._update_curve_mode_visibility()
+            show_eraser = bool(getattr(tool, "uses_eraser_modes", False))
+            self.eraser_mode_row.set_visible(show_eraser)
+            if show_eraser:
+                emode = getattr(tool, "eraser_mode", "freehand")
+                self.eraser_mode_dropdown.set_selected(
+                    {"freehand": 0, "line": 1}.get(emode, 0)
+                )
             show_type = bool(getattr(tool, "uses_type_options", False))
             self.type_opts_row.set_visible(show_type)
             if show_type:
@@ -371,23 +461,78 @@ class MainWindow(Gtk.ApplicationWindow):
     def _update_fill_mode_visibility(self) -> None:
         tool = self._active_tool()
         uses_fill = bool(getattr(tool, "uses_fill_options", False))
-        pattern_mode = uses_fill and getattr(tool, "fill_mode", "color") == "pattern"
+        mode = getattr(tool, "fill_mode", "color") if uses_fill else "color"
+        pattern_mode = mode == "pattern"
+        maze_mode = mode == "maze"
+        puzzle_mode = mode == "puzzle"
+        procedural = maze_mode or puzzle_mode
         show_color = bool(getattr(tool, "uses_color", True)) and not pattern_mode
         self.color_label.set_visible(show_color)
         self.color_btn.set_visible(show_color)
+        if maze_mode:
+            self.color_label.set_label("Wall Color")
+            self.maze_cell_label.set_label("Cell Size")
+            self.maze_cell_spin.set_tooltip_text("Maze cell size in pixels (walls + corridor)")
+            self.corridor_color_label.set_label("Corridor Color")
+            self.corridor_color_btn.set_tooltip_text("Color for maze corridors / paths")
+        elif puzzle_mode:
+            self.color_label.set_label("Outline Color")
+            self.maze_cell_label.set_label("Piece Size")
+            self.maze_cell_spin.set_tooltip_text("Approximate jigsaw piece size in pixels")
+            self.corridor_color_label.set_label("Piece Color")
+            self.corridor_color_btn.set_tooltip_text("Fill color for puzzle piece interiors")
+        elif getattr(tool, "uses_replace_modes", False) and getattr(tool, "replace_action", "replace") == "erase":
+            self.color_label.set_label("Erase Color")
+        else:
+            self.color_label.set_label("Color")
         self.pattern_row.set_visible(pattern_mode)
         self.tile_scale_row.set_visible(pattern_mode)
+        self.maze_cell_row.set_visible(procedural)
+        self.corridor_color_row.set_visible(procedural)
+
+    def _update_brush_mode_visibility(self) -> None:
+        tool = self._active_tool()
+        uses_brush = bool(getattr(tool, "uses_brush_options", False))
+        bmode = getattr(tool, "brush_mode", "round") if uses_brush else "round"
+        self.brush_image_row.set_visible(uses_brush and bmode == "custom")
+        self.brush_density_row.set_visible(uses_brush and bmode == "bubbles")
+
+    def _pattern_texture(self, path: Path, size: int) -> Optional[Gdk.Texture]:
+        try:
+            pix = GdkPixbuf.Pixbuf.new_from_file_at_size(str(path), size, size)
+            return Gdk.Texture.new_for_pixbuf(pix)
+        except Exception:
+            return None
+
+    def _set_pattern_preview(self, path: Optional[Path]) -> None:
+        if path is None:
+            self.pattern_preview.set_paintable(None)
+            self.pattern_menu_btn.set_tooltip_text("No patterns in Libraries → Patterns")
+            return
+        tex = self._pattern_texture(path, self._pattern_preview_size)
+        self.pattern_preview.set_paintable(tex)
+        self.pattern_menu_btn.set_tooltip_text(path.name)
+
+    def _clear_pattern_flow(self) -> None:
+        child = self.pattern_flow.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self.pattern_flow.remove(child)
+            child = nxt
 
     def _refresh_pattern_dropdown(self, select_path: Optional[Path] = None) -> None:
         paths = list_patterns()
         self._pattern_paths = paths
-        strings = Gtk.StringList.new([p.name for p in paths] if paths else ["(no patterns)"])
-        self.pattern_dropdown.set_model(strings)
-        self.pattern_dropdown.set_sensitive(bool(paths))
+        self._clear_pattern_flow()
+        self.pattern_menu_btn.set_sensitive(bool(paths))
         if not paths:
+            self._set_pattern_preview(None)
             tool = self._active_tool()
             if getattr(tool, "uses_fill_options", False):
                 tool.set_pattern_path(None)
+            empty = Gtk.Label(label="(no patterns)", xalign=0.5)
+            empty.add_css_class("dim-label")
+            self.pattern_flow.append(empty)
             return
         idx = 0
         if select_path is not None:
@@ -395,10 +540,101 @@ class MainWindow(Gtk.ApplicationWindow):
                 idx = next(i for i, p in enumerate(paths) if p.resolve() == Path(select_path).resolve())
             except StopIteration:
                 idx = 0
-        self.pattern_dropdown.set_selected(idx)
+        group: Optional[Gtk.ToggleButton] = None
+        prev_sync = self._syncing_tool_ui
+        self._syncing_tool_ui = True
+        try:
+            for i, path in enumerate(paths):
+                btn = Gtk.ToggleButton()
+                btn.add_css_class("pattern-thumb")
+                if group is None:
+                    group = btn
+                else:
+                    btn.set_group(group)
+                pic = Gtk.Picture()
+                pic.set_size_request(self._pattern_thumb_size, self._pattern_thumb_size)
+                pic.set_content_fit(Gtk.ContentFit.COVER)
+                tex = self._pattern_texture(path, self._pattern_thumb_size)
+                if tex is not None:
+                    pic.set_paintable(tex)
+                btn.set_child(pic)
+                btn.set_tooltip_text(path.name)
+                btn.connect("toggled", self._on_pattern_toggled, i)
+                self.pattern_flow.append(btn)
+                if i == idx:
+                    btn.set_active(True)
+        finally:
+            self._syncing_tool_ui = prev_sync
+        self._set_pattern_preview(paths[idx])
         tool = self._active_tool()
         if getattr(tool, "uses_fill_options", False):
             tool.set_pattern_path(paths[idx])
+
+    def _set_brush_preview(self, path: Optional[Path]) -> None:
+        if path is None:
+            self.brush_preview.set_paintable(None)
+            self.brush_menu_btn.set_tooltip_text("No brushes in Libraries → Brushes")
+            return
+        tex = self._pattern_texture(path, self._brush_preview_size)
+        self.brush_preview.set_paintable(tex)
+        self.brush_menu_btn.set_tooltip_text(path.name)
+
+    def _clear_brush_flow(self) -> None:
+        child = self.brush_flow.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self.brush_flow.remove(child)
+            child = nxt
+
+    def _refresh_brush_dropdown(self, select_path: Optional[Path] = None) -> None:
+        paths = list_brushes()
+        self._brush_paths = paths
+        self._clear_brush_flow()
+        self.brush_menu_btn.set_sensitive(bool(paths))
+        if not paths:
+            self._set_brush_preview(None)
+            tool = self._active_tool()
+            if getattr(tool, "uses_brush_options", False):
+                tool.set_brush_path(None)
+            empty = Gtk.Label(label="(no brushes)", xalign=0.5)
+            empty.add_css_class("dim-label")
+            self.brush_flow.append(empty)
+            return
+        idx = 0
+        if select_path is not None:
+            try:
+                idx = next(i for i, p in enumerate(paths) if p.resolve() == Path(select_path).resolve())
+            except StopIteration:
+                idx = 0
+        group: Optional[Gtk.ToggleButton] = None
+        prev_sync = self._syncing_tool_ui
+        self._syncing_tool_ui = True
+        try:
+            for i, path in enumerate(paths):
+                btn = Gtk.ToggleButton()
+                btn.add_css_class("pattern-thumb")
+                if group is None:
+                    group = btn
+                else:
+                    btn.set_group(group)
+                pic = Gtk.Picture()
+                pic.set_size_request(self._brush_thumb_size, self._brush_thumb_size)
+                pic.set_content_fit(Gtk.ContentFit.COVER)
+                tex = self._pattern_texture(path, self._brush_thumb_size)
+                if tex is not None:
+                    pic.set_paintable(tex)
+                btn.set_child(pic)
+                btn.set_tooltip_text(path.name)
+                btn.connect("toggled", self._on_brush_toggled, i)
+                self.brush_flow.append(btn)
+                if i == idx:
+                    btn.set_active(True)
+        finally:
+            self._syncing_tool_ui = prev_sync
+        self._set_brush_preview(paths[idx])
+        tool = self._active_tool()
+        if getattr(tool, "uses_brush_options", False):
+            tool.set_brush_path(paths[idx])
 
     def _on_fill_mode_changed(self, dropdown: Gtk.DropDown, *_a) -> None:
         if self._syncing_tool_ui:
@@ -406,8 +642,30 @@ class MainWindow(Gtk.ApplicationWindow):
         tool = self._active_tool()
         if not getattr(tool, "uses_fill_options", False):
             return
-        tool.fill_mode = "pattern" if dropdown.get_selected() == 1 else "color"
+        tool.fill_mode = {0: "color", 1: "pattern", 2: "maze", 3: "puzzle"}.get(
+            int(dropdown.get_selected()), "color"
+        )
         self._update_fill_mode_visibility()
+
+    def _on_brush_mode_changed(self, dropdown: Gtk.DropDown, *_a) -> None:
+        if self._syncing_tool_ui:
+            return
+        tool = self._active_tool()
+        if not getattr(tool, "uses_brush_options", False):
+            return
+        tool.brush_mode = {0: "round", 1: "custom", 2: "bubbles"}.get(
+            int(dropdown.get_selected()), "round"
+        )
+        self._update_brush_mode_visibility()
+        if tool.brush_mode == "custom":
+            self._refresh_brush_dropdown(select_path=getattr(tool, "brush_path", None))
+
+    def _on_brush_density_changed(self, spin: Gtk.SpinButton) -> None:
+        if self._syncing_tool_ui:
+            return
+        tool = self._active_tool()
+        if getattr(tool, "uses_brush_options", False):
+            tool.density = float(spin.get_value())
 
     def _on_replace_action_changed(self, dropdown: Gtk.DropDown, *_a) -> None:
         if self._syncing_tool_ui:
@@ -429,18 +687,39 @@ class MainWindow(Gtk.ApplicationWindow):
         show_size = bool(getattr(tool, "uses_size", True)) and not hide_size
         self.size_row.set_visible(show_size)
 
-    def _on_pattern_changed(self, dropdown: Gtk.DropDown, *_a) -> None:
-        if self._syncing_tool_ui:
+    def _on_pattern_toggled(self, btn: Gtk.ToggleButton, idx: int) -> None:
+        if self._syncing_tool_ui or not btn.get_active():
             return
         tool = self._active_tool()
         if not getattr(tool, "uses_fill_options", False):
             return
         paths = getattr(self, "_pattern_paths", [])
-        idx = int(dropdown.get_selected())
         if 0 <= idx < len(paths):
             tool.set_pattern_path(paths[idx])
+            self._set_pattern_preview(paths[idx])
         else:
             tool.set_pattern_path(None)
+            self._set_pattern_preview(None)
+        popover = self.pattern_menu_btn.get_popover()
+        if popover is not None:
+            popover.popdown()
+
+    def _on_brush_toggled(self, btn: Gtk.ToggleButton, idx: int) -> None:
+        if self._syncing_tool_ui or not btn.get_active():
+            return
+        tool = self._active_tool()
+        if not getattr(tool, "uses_brush_options", False):
+            return
+        paths = getattr(self, "_brush_paths", [])
+        if 0 <= idx < len(paths):
+            tool.set_brush_path(paths[idx])
+            self._set_brush_preview(paths[idx])
+        else:
+            tool.set_brush_path(None)
+            self._set_brush_preview(None)
+        popover = self.brush_menu_btn.get_popover()
+        if popover is not None:
+            popover.popdown()
 
     def _on_tile_scale_changed(self, spin: Gtk.SpinButton) -> None:
         if self._syncing_tool_ui:
@@ -448,6 +727,29 @@ class MainWindow(Gtk.ApplicationWindow):
         tool = self._active_tool()
         if getattr(tool, "uses_fill_options", False):
             tool.tile_scale = float(spin.get_value())
+
+    def _on_maze_cell_changed(self, spin: Gtk.SpinButton) -> None:
+        if self._syncing_tool_ui:
+            return
+        tool = self._active_tool()
+        if getattr(tool, "uses_fill_options", False):
+            tool.maze_cell_size = float(spin.get_value())
+
+    def _on_corridor_color(self, btn: ColorSelectButton) -> None:
+        if self._syncing_tool_ui:
+            return
+        tool = self._active_tool()
+        if not getattr(tool, "uses_fill_options", False):
+            return
+        c = btn.get_rgba()
+        tool.corridor_color = (
+            int(c.red * 255),
+            int(c.green * 255),
+            int(c.blue * 255),
+            int(c.alpha * 255),
+        )
+        self.app_settings.recent_colors = btn.get_recent_colors()
+        save_settings(self.app_settings)
 
     def _refresh_font_dropdown(
         self,
@@ -592,6 +894,14 @@ class MainWindow(Gtk.ApplicationWindow):
         tool.curve_mode = ("freehand", "arc", "circle")[min(int(dropdown.get_selected()), 2)]
         self._update_curve_mode_visibility()
 
+    def _on_eraser_mode_changed(self, dropdown: Gtk.DropDown, *_a) -> None:
+        if self._syncing_tool_ui:
+            return
+        tool = self._active_tool()
+        if not getattr(tool, "uses_eraser_modes", False):
+            return
+        tool.eraser_mode = ("freehand", "line")[min(int(dropdown.get_selected()), 1)]
+
     def _on_arc_degrees_changed(self, spin: Gtk.SpinButton) -> None:
         if self._syncing_tool_ui:
             return
@@ -663,6 +973,38 @@ class MainWindow(Gtk.ApplicationWindow):
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()
 
+    def _on_tile_preview_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
+        enabled = bool(value.get_boolean())
+        action.set_state(value)
+        if hasattr(self, "canvas"):
+            self.canvas.renderer.tile_preview = enabled
+            self.canvas.refresh_guides()
+            self.canvas.queue_render()
+            if enabled:
+                self.canvas.request_fit()
+            self._set_status()
+        # Wrap follows Tile Preview by default (on with preview, off without).
+        wrap_action = self.lookup_action("tile_wrap")
+        if wrap_action is not None:
+            wrap_action.change_state(GLib.Variant.new_boolean(enabled))
+
+    def _on_tile_wrap_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
+        enabled = bool(value.get_boolean())
+        action.set_state(value)
+        self.tile_wrap = enabled
+        if hasattr(self, "tile_wrap_toggle") and self.tile_wrap_toggle.get_active() != enabled:
+            self.tile_wrap_toggle.set_active(enabled)
+        self._set_status()
+
+    def _on_tile_wrap_toggled(self, btn: Gtk.CheckButton) -> None:
+        enabled = bool(btn.get_active())
+        self.tile_wrap = enabled
+        action = self.lookup_action("tile_wrap")
+        if action is not None:
+            current = bool(action.get_state().get_boolean())  # type: ignore[union-attr]
+            if current != enabled:
+                action.change_state(GLib.Variant.new_boolean(enabled))
+
     def _on_checker_light_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
         enabled = bool(value.get_boolean())
         action.set_state(value)
@@ -671,6 +1013,76 @@ class MainWindow(Gtk.ApplicationWindow):
         if hasattr(self, "canvas"):
             self.canvas.renderer.checker_light = enabled
             self.canvas.queue_render()
+
+    def _on_color_follows_tools_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
+        enabled = bool(value.get_boolean())
+        action.set_state(value)
+        self.app_settings.color_follows_tools = enabled
+        if enabled:
+            # Start shared mode from the color currently shown for the active tool
+            c = self._active_tool().color
+            self._shared_color = (int(c[0]), int(c[1]), int(c[2]), int(c[3]))
+            self._apply_shared_color_to_tools()
+        self._persist_settings()
+        if hasattr(self, "color_btn"):
+            self._load_active_tool_settings()
+
+    def _on_debug_mode_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
+        enabled = bool(value.get_boolean())
+        action.set_state(value)
+        self.app_settings.debug_mode = enabled
+        self._persist_settings()
+        if hasattr(self, "reload_btn"):
+            self.reload_btn.set_visible(enabled)
+
+    def _apply_shared_color_to_tools(self) -> None:
+        for tool in self.tools.values():
+            if getattr(tool, "uses_color", True):
+                tool.color = self._shared_color
+
+    def _resolved_visible_tools(self) -> list[str]:
+        all_ids = [tid for tid, *_ in TOOL_ORDER]
+        chosen = [tid for tid in self.app_settings.visible_tools if tid in self.tools]
+        if not chosen:
+            return all_ids
+        return chosen
+
+    def _apply_tool_visibility(self) -> None:
+        if not getattr(self, "tool_buttons", None):
+            return
+        visible = set(self._resolved_visible_tools())
+        for tid, btn in self.tool_buttons.items():
+            show = tid in visible
+            btn.set_visible(show)
+            # FlowBox wraps each button in a FlowBoxChild — hide that too
+            parent = btn.get_parent()
+            if parent is not None:
+                parent.set_visible(show)
+        # If the active tool is hidden, switch to the first visible tool
+        if self.tool_id not in visible:
+            for tid, *_ in TOOL_ORDER:
+                if tid in visible:
+                    self.select_tool(tid)
+                    break
+
+    def action_visible_tools(self, *_a) -> None:
+        tools = [(tid, label) for tid, label, *_ in TOOL_ORDER]
+        dlg = VisibleToolsDialog(self, tools, self._resolved_visible_tools())
+        dlg.connect_response(self._on_visible_tools_response)
+        dlg.present()
+
+    def _on_visible_tools_response(self, dlg: VisibleToolsDialog, response: int) -> None:
+        if response != Gtk.ResponseType.OK:
+            return
+        chosen = dlg.visible_ids()
+        all_ids = [tid for tid, *_ in TOOL_ORDER]
+        # Store empty when everything is shown so new tools appear by default
+        if set(chosen) == set(all_ids):
+            self.app_settings.visible_tools = []
+        else:
+            self.app_settings.visible_tools = [tid for tid, *_ in TOOL_ORDER if tid in chosen]
+        self._persist_settings()
+        self._apply_tool_visibility()
 
     def action_grid_settings(self, *_a) -> None:
         dlg = GridOverlayDialog(self, self.grid.rows, self.grid.columns)
@@ -692,6 +1104,33 @@ class MainWindow(Gtk.ApplicationWindow):
     def action_brush_larger(self, *_a) -> None:
         self.brush_spin.set_value(min(256, self.brush_spin.get_value() + 1))
 
+    @staticmethod
+    def _default_icon_path() -> Path:
+        env = os.environ.get("INKOBOLD_ICON")
+        if env:
+            return Path(env)
+        return Path(__file__).resolve().parents[2] / "scripts" / "inkobold.png"
+
+    def _build_toolbar_app_icon(self) -> Gtk.Widget:
+        size = 28
+        pic = Gtk.Picture()
+        pic.set_size_request(size, size)
+        pic.set_content_fit(Gtk.ContentFit.CONTAIN)
+        pic.set_can_shrink(False)
+        pic.add_css_class("app-icon")
+        pic.set_tooltip_text("Inkobold")
+        path = self._default_icon_path()
+        if path.is_file():
+            try:
+                pix = GdkPixbuf.Pixbuf.new_from_file_at_size(str(path), size, size)
+                tex = Gdk.Texture.new_for_pixbuf(pix)
+                # Keep a strong reference so the texture stays alive
+                self._toolbar_icon_tex = tex  # type: ignore[attr-defined]
+                pic.set_paintable(tex)
+            except Exception:
+                pass
+        return pic
+
     def _build_ui(self) -> None:
         Gtk.StyleContext.add_provider_for_display(
             self.get_display(), self._css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
@@ -704,6 +1143,8 @@ class MainWindow(Gtk.ApplicationWindow):
         # Menu bar
         menubar = Gtk.Box(spacing=4, css_classes=["toolbar"])
         root.append(menubar)
+
+        menubar.append(self._build_toolbar_app_icon())
 
         file_btn = Gtk.MenuButton(label="File")
         file_menu = Gio.Menu()
@@ -749,7 +1190,12 @@ class MainWindow(Gtk.ApplicationWindow):
         effects_menu.append("Gaussian Blur…", "win.effect_gaussian_blur")
         effects_menu.append("Dither…", "win.effect_dither")
         effects_menu.append("Posterize…", "win.effect_posterize")
+        effects_menu.append("Threshold…", "win.effect_threshold")
         effects_menu.append("Liquify…", "win.effect_liquify")
+        effects_menu.append("Edge Detect…", "win.effect_edge_detect")
+        effects_menu.append("Normal Map…", "win.effect_normal_map")
+        effects_menu.append("Metal Relief…", "win.effect_metal_relief")
+        effects_menu.append("Milk…", "win.effect_milk")
         effects_btn.set_menu_model(effects_menu)
         menubar.append(effects_btn)
 
@@ -758,6 +1204,8 @@ class MainWindow(Gtk.ApplicationWindow):
         view_menu.append("Fit Canvas", "win.fit")
         view_menu.append("Show Grid", "win.show_grid")
         view_menu.append("Grid…", "win.grid_settings")
+        view_menu.append("Tile Preview", "win.tile_preview")
+        view_menu.append("Wrap Moves", "win.tile_wrap")
         view_menu.append("Light Transparent Background", "win.checker_light")
         view_menu.append("Fullscreen", "win.window_fullscreen")
         view_menu.append("Borderless Window", "win.window_borderless")
@@ -768,6 +1216,7 @@ class MainWindow(Gtk.ApplicationWindow):
         layer_btn = Gtk.MenuButton(label="Layer")
         layer_menu = Gio.Menu()
         layer_menu.append("Add Layer", "win.add_layer")
+        layer_menu.append("Duplicate Layer", "win.duplicate_layer")
         layer_menu.append("Delete Layer", "win.delete_layer")
         layer_menu.append("Rename Layer…", "win.rename_layer")
         layer_menu.append("Merge with Layer Below", "win.merge_layer_down")
@@ -806,8 +1255,14 @@ class MainWindow(Gtk.ApplicationWindow):
         image_menu.append("Color Depth…", "win.image_color_depth")
         settings_menu.append_submenu("Image", image_menu)
 
+        tools_menu = Gio.Menu()
+        tools_menu.append("Color Follows Tools", "win.color_follows_tools")
+        tools_menu.append("Visible Tools…", "win.visible_tools")
+        settings_menu.append_submenu("Tools", tools_menu)
+
         self._shortcuts_menu = Gio.Menu()
         settings_menu.append_submenu("Shortcuts", self._shortcuts_menu)
+        settings_menu.append("Debug Mode", "win.debug_mode")
         settings_btn.set_menu_model(settings_menu)
         menubar.append(settings_btn)
         self._rebuild_shortcuts_submenu()
@@ -833,6 +1288,14 @@ class MainWindow(Gtk.ApplicationWindow):
         new_tab_btn.set_valign(Gtk.Align.CENTER)
         new_tab_btn.connect("clicked", lambda *_: self.action_new())
         tabs_host.append(new_tab_btn)
+
+        self.reload_btn = Gtk.Button(label="Reload")
+        self.reload_btn.set_tooltip_text("Reload Inkobold (debug)")
+        self.reload_btn.add_css_class("exit-btn")
+        self.reload_btn.set_halign(Gtk.Align.END)
+        self.reload_btn.set_visible(bool(self.app_settings.debug_mode))
+        self.reload_btn.connect("clicked", self.request_reload)
+        menubar.append(self.reload_btn)
 
         exit_btn = Gtk.Button(label="Exit")
         exit_btn.set_tooltip_text("Exit Inkobold")
@@ -872,11 +1335,10 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.tool_buttons: dict[str, Gtk.ToggleButton] = {}
         group: Optional[Gtk.ToggleButton] = None
-        for tid, label, letter, num in TOOL_ORDER:
+        for tid, label in TOOL_ORDER:
             btn = Gtk.ToggleButton(label=label)
             btn.add_css_class("tool-btn")
-            tip = f"{label}  ({letter})" if not num else f"{label}  ({letter} / {num})"
-            btn.set_tooltip_text(tip)
+            btn.set_tooltip_text(label)
             btn.set_hexpand(True)
             if group is None:
                 group = btn
@@ -886,6 +1348,9 @@ class MainWindow(Gtk.ApplicationWindow):
             btn.connect("toggled", self._on_tool_toggled, tid)
             self.tool_buttons[tid] = btn
             tool_flow.append(btn)
+
+        self._refresh_tool_shortcut_tips()
+        self._apply_tool_visibility()
 
         toolbox_page.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL, margin_top=4, margin_bottom=4))
 
@@ -912,6 +1377,74 @@ class MainWindow(Gtk.ApplicationWindow):
         self.opacity_spin.connect("value-changed", self._on_opacity_changed)
         self.opacity_row.append(self.opacity_spin)
 
+        self.brush_opts_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
+        opts.append(self.brush_opts_row)
+        self.brush_opts_row.append(Gtk.Label(label="Brush", xalign=0))
+        brush_modes = Gtk.StringList.new(["Round", "Custom", "Bubbles"])
+        self.brush_mode_dropdown = Gtk.DropDown(model=brush_modes)
+        self.brush_mode_dropdown.set_hexpand(True)
+        self.brush_mode_dropdown.set_tooltip_text(
+            "Round: soft disk. Custom: stamp a tip from Libraries → Brushes (tinted with Color). "
+            "Bubbles: milk-style air-bubble clusters tinted with Color."
+        )
+        self.brush_mode_dropdown.connect("notify::selected", self._on_brush_mode_changed)
+        self.brush_opts_row.append(self.brush_mode_dropdown)
+
+        self.brush_image_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
+        self.brush_opts_row.append(self.brush_image_row)
+        brush_head = Gtk.Box(spacing=4)
+        brush_head.append(Gtk.Label(label="Tip", xalign=0, hexpand=True))
+        refresh_brush = Gtk.Button(label="↻")
+        refresh_brush.set_tooltip_text("Reload brushes from Libraries folder")
+        refresh_brush.connect("clicked", lambda *_: self._refresh_brush_dropdown(
+            select_path=getattr(self._active_tool(), "brush_path", None)
+        ))
+        brush_head.append(refresh_brush)
+        self.brush_image_row.append(brush_head)
+        self._brush_paths: list[Path] = []
+        self._brush_thumb_size = 56
+        self._brush_preview_size = 40
+        self.brush_preview = Gtk.Picture()
+        self.brush_preview.set_size_request(self._brush_preview_size, self._brush_preview_size)
+        self.brush_preview.set_content_fit(Gtk.ContentFit.COVER)
+        self.brush_preview.set_can_shrink(False)
+        self.brush_menu_btn = Gtk.MenuButton()
+        self.brush_menu_btn.set_hexpand(True)
+        self.brush_menu_btn.set_always_show_arrow(True)
+        self.brush_menu_btn.set_child(self.brush_preview)
+        self.brush_menu_btn.set_tooltip_text("Choose a brush tip")
+        brush_popover = Gtk.Popover()
+        brush_scroll = Gtk.ScrolledWindow()
+        brush_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        brush_scroll.set_min_content_height(168)
+        brush_scroll.set_max_content_height(280)
+        brush_scroll.set_min_content_width(200)
+        self.brush_flow = Gtk.FlowBox()
+        self.brush_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.brush_flow.set_homogeneous(True)
+        self.brush_flow.set_max_children_per_line(4)
+        self.brush_flow.set_min_children_per_line(3)
+        self.brush_flow.set_column_spacing(4)
+        self.brush_flow.set_row_spacing(4)
+        self.brush_flow.set_valign(Gtk.Align.START)
+        brush_scroll.set_child(self.brush_flow)
+        brush_popover.set_child(brush_scroll)
+        self.brush_menu_btn.set_popover(brush_popover)
+        self.brush_image_row.append(self.brush_menu_btn)
+
+        self.brush_density_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
+        self.brush_opts_row.append(self.brush_density_row)
+        self.brush_density_row.append(Gtk.Label(label="Density", xalign=0))
+        self.brush_density_spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+        self.brush_density_spin.set_value(10)
+        self.brush_density_spin.set_hexpand(True)
+        self.brush_density_spin.set_tooltip_text(
+            "Bubble packing along the stroke. Low = sparse solitary bubbles, "
+            "high = packed foam clusters."
+        )
+        self.brush_density_spin.connect("value-changed", self._on_brush_density_changed)
+        self.brush_density_row.append(self.brush_density_spin)
+
         self.curve_mode_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         opts.append(self.curve_mode_row)
         self.curve_mode_row.append(Gtk.Label(label="Mode", xalign=0))
@@ -926,6 +1459,19 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         self.curve_mode_dropdown.connect("notify::selected", self._on_curve_mode_changed)
         self.curve_mode_row.append(self.curve_mode_dropdown)
+
+        self.eraser_mode_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
+        opts.append(self.eraser_mode_row)
+        self.eraser_mode_row.append(Gtk.Label(label="Mode", xalign=0))
+        eraser_modes = Gtk.StringList.new(["Freehand", "Line"])
+        self.eraser_mode_dropdown = Gtk.DropDown(model=eraser_modes)
+        self.eraser_mode_dropdown.set_hexpand(True)
+        self.eraser_mode_dropdown.set_tooltip_text(
+            "Freehand: erase along the stroke. "
+            "Line: click-drag a straight erase segment (Shift snaps to 45°)."
+        )
+        self.eraser_mode_dropdown.connect("notify::selected", self._on_eraser_mode_changed)
+        self.eraser_mode_row.append(self.eraser_mode_dropdown)
 
         self.arc_degrees_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         opts.append(self.arc_degrees_row)
@@ -970,10 +1516,12 @@ class MainWindow(Gtk.ApplicationWindow):
         self.fill_opts_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         opts.append(self.fill_opts_row)
         self.fill_opts_row.append(Gtk.Label(label="Fill", xalign=0))
-        fill_modes = Gtk.StringList.new(["Color", "Pattern"])
+        fill_modes = Gtk.StringList.new(["Color", "Pattern", "Maze", "Puzzle"])
         self.fill_mode_dropdown = Gtk.DropDown(model=fill_modes)
         self.fill_mode_dropdown.set_hexpand(True)
-        self.fill_mode_dropdown.set_tooltip_text("Solid color or tiled pattern from Libraries → Patterns")
+        self.fill_mode_dropdown.set_tooltip_text(
+            "Solid color, tiled pattern, solvable maze, or interlocking puzzle pieces"
+        )
         self.fill_mode_dropdown.connect("notify::selected", self._on_fill_mode_changed)
         self.fill_opts_row.append(self.fill_mode_dropdown)
 
@@ -989,10 +1537,35 @@ class MainWindow(Gtk.ApplicationWindow):
         pat_head.append(refresh_pat)
         self.pattern_row.append(pat_head)
         self._pattern_paths: list[Path] = []
-        self.pattern_dropdown = Gtk.DropDown(model=Gtk.StringList.new(["(no patterns)"]))
-        self.pattern_dropdown.set_hexpand(True)
-        self.pattern_dropdown.connect("notify::selected", self._on_pattern_changed)
-        self.pattern_row.append(self.pattern_dropdown)
+        self._pattern_thumb_size = 56
+        self._pattern_preview_size = 40
+        self.pattern_preview = Gtk.Picture()
+        self.pattern_preview.set_size_request(self._pattern_preview_size, self._pattern_preview_size)
+        self.pattern_preview.set_content_fit(Gtk.ContentFit.COVER)
+        self.pattern_preview.set_can_shrink(False)
+        self.pattern_menu_btn = Gtk.MenuButton()
+        self.pattern_menu_btn.set_hexpand(True)
+        self.pattern_menu_btn.set_always_show_arrow(True)
+        self.pattern_menu_btn.set_child(self.pattern_preview)
+        self.pattern_menu_btn.set_tooltip_text("Choose a pattern tile")
+        pattern_popover = Gtk.Popover()
+        pattern_scroll = Gtk.ScrolledWindow()
+        pattern_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        pattern_scroll.set_min_content_height(168)
+        pattern_scroll.set_max_content_height(280)
+        pattern_scroll.set_min_content_width(200)
+        self.pattern_flow = Gtk.FlowBox()
+        self.pattern_flow.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.pattern_flow.set_homogeneous(True)
+        self.pattern_flow.set_max_children_per_line(4)
+        self.pattern_flow.set_min_children_per_line(3)
+        self.pattern_flow.set_column_spacing(4)
+        self.pattern_flow.set_row_spacing(4)
+        self.pattern_flow.set_valign(Gtk.Align.START)
+        pattern_scroll.set_child(self.pattern_flow)
+        pattern_popover.set_child(pattern_scroll)
+        self.pattern_menu_btn.set_popover(pattern_popover)
+        self.pattern_row.append(self.pattern_menu_btn)
 
         self.tile_scale_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
         self.fill_opts_row.append(self.tile_scale_row)
@@ -1004,6 +1577,33 @@ class MainWindow(Gtk.ApplicationWindow):
         self.tile_scale_spin.set_tooltip_text("Pattern tile size multiplier (1 = native image size)")
         self.tile_scale_spin.connect("value-changed", self._on_tile_scale_changed)
         self.tile_scale_row.append(self.tile_scale_spin)
+
+        self.maze_cell_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
+        self.fill_opts_row.append(self.maze_cell_row)
+        self.maze_cell_label = Gtk.Label(label="Cell Size", xalign=0)
+        self.maze_cell_row.append(self.maze_cell_label)
+        self.maze_cell_spin = Gtk.SpinButton.new_with_range(3.0, 128.0, 1.0)
+        self.maze_cell_spin.set_digits(0)
+        self.maze_cell_spin.set_value(8.0)
+        self.maze_cell_spin.set_hexpand(True)
+        self.maze_cell_spin.set_tooltip_text("Maze cell size in pixels (walls + corridor)")
+        self.maze_cell_spin.connect("value-changed", self._on_maze_cell_changed)
+        self.maze_cell_row.append(self.maze_cell_spin)
+
+        self.corridor_color_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
+        self.fill_opts_row.append(self.corridor_color_row)
+        self.corridor_color_label = Gtk.Label(label="Corridor Color", xalign=0)
+        self.corridor_color_row.append(self.corridor_color_label)
+        self.corridor_color_btn = ColorSelectButton(use_alpha=True)
+        self.corridor_color_btn.set_hexpand(True)
+        self.corridor_color_btn.set_tooltip_text("Color for maze corridors / paths")
+        self.corridor_color_btn.set_recent_colors(self.app_settings.recent_colors)
+        corridor_rgba = self.corridor_color_btn.get_rgba()
+        corridor_rgba.red = corridor_rgba.green = corridor_rgba.blue = 1.0
+        corridor_rgba.alpha = 1.0
+        self.corridor_color_btn.set_rgba(corridor_rgba)
+        self.corridor_color_btn.connect("color-set", self._on_corridor_color)
+        self.corridor_color_row.append(self.corridor_color_btn)
 
         self.type_opts_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         opts.append(self.type_opts_row)
@@ -1062,11 +1662,13 @@ class MainWindow(Gtk.ApplicationWindow):
 
         self.intensity_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         opts.append(self.intensity_row)
-        self.intensity_row.append(Gtk.Label(label="Intensity", xalign=0))
+        self.intensity_label = Gtk.Label(label="Intensity", xalign=0)
+        self.intensity_row.append(self.intensity_label)
         self.intensity_spin = Gtk.SpinButton.new_with_range(0, 100, 1)
         self.intensity_spin.set_hexpand(True)
         self.intensity_spin.set_tooltip_text(
-            "Smear / liquify strength. 0 = none, 100 = strong. Pen pressure fine-tunes within this."
+            "Smear / liquify strength, or weld-brush fillet amount. "
+            "0 = none, 100 = strong. Pen pressure fine-tunes smear/liquify within this."
         )
         self.intensity_spin.connect("value-changed", self._on_intensity_changed)
         self.intensity_row.append(self.intensity_spin)
@@ -1138,6 +1740,16 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mirror_toggle.connect("toggled", self._on_mirror_toggled)
         mirror_box.append(self.mirror_toggle)
 
+        self.tile_wrap_toggle = Gtk.CheckButton(label="Wrap")
+        self.tile_wrap_toggle.set_tooltip_text(
+            "Paint and transform across tile edges: content that leaves one side "
+            "reappears on the opposite side. Turns on with Tile Preview and off "
+            "when preview is disabled; you can still toggle it manually."
+        )
+        self.tile_wrap_toggle.set_active(False)
+        self.tile_wrap_toggle.connect("toggled", self._on_tile_wrap_toggled)
+        mirror_box.append(self.tile_wrap_toggle)
+
         self.mirror_opts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.mirror_opts.set_visible(False)
         mirror_box.append(self.mirror_opts)
@@ -1166,8 +1778,8 @@ class MainWindow(Gtk.ApplicationWindow):
         # Libraries tab — open category folders in the system file manager
         libraries_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["toolbox"])
         libraries_page.append(Gtk.Label(
-            label="Open a category folder to add assets. Patterns (.png / .jpeg) appear in Fill; "
-            "fonts (.ttf / .otf) appear in the Type tool Library source.",
+            label="Open a category folder to add assets. Brushes (.png) appear in Brush → Custom; "
+            "patterns (.png / .jpeg) appear in Fill; fonts (.ttf / .otf) appear in the Type tool Library source.",
             xalign=0,
             wrap=True,
         ))
@@ -1176,7 +1788,7 @@ class MainWindow(Gtk.ApplicationWindow):
             btn.add_css_class("lib-cat-btn")
             btn.set_hexpand(True)
             if cat_id == "brushes":
-                btn.set_tooltip_text("Open brushes folder (not implemented yet)")
+                btn.set_tooltip_text("Open brushes folder — drop .png tip images here")
             elif cat_id == "fonts":
                 btn.set_tooltip_text("Open fonts folder — drop .ttf / .otf files here")
             else:
@@ -1216,6 +1828,7 @@ class MainWindow(Gtk.ApplicationWindow):
             push_history=self._push_history,
             get_mirror=lambda: self.mirror,
             get_grid=lambda: self.grid,
+            get_tile_wrap=lambda: self.tile_wrap,
             on_type_editing=self._on_type_editing_changed,
         )
         type_tool = self.tools.get("type")
@@ -1395,9 +2008,33 @@ class MainWindow(Gtk.ApplicationWindow):
         h = split.get_height()
         if h < 160:
             return False
+        if not self.frames_expander.get_expanded() and not self.layers_expander.get_expanded():
+            # Both collapsed — stack headers at the top instead of mid-column.
+            self._pack_sidebar_headers_top()
+            self._sidebar_sized = True
+            return False
         # ~38% frames / 62% layers — layers need room for opacity rows + buttons
         split.set_position(max(120, int(h * 0.38)))
         self._sidebar_sized = True
+        return False
+
+    def _pack_sidebar_headers_top(self) -> bool:
+        """Place both Frames and Layers headers at the top of the sidebar column."""
+        split = self._sidebar_split
+        _min_h, nat_h, *_ = self.frames_expander.measure(Gtk.Orientation.VERTICAL, -1)
+        if nat_h > 0:
+            split.set_position(nat_h)
+        return False
+
+    def _sidebar_give_space_to_frames(self) -> bool:
+        """Push the Layers header to the bottom so Frames can use the column."""
+        split = self._sidebar_split
+        h = split.get_height()
+        if h <= 0:
+            return False
+        _min_h, nat_h, *_ = self.layers_expander.measure(Gtk.Orientation.VERTICAL, -1)
+        handle = 8
+        split.set_position(max(0, h - max(nat_h, 1) - handle))
         return False
 
     def _on_tool_toggled(self, btn: Gtk.ToggleButton, tid: str) -> None:
@@ -1429,6 +2066,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self._refresh_pattern_dropdown(
                 select_path=getattr(self._active_tool(), "pattern_path", None)
             )
+        elif category == "brushes":
+            self._refresh_brush_dropdown(
+                select_path=getattr(self._active_tool(), "brush_path", None)
+            )
         elif category == "fonts":
             if getattr(self._active_tool(), "uses_type_options", False):
                 self._refresh_font_dropdown(
@@ -1441,6 +2082,8 @@ class MainWindow(Gtk.ApplicationWindow):
             tool = self._active_tool()
             if getattr(tool, "uses_fill_options", False):
                 self._refresh_pattern_dropdown(select_path=getattr(tool, "pattern_path", None))
+            if getattr(tool, "uses_brush_options", False):
+                self._refresh_brush_dropdown(select_path=getattr(tool, "brush_path", None))
             if getattr(tool, "uses_type_options", False):
                 self._refresh_font_dropdown(select_path=getattr(tool, "font_path", None))
 
@@ -1448,12 +2091,17 @@ class MainWindow(Gtk.ApplicationWindow):
         if self._syncing_tool_ui:
             return
         c = btn.get_rgba()
-        self._active_tool().color = (
+        color = (
             int(c.red * 255),
             int(c.green * 255),
             int(c.blue * 255),
             int(c.alpha * 255),
         )
+        if self.app_settings.color_follows_tools:
+            self._shared_color = color
+            self._apply_shared_color_to_tools()
+        else:
+            self._active_tool().color = color
         self._refresh_type_preview()
         self.app_settings.recent_colors = btn.get_recent_colors()
         save_settings(self.app_settings)
@@ -1585,6 +2233,28 @@ class MainWindow(Gtk.ApplicationWindow):
             debounce_ms=40,
         )
 
+    def action_effect_threshold(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Threshold",
+            blurb="Hard black / white cut from the active layer’s luma (alpha preserved).",
+            options=[
+                EffectOption(
+                    "style",
+                    "Style",
+                    "choice",
+                    "Light on dark",
+                    choices=EDGE_STYLES,
+                ),
+                EffectOption("level", "Level", "spin", 50, minimum=0, maximum=100, step=1),
+            ],
+            effect_fn=lambda src, p: threshold(
+                src,
+                level=float(p["level"]),
+                style=str(p["style"]),
+            ),
+            debounce_ms=40,
+        )
+
     def action_effect_liquify(self, *_a) -> None:
         self._open_effect_dialog(
             title="Liquify",
@@ -1610,6 +2280,217 @@ class MainWindow(Gtk.ApplicationWindow):
             ),
             debounce_ms=50,
             preview_max_side=1280,
+        )
+
+    def action_effect_edge_detect(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Edge Detect",
+            blurb="Sobel edges from the active layer’s luma (alpha preserved).",
+            options=[
+                EffectOption(
+                    "style",
+                    "Style",
+                    "choice",
+                    "Light on dark",
+                    choices=EDGE_STYLES,
+                ),
+                EffectOption("strength", "Strength", "spin", 100, minimum=0, maximum=200, step=1),
+                EffectOption("threshold", "Threshold", "spin", 0, minimum=0, maximum=100, step=1),
+                EffectOption("radius", "Pre-blur", "spin", 0, minimum=0, maximum=16, step=1),
+            ],
+            effect_fn=lambda src, p: edge_detect(
+                src,
+                strength=float(p["strength"]),
+                threshold=float(p["threshold"]),
+                radius=int(p["radius"]),
+                style=str(p["style"]),
+            ),
+            debounce_ms=50,
+            preview_max_side=1280,
+        )
+
+    def action_effect_normal_map(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Normal Map",
+            blurb="Bake a tangent-space normal map from luma-as-height (alpha preserved).",
+            options=[
+                EffectOption(
+                    "y_convention",
+                    "Y axis",
+                    "choice",
+                    "OpenGL",
+                    choices=NORMAL_MAP_Y,
+                ),
+                EffectOption("strength", "Strength", "spin", 100, minimum=1, maximum=500, step=1),
+                EffectOption("radius", "Smooth", "spin", 0, minimum=0, maximum=16, step=1),
+            ],
+            effect_fn=lambda src, p: normal_map(
+                src,
+                strength=float(p["strength"]),
+                radius=int(p["radius"]),
+                y_convention=str(p["y_convention"]),
+            ),
+            debounce_ms=50,
+            preview_max_side=1280,
+        )
+
+    def action_effect_metal_relief(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Metal Relief",
+            blurb=(
+                "Emboss luma as raised metal (copper, silver, gold, …) with "
+                "gloss, shadow, exposure, and split highlight/shadow hues. "
+                "Alpha is preserved."
+            ),
+            options=[
+                EffectOption(
+                    "metal",
+                    "Metal",
+                    "choice",
+                    "Copper",
+                    choices=METAL_PRESETS,
+                ),
+                EffectOption("depth", "Depth", "spin", 70, minimum=0, maximum=100, step=1),
+                EffectOption(
+                    "glossiness", "Glossiness", "spin", 55, minimum=0, maximum=100, step=1
+                ),
+                EffectOption("shadow", "Shadow", "spin", 40, minimum=0, maximum=100, step=1),
+                EffectOption(
+                    "reflections", "Reflections", "spin", 50, minimum=0, maximum=100, step=1
+                ),
+                EffectOption(
+                    "exposure", "Exposure", "spin", 100, minimum=0, maximum=200, step=1
+                ),
+                EffectOption("hue", "Hue", "spin", 0, minimum=-180, maximum=180, step=1),
+                EffectOption(
+                    "saturation",
+                    "Saturation",
+                    "spin",
+                    100,
+                    minimum=0,
+                    maximum=200,
+                    step=1,
+                ),
+                EffectOption(
+                    "highlight_hue",
+                    "Highlight hue",
+                    "spin",
+                    0,
+                    minimum=-180,
+                    maximum=180,
+                    step=1,
+                ),
+                EffectOption(
+                    "shadow_hue",
+                    "Shadow hue",
+                    "spin",
+                    0,
+                    minimum=-180,
+                    maximum=180,
+                    step=1,
+                ),
+                EffectOption("radius", "Smooth", "spin", 1, minimum=0, maximum=16, step=1),
+            ],
+            effect_fn=lambda src, p: metal_relief(
+                src,
+                metal=str(p["metal"]),
+                depth=float(p["depth"]),
+                glossiness=float(p["glossiness"]),
+                shadow=float(p["shadow"]),
+                reflections=float(p["reflections"]),
+                exposure=float(p["exposure"]),
+                hue=float(p["hue"]),
+                highlight_hue=float(p["highlight_hue"]),
+                shadow_hue=float(p["shadow_hue"]),
+                saturation=float(p["saturation"]),
+                radius=int(p["radius"]),
+            ),
+            debounce_ms=50,
+            preview_max_side=1280,
+        )
+
+    def action_effect_milk(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Milk",
+            blurb=(
+                "Emboss luma as creamy viscous fluid — wet sheen, liquid edges, "
+                "brush-mode bubbles, clear spots. Raise Expiration for yellow / "
+                "mould / brown spoil."
+            ),
+            options=[
+                EffectOption("depth", "Depth", "spin", 55, minimum=0, maximum=100, step=1),
+                EffectOption(
+                    "glossiness", "Glossiness", "spin", 75, minimum=0, maximum=100, step=1
+                ),
+                EffectOption(
+                    "thickness", "Thickness", "spin", 90, minimum=0, maximum=100, step=1
+                ),
+                EffectOption("shadow", "Shadow", "spin", 30, minimum=0, maximum=100, step=1),
+                EffectOption(
+                    "exposure", "Exposure", "spin", 100, minimum=0, maximum=200, step=1
+                ),
+                EffectOption("hue", "Hue", "spin", 8, minimum=-180, maximum=180, step=1),
+                EffectOption(
+                    "saturation",
+                    "Saturation",
+                    "spin",
+                    35,
+                    minimum=0,
+                    maximum=200,
+                    step=1,
+                ),
+                EffectOption("radius", "Smooth", "spin", 8, minimum=0, maximum=32, step=1),
+                EffectOption(
+                    "bubbles", "Bubbles", "spin", 45, minimum=0, maximum=100, step=1
+                ),
+                EffectOption(
+                    "bubble_size",
+                    "Bubble size",
+                    "spin",
+                    50,
+                    minimum=0,
+                    maximum=100,
+                    step=1,
+                ),
+                EffectOption(
+                    "clear_spots", "Clear spots", "spin", 40, minimum=0, maximum=100, step=1
+                ),
+                EffectOption(
+                    "edge_melt", "Edge melt", "spin", 70, minimum=0, maximum=100, step=1
+                ),
+                EffectOption(
+                    "wetness", "Wetness", "spin", 45, minimum=0, maximum=100, step=1
+                ),
+                EffectOption(
+                    "expiration",
+                    "Expiration date",
+                    "spin",
+                    0,
+                    minimum=0,
+                    maximum=100,
+                    step=1,
+                ),
+            ],
+            effect_fn=lambda src, p: milk(
+                src,
+                depth=float(p["depth"]),
+                glossiness=float(p["glossiness"]),
+                thickness=float(p["thickness"]),
+                shadow=float(p["shadow"]),
+                exposure=float(p["exposure"]),
+                hue=float(p["hue"]),
+                saturation=float(p["saturation"]),
+                radius=int(p["radius"]),
+                bubbles=float(p["bubbles"]),
+                bubble_size=float(p["bubble_size"]),
+                clear_spots=float(p["clear_spots"]),
+                edge_melt=float(p["edge_melt"]),
+                wetness=float(p["wetness"]),
+                expiration=float(p["expiration"]),
+            ),
+            # Downscaled live preview for speed; Apply still runs full-res.
+            debounce_ms=90,
+            preview_max_side=480,
         )
 
     def _open_effect_dialog(
@@ -1992,8 +2873,21 @@ class MainWindow(Gtk.ApplicationWindow):
             # Both open — keep sharing; re-apply a balanced split once laid out.
             self._sidebar_sized = False
             GLib.idle_add(self._apply_default_sidebar_split)
+        elif expanded and not other.get_expanded():
+            # One open — give it the column; keep the collapsed header at the edge.
+            if expander is self.frames_expander:
+                GLib.idle_add(self._sidebar_give_space_to_frames)
+            else:
+                GLib.idle_add(self._pack_sidebar_headers_top)
         elif not expanded and other.get_expanded():
             other.set_vexpand(True)
+            if other is self.frames_expander:
+                GLib.idle_add(self._sidebar_give_space_to_frames)
+            else:
+                GLib.idle_add(self._pack_sidebar_headers_top)
+        elif not expanded and not other.get_expanded():
+            # Both collapsed — keep headers stacked at the top of the column.
+            GLib.idle_add(self._pack_sidebar_headers_top)
 
     def _rebuild_frames(self) -> None:
         self._syncing_frames = True
@@ -2299,6 +3193,7 @@ class MainWindow(Gtk.ApplicationWindow):
         menu = getattr(self, "_layer_context_menu", None)
         if menu is None:
             menu = Gio.Menu()
+            menu.append("Duplicate Layer", "win.duplicate_layer")
             menu.append("Rename Layer…", "win.rename_layer")
             menu.append("Merge with Layer Below", "win.merge_layer_down")
             menu.append("Merge All", "win.merge_all_layers")
@@ -2648,7 +3543,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._refresh_tool_shortcut_tips()
 
     def _refresh_tool_shortcut_tips(self) -> None:
-        for tid, label, _letter, _num in TOOL_ORDER:
+        for tid, label in TOOL_ORDER:
             btn = self.tool_buttons.get(tid)
             if btn is None:
                 continue
@@ -2936,6 +3831,13 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             self.destroy()
 
+    def request_reload(self, *_a) -> None:
+        """Restart the process so code changes take effect; debug_mode stays in settings."""
+        self._persist_settings()
+        self.shutdown_input()
+        argv = [sys.executable, "-m", "inkobold", *sys.argv[1:]]
+        os.execv(sys.executable, argv)
+
     def action_export(self, *_a) -> None:
         if not self.document:
             return
@@ -3115,6 +4017,16 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self._push_history()
         self.document.add_layer()
+        self._rebuild_layers()
+        self.canvas.queue_render()
+        self._set_status()
+
+    def action_duplicate_layer(self, *_a) -> None:
+        if not self.document:
+            return
+        self._push_history()
+        if self.document.duplicate_layer() is None:
+            return
         self._rebuild_layers()
         self.canvas.queue_render()
         self._set_status()

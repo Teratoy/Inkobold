@@ -25,6 +25,12 @@ class AppSettings:
     history_steps: int = DEFAULT_HISTORY_STEPS
     default_dpi: int = DEFAULT_DPI
     default_color_depth: int = COLOR_DEPTH_RGBA32
+    # When True, one shared color follows you across tools; when False, each tool keeps its own.
+    color_follows_tools: bool = False
+    # When True, show a Reload button so the process can be restarted without quitting first.
+    debug_mode: bool = False
+    # Tool ids shown in the Tools column; empty means all known tools.
+    visible_tools: list[str] = field(default_factory=list)
     # action -> accel list; only stores differences from defaults when saved
     shortcut_overrides: dict[str, list[str]] = field(default_factory=dict)
     # most-recent paint colors first (RGBA 0–255)
@@ -41,6 +47,8 @@ class AppSettings:
         self.default_dpi = max(1, min(1200, int(self.default_dpi)))
         if self.default_color_depth not in {d for d, _ in COLOR_DEPTH_CHOICES}:
             self.default_color_depth = COLOR_DEPTH_RGBA32
+        self.color_follows_tools = bool(self.color_follows_tools)
+        self.debug_mode = bool(self.debug_mode)
         cleaned: dict[str, list[str]] = {}
         for key, accels in self.shortcut_overrides.items():
             if not isinstance(key, str) or not isinstance(accels, list):
@@ -67,6 +75,10 @@ class AppSettings:
             if len(recent) >= 8:
                 break
         self.recent_colors = recent
+        if isinstance(self.visible_tools, list):
+            self.visible_tools = [str(t) for t in self.visible_tools if isinstance(t, str)]
+        else:
+            self.visible_tools = []
 
 
 def config_path() -> Path:
@@ -117,6 +129,13 @@ def load_settings() -> AppSettings:
     raw_recent = data.get("recent_colors")
     if isinstance(raw_recent, list):
         settings.recent_colors = list(raw_recent)  # clamp() validates/normalizes
+    if "color_follows_tools" in data:
+        settings.color_follows_tools = bool(data.get("color_follows_tools"))
+    if "debug_mode" in data:
+        settings.debug_mode = bool(data.get("debug_mode"))
+    raw_visible = data.get("visible_tools")
+    if isinstance(raw_visible, list):
+        settings.visible_tools = [str(t) for t in raw_visible if isinstance(t, str)]
     settings.clamp()
     return settings
 
@@ -133,6 +152,9 @@ def save_settings(settings: AppSettings) -> None:
             "history_steps": int(settings.history_steps),
             "default_dpi": int(settings.default_dpi),
             "default_color_depth": int(settings.default_color_depth),
+            "color_follows_tools": bool(settings.color_follows_tools),
+            "debug_mode": bool(settings.debug_mode),
+            "visible_tools": list(settings.visible_tools),
             "shortcut_overrides": {
                 k: list(v) for k, v in settings.shortcut_overrides.items()
             },

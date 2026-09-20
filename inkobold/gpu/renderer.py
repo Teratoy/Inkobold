@@ -144,6 +144,8 @@ class GpuRenderer:
         self.pan_y = 40.0
         self.zoom = 1.0
         self.checker_light = False
+        # When True, composite a 3×3 repeat so seamless tiles can be judged live.
+        self.tile_preview = False
         self.init_error: str | None = None
 
     def _loc(self, prog: int, name: str) -> int:
@@ -328,8 +330,10 @@ class GpuRenderer:
             self.pan_x = 0.0
             self.pan_y = 0.0
             return
-        zx = (vw - margin * 2) / max(1, doc.width)
-        zy = (vh - margin * 2) / max(1, doc.height)
+        # Tile preview draws a 3×3 repeat; zoom out so all nine tiles fit.
+        span = 3 if self.tile_preview else 1
+        zx = (vw - margin * 2) / max(1, doc.width * span)
+        zy = (vh - margin * 2) / max(1, doc.height * span)
         self.zoom = max(0.05, min(zx, zy, 8.0))
         self.pan_x = (vw - doc.width * self.zoom) * 0.5
         self.pan_y = (vh - doc.height * self.zoom) * 0.5
@@ -354,6 +358,14 @@ class GpuRenderer:
         doc_w, doc_h = float(doc.width), float(doc.height)
         pan_x, pan_y, zoom = float(self.pan_x), float(self.pan_y), float(self.zoom)
         loc = self._loc
+        if self.tile_preview:
+            tile_offsets = [
+                (float(dx) * doc_w, float(dy) * doc_h)
+                for dy in (-1, 0, 1)
+                for dx in (-1, 0, 1)
+            ]
+        else:
+            tile_offsets = [(0.0, 0.0)]
 
         def set_common(prog: int, ox: float = 0.0, oy: float = 0.0) -> None:
             GL.glUseProgram(prog)
@@ -372,25 +384,29 @@ class GpuRenderer:
             if opacity_scale <= 0.001:
                 return
             first = True
-            for ly in layers:
-                if not ly.visible:
-                    continue
-                self.upload_layer(ly.id, ly.pixels, ly.dirty_stamp())
-                if first:
-                    # View uniforms are shared by every layer; set them once.
-                    set_common(prog_layer, float(ly.offset_x), float(ly.offset_y))
-                    GL.glUniform1i(loc_tex, 0)
-                    first = False
-                else:
-                    GL.glUniform2f(loc_offset, float(ly.offset_x), float(ly.offset_y))
-                GL.glBindTexture(GL.GL_TEXTURE_2D, self.textures[ly.id])
-                GL.glUniform1f(loc_opacity, float(ly.opacity) * float(opacity_scale))
-                GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
+            for tox, toy in tile_offsets:
+                for ly in layers:
+                    if not ly.visible:
+                        continue
+                    self.upload_layer(ly.id, ly.pixels, ly.dirty_stamp())
+                    ox = float(ly.offset_x) + tox
+                    oy = float(ly.offset_y) + toy
+                    if first:
+                        # View uniforms are shared by every layer; set them once.
+                        set_common(prog_layer, ox, oy)
+                        GL.glUniform1i(loc_tex, 0)
+                        first = False
+                    else:
+                        GL.glUniform2f(loc_offset, ox, oy)
+                    GL.glBindTexture(GL.GL_TEXTURE_2D, self.textures[ly.id])
+                    GL.glUniform1f(loc_opacity, float(ly.opacity) * float(opacity_scale))
+                    GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
 
-        set_common(self.prog_checker)
-        GL.glUniform3f(loc(self.prog_checker, "u_checker_a"), *checker_a)
-        GL.glUniform3f(loc(self.prog_checker, "u_checker_b"), *checker_b)
-        GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
+        for tox, toy in tile_offsets:
+            set_common(self.prog_checker, tox, toy)
+            GL.glUniform3f(loc(self.prog_checker, "u_checker_a"), *checker_a)
+            GL.glUniform3f(loc(self.prog_checker, "u_checker_b"), *checker_b)
+            GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
 
         # Onion skin: previous frame faintly under the current cel while editing
         show_onion = (not playing) and bool(doc.onion_skin) and float(doc.onion_opacity) > 0.001

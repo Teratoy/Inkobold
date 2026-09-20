@@ -107,6 +107,8 @@ class CurveTool(BaseTool):
         pixels = ctx.document.active_layer.pixels
         color = self._paint_color(ctx)
         mask = self._mask(ctx)
+        wrap = ctx.tile_wrap
+        op = self._opacity_factor(ctx)
         mode = self.curve_mode
         if mode == "arc":
             stroke_circular_arc(
@@ -116,7 +118,9 @@ class CurveTool(BaseTool):
                 self._r,
                 color,
                 mask=mask,
+                opacity=op,
                 flip=alt,
+                wrap=wrap,
             )
         elif mode == "circle":
             if alt:
@@ -132,6 +136,8 @@ class CurveTool(BaseTool):
                 self._r,
                 color,
                 mask=mask,
+                opacity=op,
+                wrap=wrap,
             )
         else:
             p0 = (self._sx, self._sy)
@@ -145,6 +151,8 @@ class CurveTool(BaseTool):
                 self._r,
                 color,
                 mask=mask,
+                opacity=op,
+                wrap=wrap,
             )
         ctx.document.mark_dirty()
 

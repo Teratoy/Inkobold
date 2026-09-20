@@ -4,15 +4,16 @@ GPU-accelerated layered drawing for Linux, with **libinput** / **libwacom** tabl
 
 ## Features
 
-- **File** — New File (pixel size prompt), Open, Save (`.inkobold` multilayer ZIP)
-- **Layers** — RGBA8 layers, visibility, opacity-ready offsets, GPU composite
+- **File** — Multi-document tabs; New File (pixel size prompt), Open, Save (`.inkobold` multilayer ZIP), Export, Export Separated Layers, Import Image as Layer
+- **Layers** — RGBA8 layers, visibility, opacity-ready offsets, GPU composite; add / duplicate / rename / delete / merge down / merge all
 - **Animation** — Frames with FPS playback; onion-skin overlay of the previous frame while drawing; export as GIF or PNG sequence folder
-- **Tools** — Pen, Line, Curve (freehand / arc / circle), Brush, Fill, Eraser, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso
-- **Import** — Image import as a new layer
+- **Tools** — Pen, Line, Curve (freehand / arc / circle), Brush (round / custom tip / bubbles), Weld Brush, Fill, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
+- **Effects** — Pixelate, Kuwahara, Gaussian Blur, Dither, Posterize, Threshold, Liquify, Edge Detect, Normal Map, Metal Relief, Milk
+- **Libraries** — User brushes, patterns, and fonts under `~/.local/share/inkobold/libraries/` (or `$XDG_DATA_HOME/inkobold/libraries/`)
 - **Input** — GDK drawing path + libinput device poll + libwacom tablet identification
-- **View** — Pan (middle mouse), scroll zoom, Fit Canvas (on load), Fullscreen / Borderless / Windowed
-- **Edit** — Mirror / Flip / Rotate active layer; Crop Canvas (live size before apply; optional selection bounds)
-- **Settings** — Theme, Memory, Image (crop / DPI / color depth), Shortcuts (view & rebind)
+- **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid overlay, Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
+- **Edit** — Undo / Redo; Mirror / Flip / Rotate active layer; Crop Canvas (live size before apply; optional selection bounds)
+- **Settings** — Theme, Memory (undo steps), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (view & rebind), Debug Mode
 
 ## Run
 
@@ -28,23 +29,29 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/python -m inkobold
 ```
 
+Requires system **PyGObject** + **GTK4** (install via your distro; use a venv with `--system-site-packages`).
+
 ## Shortcuts
 
 | Action | Keys |
 |--------|------|
 | New / Open / Save / Save As | `Ctrl+N` `Ctrl+O` `Ctrl+S` `Ctrl+Shift+S` |
-| Import image | `Ctrl+I` |
+| Import image / Export | `Ctrl+I` / `Ctrl+E` |
+| Undo / Redo | `Ctrl+Z` / `Ctrl+Shift+Z` or `Ctrl+Y` |
 | Fit Canvas | `Ctrl+0` or `Ctrl+F` |
 | Fullscreen | `F11` |
 | Clear selection | `Esc` or `Ctrl+D` |
-| Add / delete layer | `Ctrl+Shift+N` / `Ctrl+Shift+Delete` |
+| Tile Preview / Wrap Moves | `Ctrl+Shift+T` / `Ctrl+Shift+W` |
+| Add / duplicate / delete layer | `Ctrl+Shift+N` / `Ctrl+J` / `Ctrl+Shift+Delete` |
+| Merge layer down | `Ctrl+Shift+E` |
 | Add / duplicate / delete frame | `Ctrl+Alt+N` / `Ctrl+Alt+D` / `Ctrl+Alt+Delete` |
 | Play / pause animation | `Space` or `F5` |
 | Stop animation | `F6` |
 | Brush size | `[` `]` |
-| Tools | `P/L/U/B/G/E/R/C/V/Q` or `1`–`3`, `5`–`7`, `0` |
+| Tools | `P` `L` `U` `B` `W` `G` `D` `F` `E` `M` `Y` `C`/`R` `V` `Q` `T` |
 | Pan | Middle mouse drag |
 
+Shortcuts are rebindable under **Settings → Shortcuts**.
 
 ## File format
 

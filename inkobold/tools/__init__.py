@@ -12,6 +12,7 @@ from inkobold.tools.pen3d import Fill3DTool, Pen3DTool
 from inkobold.tools.replace_color import ReplaceColorTool
 from inkobold.tools.smear import SmearTool
 from inkobold.tools.type_tool import TypeTool
+from inkobold.tools.weld_brush import WeldBrushTool
 
 
 def default_tools() -> dict:
@@ -20,6 +21,7 @@ def default_tools() -> dict:
         LineTool(),
         CurveTool(),
         BrushTool(),
+        WeldBrushTool(),
         FillTool(),
         Pen3DTool(),
         Fill3DTool(),
@@ -41,6 +43,7 @@ __all__ = [
     "LineTool",
     "CurveTool",
     "BrushTool",
+    "WeldBrushTool",
     "FillTool",
     "Pen3DTool",
     "Fill3DTool",

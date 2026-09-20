@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PATTERN_SUFFIXES = {".png", ".jpg", ".jpeg"}
+BRUSH_SUFFIXES = {".png", ".jpg", ".jpeg"}
 FONT_SUFFIXES = {".ttf", ".otf", ".ttc", ".otc"}
 
 CATEGORIES: tuple[tuple[str, str], ...] = (
@@ -65,6 +66,20 @@ def list_patterns() -> list[Path]:
         p
         for p in folder.iterdir()
         if p.is_file() and p.suffix.lower() in PATTERN_SUFFIXES
+    ]
+    files.sort(key=lambda p: p.name.lower())
+    return files
+
+
+def list_brushes() -> list[Path]:
+    """Return brush tip image paths sorted by name (case-insensitive)."""
+    folder = category_dir("brushes")
+    if not folder.is_dir():
+        return []
+    files = [
+        p
+        for p in folder.iterdir()
+        if p.is_file() and p.suffix.lower() in BRUSH_SUFFIXES
     ]
     files.sort(key=lambda p: p.name.lower())
     return files

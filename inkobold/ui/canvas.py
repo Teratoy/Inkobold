@@ -4,6 +4,7 @@ import copy
 from typing import Callable, Optional
 
 import gi
+import numpy as np
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
@@ -16,6 +17,8 @@ from inkobold.core.mirror import MirrorModifier
 from inkobold.gpu.renderer import GpuRenderer
 from inkobold.input import InputHub
 from inkobold.tools.base import ToolContext
+from inkobold.tools.brush import MAX_STROKE_BUBBLES
+from inkobold.tools.paint import render_bubbles_list
 
 
 class Canvas(Gtk.Overlay):
@@ -32,6 +35,7 @@ class Canvas(Gtk.Overlay):
         push_history: Callable[[], None] | None = None,
         get_mirror: Callable[[], MirrorModifier] | None = None,
         get_grid: Callable[[], GridOverlay] | None = None,
+        get_tile_wrap: Callable[[], bool] | None = None,
         on_type_editing: Callable[[bool], None] | None = None,
     ) -> None:
         super().__init__()
@@ -47,6 +51,7 @@ class Canvas(Gtk.Overlay):
         self._push_history = push_history
         self._get_mirror = get_mirror or (lambda: MirrorModifier())
         self._get_grid = get_grid or (lambda: GridOverlay())
+        self._get_tile_wrap = get_tile_wrap or (lambda: False)
         self._on_type_editing = on_type_editing
         self.renderer = GpuRenderer()
         self._needs_fit = True
@@ -294,10 +299,14 @@ class Canvas(Gtk.Overlay):
             frequency=float(getattr(tool, "frequency", 60)),
             fill_mode=str(getattr(tool, "fill_mode", "color")),
             tile_scale=float(getattr(tool, "tile_scale", 1.0)),
+            maze_cell_size=float(getattr(tool, "maze_cell_size", 8.0)),
+            corridor_color=tuple(getattr(tool, "corridor_color", (255, 255, 255, 255))),
             replace_action=str(getattr(tool, "replace_action", "replace")),
             apply_mode=str(getattr(tool, "apply_mode", "all")),
             intensity=float(getattr(tool, "intensity", 50)),
             opacity=float(getattr(tool, "opacity", 100)),
+            density=float(getattr(tool, "density", 50)),
+            tile_wrap=bool(self._get_tile_wrap()),
         )
 
     def _tool_xy(self, x: float, y: float) -> tuple[Optional[ToolContext], object, float, float]:
@@ -311,14 +320,26 @@ class Canvas(Gtk.Overlay):
         ly = ctx.document.active_layer
         # Paint tools expect a document-aligned buffer. Bake any leftover
         # Transform offset (e.g. tool switch mid-drag) so the full canvas stays drawable.
-        if (ly.offset_x or ly.offset_y) and ly.apply_offset():
+        if (ly.offset_x or ly.offset_y) and ly.apply_offset(wrap=bool(self._get_tile_wrap())):
             self.renderer.invalidate(ly.id)
         return ctx, tool, dx - ly.offset_x, dy - ly.offset_y
 
     def _mirror_points(self, tool: object, x: float, y: float, doc: Document) -> list[tuple[float, float]]:
+        return [(px, py) for px, py, _rev in self._mirror_branches(tool, x, y, doc)]
+
+    def _mirror_branches(
+        self, tool: object, x: float, y: float, doc: Document
+    ) -> list[tuple[float, float, bool]]:
         if not getattr(tool, "supports_mirror", True):
-            return [(x, y)]
-        return self._get_mirror().transform_points(x, y, doc.width, doc.height)
+            return [(x, y, False)]
+        return self._get_mirror().transform_branches(x, y, doc.width, doc.height)
+
+    @staticmethod
+    def _branch_alt(tool: object, alt: bool, reverse: bool) -> bool:
+        """Flip Alt for orientation-reversing mirror branches of chord-based arcs."""
+        if reverse and getattr(tool, "curve_mode", None) == "arc":
+            return not alt
+        return alt
 
     def _begin_stroke_tools(self, tool: object, points: list[tuple[float, float]]) -> list[object]:
         """Primary tool tracks the cursor; clones handle mirrored branches."""
@@ -329,6 +350,73 @@ class Canvas(Gtk.Overlay):
             tools.append(clone)
         self._stroke_tools = tools
         return tools
+
+    def _prepare_bubble_stroke_tools(self, ctx: ToolContext, tools: list[object]) -> None:
+        """Share one pre-stroke layer snapshot across bubble brush branches."""
+        if not tools:
+            return
+        primary = tools[0]
+        if getattr(primary, "brush_mode", None) != "bubbles":
+            return
+        if not hasattr(primary, "begin_bubble_stroke"):
+            return
+        base = np.array(ctx.document.active_layer.pixels, copy=True)
+        # One shared bubble list so each branch's live preview sees the others.
+        shared: list[tuple[float, float, float, float]] = []
+        for t in tools:
+            t.begin_bubble_stroke(base, shared)
+
+    def _release_stroke_tools(
+        self, ctx: ToolContext, tool: object, points: list[tuple[float, float]]
+    ) -> None:
+        """End a stroke; bubble mode reblends every collected bubble together."""
+        tools = self._stroke_tool_list(tool)
+        if getattr(tool, "brush_mode", None) == "bubbles" and hasattr(tool, "take_bubble_stroke"):
+            base = None
+            placed: list[tuple[float, float, float, float]] = []
+            seen_lists: list[list] = []
+            color = (255, 255, 255, 255)
+            opacity = 1.0
+            for t in tools:
+                t._drawing = False
+                b, p, c, o = t.take_bubble_stroke()
+                if b is not None:
+                    base = b
+                # Branches share one list object; don't add it twice.
+                if not any(p is s for s in seen_lists):
+                    seen_lists.append(p)
+                    placed.extend(p)
+                color, opacity = c, o
+            if base is not None and placed:
+                pixels = ctx.document.active_layer.pixels
+                if pixels.shape == base.shape:
+                    pixels[...] = base
+                    if len(placed) > MAX_STROKE_BUBBLES:
+                        placed = placed[:MAX_STROKE_BUBBLES]
+                    mask = tool._mask(ctx) if hasattr(tool, "_mask") else None
+                    render_bubbles_list(
+                        pixels, placed, color, mask=mask, opacity=opacity,
+                    )
+                    ctx.document.mark_dirty()
+        else:
+            for t, (mx, my) in zip(tools, points):
+                t.on_release(ctx, mx, my)
+        self._stroke_tools = None
+
+    def _start_paint_stroke(
+        self,
+        ctx: ToolContext,
+        tool: object,
+        branches: list[tuple[float, float, bool]],
+        *,
+        shift: bool,
+        alt: bool,
+    ) -> None:
+        points = [(mx, my) for mx, my, _rev in branches]
+        tools = self._begin_stroke_tools(tool, points)
+        self._prepare_bubble_stroke_tools(ctx, tools)
+        for t, (mx, my, rev) in zip(tools, branches):
+            t.on_press(ctx, mx, my, shift=shift, alt=self._branch_alt(t, alt, rev))
 
     def _stroke_tool_list(self, tool: object) -> list[object]:
         if self._stroke_tools:
@@ -349,6 +437,16 @@ class Canvas(Gtk.Overlay):
         doc = self._get_document()
         if doc is None:
             return
+
+        if self.renderer.tile_preview:
+            cr.save()
+            sx0, sy0 = self.renderer.doc_to_screen(0.0, 0.0)
+            sx1, sy1 = self.renderer.doc_to_screen(float(doc.width), float(doc.height))
+            cr.set_source_rgba(0.95, 0.95, 1.0, 0.9)
+            cr.set_line_width(1.5)
+            cr.rectangle(sx0, sy0, sx1 - sx0, sy1 - sy0)
+            cr.stroke()
+            cr.restore()
 
         grid = self._get_grid()
         if grid.enabled:
@@ -504,9 +602,8 @@ class Canvas(Gtk.Overlay):
             self._checkpoint()
         self._drawing = True
         self._btn1 = True
-        points = self._mirror_points(tool, lx, ly, ctx.document)
-        for t, (mx, my) in zip(self._begin_stroke_tools(tool, points), points):
-            t.on_press(ctx, mx, my, shift=shift, alt=alt)
+        points = self._mirror_branches(tool, lx, ly, ctx.document)
+        self._start_paint_stroke(ctx, tool, points, shift=shift, alt=alt)
         self._after_tool(ctx, tool)
         self._bind_type_editing_callback()
 
@@ -524,9 +621,7 @@ class Canvas(Gtk.Overlay):
             self._stroke_tools = None
             return
         points = self._mirror_points(tool, lx, ly, ctx.document)
-        for t, (mx, my) in zip(self._stroke_tool_list(tool), points):
-            t.on_release(ctx, mx, my)
-        self._stroke_tools = None
+        self._release_stroke_tools(ctx, tool, points)
         self._after_tool(ctx, tool)
 
     def _on_drag_begin(self, gesture: Gtk.GestureDrag, x: float, y: float) -> None:
@@ -544,9 +639,8 @@ class Canvas(Gtk.Overlay):
             if not editing:
                 self._checkpoint()
             self._drawing = True
-            points = self._mirror_points(tool, lx, ly, ctx.document)
-            for t, (mx, my) in zip(self._begin_stroke_tools(tool, points), points):
-                t.on_press(ctx, mx, my, shift=shift, alt=alt)
+            points = self._mirror_branches(tool, lx, ly, ctx.document)
+            self._start_paint_stroke(ctx, tool, points, shift=shift, alt=alt)
             self._after_tool(ctx, tool)
             self._bind_type_editing_callback()
 
@@ -568,14 +662,14 @@ class Canvas(Gtk.Overlay):
         if ctx is None:
             return
         shift, alt = self._mods_from_gesture(gesture)
-        points = self._mirror_points(tool, lx, ly, ctx.document)
+        branches = self._mirror_branches(tool, lx, ly, ctx.document)
         tools = self._stroke_tool_list(tool)
-        if len(tools) != len(points):
+        if len(tools) != len(branches):
             # Settings changed mid-stroke — stick to the primary branch.
             tools = tools[:1]
-            points = points[:1]
-        for t, (mx, my) in zip(tools, points):
-            t.on_drag(ctx, mx, my, shift=shift, alt=alt)
+            branches = branches[:1]
+        for t, (mx, my, rev) in zip(tools, branches):
+            t.on_drag(ctx, mx, my, shift=shift, alt=self._branch_alt(t, alt, rev))
         self._after_tool(ctx, tool)
 
     def _on_drag_end(self, gesture: Gtk.GestureDrag, offset_x: float, offset_y: float) -> None:
@@ -596,9 +690,7 @@ class Canvas(Gtk.Overlay):
             self._stroke_tools = None
             return
         points = self._mirror_points(tool, lx, ly, ctx.document)
-        for t, (mx, my) in zip(self._stroke_tool_list(tool), points):
-            t.on_release(ctx, mx, my)
-        self._stroke_tools = None
+        self._release_stroke_tools(ctx, tool, points)
         self._after_tool(ctx, tool)
 
     # --- middle-button pan ---

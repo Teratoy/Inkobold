@@ -22,9 +22,11 @@ class ToolContext:
     fill3d_type: str = "classic"
     # 3D pen stamp density (0–100)
     frequency: float = 60.0
-    # Fill: solid color vs tiled pattern
+    # Fill: "color" | "pattern" | "maze" | "puzzle"
     fill_mode: str = "color"
     tile_scale: float = 1.0
+    maze_cell_size: float = 8.0
+    corridor_color: tuple[int, int, int, int] = (255, 255, 255, 255)
     # Replace tool: "replace" | "erase"
     replace_action: str = "replace"
     # Replace tool scope: "brush" | "fill" | "all"
@@ -33,6 +35,10 @@ class ToolContext:
     intensity: float = 50.0
     # Paint / erase strength (0–100)
     opacity: float = 100.0
+    # Bubbles brush stamp density (0–100)
+    density: float = 50.0
+    # When True, stamps and transforms wrap across opposite tile edges.
+    tile_wrap: bool = False
 
 
 class Tool(Protocol):
@@ -62,10 +68,12 @@ class BaseTool:
     uses_fill3d_types: bool = False
     uses_frequency: bool = False
     uses_fill_options: bool = False
+    uses_brush_options: bool = False
     uses_replace_modes: bool = False
     uses_intensity: bool = False
     uses_opacity: bool = False
     uses_curve_modes: bool = False
+    uses_eraser_modes: bool = False
     uses_liquify_modes: bool = False
     uses_type_options: bool = False
     # Pointer coords in document space (not layer-local). Needed when the tool
@@ -82,7 +90,9 @@ class BaseTool:
     default_frequency: float = 60.0
     default_intensity: float = 50.0
     default_opacity: float = 100.0
+    default_density: float = 50.0
     default_curve_mode: str = "freehand"
+    default_eraser_mode: str = "freehand"
     default_arc_degrees: float = 180.0
     default_liquify_mode: str = "Push"
 
@@ -97,6 +107,7 @@ class BaseTool:
         self.frequency: float = self.default_frequency
         self.intensity: float = self.default_intensity
         self.opacity: float = self.default_opacity
+        self.density: float = self.default_density
         self.liquify_mode: str = self.default_liquify_mode
 
     def on_press(self, ctx: ToolContext, x: float, y: float, shift: bool = False, alt: bool = False) -> None:

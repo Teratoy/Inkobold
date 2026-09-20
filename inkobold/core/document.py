@@ -17,6 +17,7 @@ from inkobold.core.animation import (
     DEFAULT_ONION_OPACITY,
     AnimFrame,
     blank_frame,
+    clone_layer,
 )
 from inkobold.core.image_meta import (
     COLOR_DEPTH_GRAY8,
@@ -247,6 +248,21 @@ class Document:
         self.active_layer_index = len(self.layers) - 1
         self.dirty = True
         return layer
+
+    def duplicate_layer(self, index: int | None = None) -> Layer | None:
+        """Insert a deep copy of the layer above ``index`` (default: active)."""
+        if index is None:
+            index = self.active_layer_index
+        if not (0 <= index < len(self.layers)):
+            return None
+        src = self.layers[index]
+        dup = clone_layer(src)
+        dup.name = f"{src.name} copy"
+        self.layers.insert(index + 1, dup)
+        self.active_layer_index = index + 1
+        self._sync_frame_from_layers()
+        self.dirty = True
+        return dup
 
     def delete_layer(self, index: int) -> None:
         if len(self.layers) <= 1:

@@ -10,6 +10,7 @@ from inkobold.tools.paint import (
     flood_fill,
     replace_matching_colors,
     stroke_segment,
+    wrap_pixel_coords,
 )
 
 
@@ -54,9 +55,12 @@ class ReplaceColorTool(BaseTool):
 
     def _sample_key(self, ctx: ToolContext, x: float, y: float) -> Optional[tuple[int, int, int, int]]:
         ly = ctx.document.active_layer
-        ix, iy = int(x), int(y)
-        if not (0 <= ix < ly.width and 0 <= iy < ly.height):
-            return None
+        if ctx.tile_wrap:
+            ix, iy = wrap_pixel_coords(x, y, ly.width, ly.height)
+        else:
+            ix, iy = int(x), int(y)
+            if not (0 <= ix < ly.width and 0 <= iy < ly.height):
+                return None
         return tuple(int(c) for c in ly.pixels[iy, ix])  # type: ignore[return-value]
 
     def on_press(self, ctx: ToolContext, x: float, y: float, shift: bool = False, alt: bool = False) -> None:
@@ -66,6 +70,7 @@ class ReplaceColorTool(BaseTool):
         thr = self._threshold(ctx)
         mask = self._mask(ctx)
         op = self._opacity_factor(ctx)
+        wrap = ctx.tile_wrap
 
         if action == "erase":
             key = self._match_key(ctx)
@@ -75,7 +80,9 @@ class ReplaceColorTool(BaseTool):
                 ctx.document.mark_dirty()
                 return
             if mode == "fill":
-                flood_erase(pixels, int(x), int(y), key, tolerance=thr, mask=mask, opacity=op)
+                flood_erase(
+                    pixels, int(x), int(y), key, tolerance=thr, mask=mask, opacity=op, wrap=wrap,
+                )
                 ctx.document.mark_dirty()
                 return
             # brush
@@ -83,7 +90,7 @@ class ReplaceColorTool(BaseTool):
             self._lx, self._ly = x, y
             background_erase_stroke(
                 pixels, x, y, x, y, self._radius(ctx) * 1.4, key,
-                tolerance=thr, mask=mask, opacity=op,
+                tolerance=thr, mask=mask, opacity=op, wrap=wrap,
             )
             ctx.document.mark_dirty()
             return
@@ -99,7 +106,7 @@ class ReplaceColorTool(BaseTool):
             ctx.document.mark_dirty()
             return
         if mode == "fill":
-            flood_fill(pixels, int(x), int(y), paint, tolerance=thr, mask=mask)
+            flood_fill(pixels, int(x), int(y), paint, tolerance=thr, mask=mask, wrap=wrap)
             ctx.document.mark_dirty()
             return
         # brush
@@ -107,7 +114,7 @@ class ReplaceColorTool(BaseTool):
         self._lx, self._ly = x, y
         stroke_segment(
             pixels, x, y, x, y, self._radius(ctx) * 1.4, paint,
-            mask=mask, key_color=key, threshold=thr, replace=True, opacity=op,
+            mask=mask, key_color=key, threshold=thr, replace=True, opacity=op, wrap=wrap,
         )
         ctx.document.mark_dirty()
 
@@ -119,15 +126,16 @@ class ReplaceColorTool(BaseTool):
         mask = self._mask(ctx)
         op = self._opacity_factor(ctx)
         r = self._radius(ctx) * 1.4
+        wrap = ctx.tile_wrap
         if self._action(ctx) == "erase":
             background_erase_stroke(
                 pixels, self._lx, self._ly, x, y, r, self._key,
-                tolerance=thr, mask=mask, opacity=op,
+                tolerance=thr, mask=mask, opacity=op, wrap=wrap,
             )
         else:
             stroke_segment(
                 pixels, self._lx, self._ly, x, y, r, self._paint_color(ctx),
-                mask=mask, key_color=self._key, threshold=thr, replace=True, opacity=op,
+                mask=mask, key_color=self._key, threshold=thr, replace=True, opacity=op, wrap=wrap,
             )
         self._lx, self._ly = x, y
         ctx.document.mark_dirty()

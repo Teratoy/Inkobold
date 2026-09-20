@@ -74,28 +74,39 @@ class Layer:
         self.offset_y = 0
         self.bump()
 
-    def apply_offset(self) -> bool:
+    def apply_offset(self, *, wrap: bool = False) -> bool:
         """Bake offset into pixels and reset offset to (0, 0).
 
         Keeps the layer buffer document-aligned so paint tools can reach the
         full canvas after a move. Returns True if pixels were rewritten.
+
+        When ``wrap`` is True, content that leaves an edge re-enters on the
+        opposite side (seamless tile move); otherwise vacated areas are cleared.
         """
         ox, oy = int(self.offset_x), int(self.offset_y)
         if ox == 0 and oy == 0:
             return False
         src = self.pixels
-        dst = np.zeros_like(src)
-        h, w = self.height, self.width
-        # dst[y, x] comes from src[y - oy, x - ox] when that sample is in-bounds
-        dx0 = max(0, ox)
-        dy0 = max(0, oy)
-        dx1 = min(w, w + ox)
-        dy1 = min(h, h + oy)
-        if dx1 > dx0 and dy1 > dy0:
-            sx0 = dx0 - ox
-            sy0 = dy0 - oy
-            dst[dy0:dy1, dx0:dx1] = src[sy0 : sy0 + (dy1 - dy0), sx0 : sx0 + (dx1 - dx0)]
-        self.pixels = dst
+        if wrap:
+            out = src
+            if oy:
+                out = np.roll(out, oy, axis=0)
+            if ox:
+                out = np.roll(out, ox, axis=1)
+            self.pixels = np.ascontiguousarray(out)
+        else:
+            dst = np.zeros_like(src)
+            h, w = self.height, self.width
+            # dst[y, x] comes from src[y - oy, x - ox] when that sample is in-bounds
+            dx0 = max(0, ox)
+            dy0 = max(0, oy)
+            dx1 = min(w, w + ox)
+            dy1 = min(h, h + oy)
+            if dx1 > dx0 and dy1 > dy0:
+                sx0 = dx0 - ox
+                sy0 = dy0 - oy
+                dst[dy0:dy1, dx0:dx1] = src[sy0 : sy0 + (dy1 - dy0), sx0 : sx0 + (dx1 - dx0)]
+            self.pixels = dst
         self.offset_x = 0
         self.offset_y = 0
         self.bump()

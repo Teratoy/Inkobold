@@ -31,6 +31,8 @@ class PenTool(BaseTool):
             self._radius(ctx),
             self._paint_color(ctx),
             mask=self._mask(ctx),
+            opacity=self._opacity_factor(ctx),
+            wrap=ctx.tile_wrap,
         )
         ctx.document.mark_dirty()
 
@@ -43,6 +45,8 @@ class PenTool(BaseTool):
             self._radius(ctx),
             self._paint_color(ctx),
             mask=self._mask(ctx),
+            opacity=self._opacity_factor(ctx),
+            wrap=ctx.tile_wrap,
         )
         self._lx, self._ly = x, y
         ctx.document.mark_dirty()

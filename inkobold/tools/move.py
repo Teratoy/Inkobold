@@ -150,15 +150,29 @@ def _affine_coeffs(
     return a, b, c, d, e, f
 
 
-def _resample_rgba(src: np.ndarray, coeffs: tuple[float, ...], size: tuple[int, int]) -> np.ndarray:
+def _resample_rgba(
+    src: np.ndarray,
+    coeffs: tuple[float, ...],
+    size: tuple[int, int],
+    *,
+    wrap: bool = False,
+) -> np.ndarray:
     """Affine-resample an HxWx4 buffer into a document-sized buffer."""
     h, w = size
     u8 = to_display_u8(src)
-    img = Image.fromarray(u8, mode="RGBA")
+    a, b, c, d, e, f = coeffs
+    if wrap:
+        # 3×3 tiled source so AFFINE can sample across opposite edges.
+        tiled = np.tile(u8, (3, 3, 1))
+        img = Image.fromarray(tiled, mode="RGBA")
+        data = (a, b, c + w, d, e, f + h)
+    else:
+        img = Image.fromarray(u8, mode="RGBA")
+        data = (a, b, c, d, e, f)
     out = img.transform(
         (w, h),
         Image.Transform.AFFINE,
-        data=coeffs,
+        data=data,
         resample=Image.Resampling.BILINEAR,
         fillcolor=(0, 0, 0, 0),
     )
@@ -170,13 +184,27 @@ def _resample_rgba(src: np.ndarray, coeffs: tuple[float, ...], size: tuple[int, 
     return np.clip(np.rint(result.astype(np.float64) * (max_v / 255.0)), 0, max_v).astype(src.dtype)
 
 
-def _resample_mask(mask: np.ndarray, coeffs: tuple[float, ...], size: tuple[int, int]) -> np.ndarray:
+def _resample_mask(
+    mask: np.ndarray,
+    coeffs: tuple[float, ...],
+    size: tuple[int, int],
+    *,
+    wrap: bool = False,
+) -> np.ndarray:
     h, w = size
-    img = Image.fromarray(np.asarray(mask, dtype=np.uint8), mode="L")
+    a, b, c, d, e, f = coeffs
+    src = np.asarray(mask, dtype=np.uint8)
+    if wrap:
+        tiled = np.tile(src, (3, 3))
+        img = Image.fromarray(tiled, mode="L")
+        data = (a, b, c + w, d, e, f + h)
+    else:
+        img = Image.fromarray(src, mode="L")
+        data = (a, b, c, d, e, f)
     out = img.transform(
         (w, h),
         Image.Transform.AFFINE,
-        data=coeffs,
+        data=data,
         resample=Image.Resampling.NEAREST,
         fillcolor=0,
     )
@@ -309,6 +337,7 @@ class TransformTool(BaseTool):
         self.modifies_pixels = False
         self._ensure_box(ctx)
         ly = ctx.document.active_layer
+        wrap = bool(getattr(ctx, "tile_wrap", False))
         corners = box_corners(self._cx, self._cy, self._w, self._h, self._angle)
         radius = self.handle_radius_doc()
         corner = _hit_corner(x, y, corners, radius)
@@ -316,7 +345,7 @@ class TransformTool(BaseTool):
 
         if corner is not None:
             # Bake any pending translate so scale/rotate sample a stable buffer.
-            if (ly.offset_x or ly.offset_y) and ly.apply_offset():
+            if (ly.offset_x or ly.offset_y) and ly.apply_offset(wrap=wrap):
                 self.modifies_pixels = True
                 self.sync_box(ctx)
                 corners = box_corners(self._cx, self._cy, self._w, self._h, self._angle)
@@ -338,7 +367,7 @@ class TransformTool(BaseTool):
             self._corner = None
             if sel_active:
                 # Selection move must rewrite pixels (cannot use whole-layer offset).
-                if (ly.offset_x or ly.offset_y) and ly.apply_offset():
+                if (ly.offset_x or ly.offset_y) and ly.apply_offset(wrap=wrap):
                     self.modifies_pixels = True
                     self.sync_box(ctx)
                 self._begin_float(ctx)
@@ -349,6 +378,17 @@ class TransformTool(BaseTool):
                     self._h,
                     self._angle,
                 )
+            elif wrap:
+                # Live wrap-roll: bake any pending offset, then shift with np.roll.
+                if (ly.offset_x or ly.offset_y) and ly.apply_offset(wrap=True):
+                    self.modifies_pixels = True
+                    self.sync_box(ctx)
+                self._source_mask = None
+                self._base = None
+                self._source = np.array(ly.pixels, copy=True)
+                self._origin_ox = 0
+                self._origin_oy = 0
+                self._cx0, self._cy0 = self._cx, self._cy
             else:
                 self._source = None
                 self._source_mask = None
@@ -391,6 +431,24 @@ class TransformTool(BaseTool):
             self._commit_affine(ctx)
             return
         ly = ctx.document.active_layer
+        if self._source is not None and bool(getattr(ctx, "tile_wrap", False)):
+            # Seamless tile move: wrap content across opposite edges.
+            ox = int(round(dx))
+            oy = int(round(dy))
+            out = self._source
+            if oy:
+                out = np.roll(out, oy, axis=0)
+            if ox:
+                out = np.roll(out, ox, axis=1)
+            ly.pixels = np.ascontiguousarray(out)
+            ly.offset_x = 0
+            ly.offset_y = 0
+            ly.bump()
+            self._cx = self._cx0 + ox
+            self._cy = self._cy0 + oy
+            self.modifies_pixels = True
+            ctx.document.mark_dirty(content=True)
+            return
         ly.offset_x = self._origin_ox + int(round(dx))
         ly.offset_y = self._origin_oy + int(round(dy))
         self._cx = self._cx0 + (ly.offset_x - self._origin_ox)
@@ -444,6 +502,7 @@ class TransformTool(BaseTool):
         if self._source is None:
             return
         ly = ctx.document.active_layer
+        wrap = bool(getattr(ctx, "tile_wrap", False))
         coeffs = _affine_coeffs(
             self._cx0,
             self._cy0,
@@ -456,7 +515,7 @@ class TransformTool(BaseTool):
             self._angle,
         )
         size = (ly.height, ly.width)
-        transformed = _resample_rgba(self._source, coeffs, size)
+        transformed = _resample_rgba(self._source, coeffs, size, wrap=wrap)
         if self._base is not None:
             out = np.array(self._base, copy=True)
             # Place float over punched base (opaque float wins; keeps bilinear fringes)
@@ -470,7 +529,10 @@ class TransformTool(BaseTool):
         ly.bump()
         if self._source_mask is not None:
             ctx.document.selection.mask = _resample_mask(
-                self._source_mask, coeffs, (ctx.document.height, ctx.document.width)
+                self._source_mask,
+                coeffs,
+                (ctx.document.height, ctx.document.width),
+                wrap=wrap,
             )
         self.modifies_pixels = True
         ctx.document.mark_dirty(content=True)
@@ -479,9 +541,15 @@ class TransformTool(BaseTool):
         if self._dragging and self._mode is not None:
             self.on_drag(ctx, x, y)
             ly = ctx.document.active_layer
-            if self._mode == "move" and self._base is None and ly.apply_offset():
-                self.modifies_pixels = True
-                ctx.document.mark_dirty(content=True)
+            wrap = bool(getattr(ctx, "tile_wrap", False))
+            if self._mode == "move" and self._base is None:
+                if self._source is not None and wrap:
+                    # Live wrap-roll already wrote pixels.
+                    self.modifies_pixels = True
+                    ctx.document.mark_dirty(content=True)
+                elif ly.apply_offset(wrap=wrap):
+                    self.modifies_pixels = True
+                    ctx.document.mark_dirty(content=True)
         self._dragging = False
         self._mode = None
         self._corner = None

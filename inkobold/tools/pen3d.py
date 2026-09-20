@@ -54,6 +54,7 @@ class Pen3DTool(BaseTool):
             highlight=ctx.highlight,
             bevel=ctx.bevel,
             frequency=ctx.frequency,
+            wrap=ctx.tile_wrap,
         )
         ctx.document.mark_dirty()
 
@@ -70,6 +71,7 @@ class Pen3DTool(BaseTool):
             highlight=ctx.highlight,
             bevel=ctx.bevel,
             frequency=ctx.frequency,
+            wrap=ctx.tile_wrap,
         )
         self._lx, self._ly = x, y
         ctx.document.mark_dirty()
@@ -87,7 +89,7 @@ class Fill3DTool(BaseTool):
     name = "3D Fill"
     id = "fill3d"
     default_color = (0, 0, 0, 255)
-    default_threshold = 28
+    default_threshold = 200
     uses_size = False
     uses_threshold = True
     uses_3d_settings = True
@@ -106,6 +108,7 @@ class Fill3DTool(BaseTool):
             int(y),
             tolerance=self._threshold(ctx),
             mask=self._mask(ctx),
+            wrap=ctx.tile_wrap,
         )
         if region is None or not region.any():
             return

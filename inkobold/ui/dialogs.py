@@ -343,6 +343,104 @@ class HistoryStepsDialog(Gtk.Window):
         return True
 
 
+class VisibleToolsDialog(Gtk.Window):
+    """Choose which tools appear in the Tools column."""
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        tools: list[tuple[str, str]],
+        visible_ids: list[str],
+    ) -> None:
+        super().__init__(title="Visible Tools", transient_for=parent, modal=True)
+        self.set_default_size(320, 420)
+        self.set_resizable(True)
+        self._callback = None
+        self._checks: dict[str, Gtk.CheckButton] = {}
+        visible = set(visible_ids)
+
+        root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=16,
+            margin_bottom=16,
+            margin_start=16,
+            margin_end=16,
+        )
+        self.set_child(root)
+        root.append(Gtk.Label(
+            label="Show these tools in the Tools column. Hidden tools stay available via shortcuts.",
+            xalign=0,
+            wrap=True,
+        ))
+
+        scroll = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_min_content_height(260)
+        root.append(scroll)
+
+        list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        scroll.set_child(list_box)
+        for tid, label in tools:
+            row = Gtk.CheckButton(label=label)
+            row.set_active(tid in visible)
+            row.connect("toggled", self._on_toggled)
+            self._checks[tid] = row
+            list_box.append(row)
+
+        presets = Gtk.Box(spacing=6)
+        root.append(presets)
+        all_btn = Gtk.Button(label="All")
+        all_btn.connect("clicked", lambda *_: self._set_all(True))
+        none_btn = Gtk.Button(label="None")
+        none_btn.connect("clicked", lambda *_: self._set_all(False))
+        presets.append(all_btn)
+        presets.append(none_btn)
+
+        self._hint = Gtk.Label(label="", xalign=0)
+        self._hint.add_css_class("dim-label")
+        root.append(self._hint)
+
+        actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=4)
+        root.append(actions)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
+        self._apply = Gtk.Button(label="Apply")
+        self._apply.add_css_class("suggested-action")
+        self._apply.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.OK))
+        actions.append(cancel)
+        actions.append(self._apply)
+        self.connect("close-request", self._on_close)
+        self._on_toggled()
+
+    def _set_all(self, active: bool) -> None:
+        for check in self._checks.values():
+            check.set_active(active)
+
+    def _on_toggled(self, *_a) -> None:
+        n = sum(1 for c in self._checks.values() if c.get_active())
+        ok = n > 0
+        self._apply.set_sensitive(ok)
+        self._hint.set_label("" if ok else "Select at least one tool.")
+
+    def visible_ids(self) -> list[str]:
+        return [tid for tid, check in self._checks.items() if check.get_active()]
+
+    def connect_response(self, callback) -> None:
+        self._callback = callback
+
+    def _emit(self, response: Gtk.ResponseType) -> None:
+        if response == Gtk.ResponseType.OK and not self.visible_ids():
+            return
+        if self._callback:
+            self._callback(self, response)
+        self.destroy()
+
+    def _on_close(self, *_a) -> bool:
+        self._emit(Gtk.ResponseType.CANCEL)
+        return True
+
+
 class GridOverlayDialog(Gtk.Window):
     """Choose how many row/column cells the canvas grid overlay uses."""
 

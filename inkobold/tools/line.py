@@ -56,6 +56,8 @@ class LineTool(BaseTool):
             self._r,
             self._paint_color(ctx),
             mask=self._mask(ctx),
+            opacity=self._opacity_factor(ctx),
+            wrap=ctx.tile_wrap,
         )
         ctx.document.mark_dirty()
 
@@ -72,6 +74,8 @@ class LineTool(BaseTool):
             self._r,
             self._paint_color(ctx),
             mask=self._mask(ctx),
+            opacity=self._opacity_factor(ctx),
+            wrap=ctx.tile_wrap,
         )
         ctx.document.mark_dirty()
 

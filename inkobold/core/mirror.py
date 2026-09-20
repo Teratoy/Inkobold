@@ -39,6 +39,54 @@ class MirrorModifier:
     def vertical(self) -> bool:
         return self.orientation in ("vertical", "both")
 
+    def transform_branches(
+        self,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+    ) -> list[tuple[float, float, bool]]:
+        """Return unique (x, y, reverse_orientation) branches for one pointer sample.
+
+        *reverse_orientation* is True when the branch is an odd reflection (axis
+        mirror). Handed constructions (e.g. circular arcs from a chord) must
+        flip their bulge on those branches so the result matches a true mirror.
+        Rotations preserve orientation.
+        """
+        if not self.enabled:
+            return [(float(x), float(y), False)]
+        self.clamp()
+        cx = float(width) * 0.5
+        cy = float(height) * 0.5
+        base: list[tuple[float, float, bool]] = [(float(x), float(y), False)]
+        if self.horizontal:
+            base.append((2.0 * cx - float(x), float(y), True))
+        if self.vertical:
+            base = list(base) + [
+                (px, 2.0 * cy - py, not rev) for px, py, rev in base
+            ]
+
+        n = self.radials
+        if n <= 1:
+            return _unique_branches(base)
+
+        out: list[tuple[float, float, bool]] = []
+        for k in range(n):
+            ang = (2.0 * math.pi * k) / n
+            cos_a = math.cos(ang)
+            sin_a = math.sin(ang)
+            for px, py, rev in base:
+                dx = px - cx
+                dy = py - cy
+                out.append(
+                    (
+                        cx + dx * cos_a - dy * sin_a,
+                        cy + dx * sin_a + dy * cos_a,
+                        rev,
+                    )
+                )
+        return _unique_branches(out)
+
     def transform_points(
         self,
         x: float,
@@ -47,31 +95,7 @@ class MirrorModifier:
         height: float,
     ) -> list[tuple[float, float]]:
         """Return unique document-space points for one pointer sample."""
-        if not self.enabled:
-            return [(x, y)]
-        self.clamp()
-        cx = float(width) * 0.5
-        cy = float(height) * 0.5
-        base: list[tuple[float, float]] = [(float(x), float(y))]
-        if self.horizontal:
-            base.append((2.0 * cx - float(x), float(y)))
-        if self.vertical:
-            base = list(base) + [(px, 2.0 * cy - py) for px, py in base]
-
-        n = self.radials
-        if n <= 1:
-            return _unique(base)
-
-        out: list[tuple[float, float]] = []
-        for k in range(n):
-            ang = (2.0 * math.pi * k) / n
-            cos_a = math.cos(ang)
-            sin_a = math.sin(ang)
-            for px, py in base:
-                dx = px - cx
-                dy = py - cy
-                out.append((cx + dx * cos_a - dy * sin_a, cy + dx * sin_a + dy * cos_a))
-        return _unique(out)
+        return [(px, py) for px, py, _rev in self.transform_branches(x, y, width, height)]
 
     def guide_segments(
         self,
@@ -114,4 +138,18 @@ def _unique(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
             continue
         seen.add(key)
         out.append((x, y))
+    return out
+
+
+def _unique_branches(
+    branches: list[tuple[float, float, bool]],
+) -> list[tuple[float, float, bool]]:
+    seen: set[tuple[float, float]] = set()
+    out: list[tuple[float, float, bool]] = []
+    for x, y, rev in branches:
+        key = (round(x, 4), round(y, 4))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append((x, y, rev))
     return out

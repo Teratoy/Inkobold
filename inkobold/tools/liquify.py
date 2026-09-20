@@ -62,6 +62,7 @@ class LiquifyTool(BaseTool):
             mode=mode,
             strength=strength * 0.35,
             mask=self._mask(ctx),
+            wrap=ctx.tile_wrap,
         )
         ctx.document.mark_dirty()
 
@@ -80,6 +81,7 @@ class LiquifyTool(BaseTool):
         steps = max(1, int(dist / max(0.5, r * 0.35)))
         pixels = ctx.document.active_layer.pixels
         mask = self._mask(ctx)
+        wrap = ctx.tile_wrap
         for i in range(1, steps + 1):
             t = i / steps
             px = self._lx + (x - self._lx) * t
@@ -94,6 +96,7 @@ class LiquifyTool(BaseTool):
                 dir_x=x - self._lx,
                 dir_y=y - self._ly,
                 mask=mask,
+                wrap=wrap,
             )
         self._lx, self._ly = x, y
         ctx.document.mark_dirty()

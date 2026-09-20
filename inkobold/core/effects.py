@@ -6,9 +6,27 @@ import math
 
 import numpy as np
 
+from inkobold.core.bubbles import (
+    bubble_influence_bbox,
+    place_bubble_cluster,
+    render_bubbles_list,
+)
+
 LIQUIFY_MODES = ("Swirl", "Pinch", "Bulge")
 LIQUIFY_BRUSH_MODES = ("Push", "Swirl", "Pinch", "Bulge")
 DITHER_MODES = ("Floyd–Steinberg", "Ordered", "Threshold")
+EDGE_STYLES = ("Light on dark", "Dark on light")
+NORMAL_MAP_Y = ("OpenGL", "DirectX")
+METAL_PRESETS = ("Copper", "Silver", "Gold", "Brass", "Bronze")
+
+# Base metal albedo in linear-ish 0–1 RGB (warm metals tint specular too).
+_METAL_BASE: dict[str, tuple[float, float, float]] = {
+    "Copper": (0.78, 0.42, 0.22),
+    "Silver": (0.86, 0.87, 0.89),
+    "Gold": (0.90, 0.72, 0.28),
+    "Brass": (0.82, 0.68, 0.30),
+    "Bronze": (0.70, 0.48, 0.26),
+}
 
 # Standard 8×8 Bayer matrix (values 0..63), used for ordered dithering.
 _BAYER_8 = np.array(
@@ -212,6 +230,41 @@ def posterize(pixels: np.ndarray, levels: int = 4) -> np.ndarray:
     return out.astype(pixels.dtype, copy=False)
 
 
+def threshold(
+    pixels: np.ndarray,
+    level: float = 50.0,
+    style: str = "Light on dark",
+) -> np.ndarray:
+    """Hard luma cutoff to black / white (alpha preserved).
+
+    ``level`` is the cutoff as a percent of full scale (0–100): pixels with
+    Rec. 601 luma at or above the level become white (or black if inverted).
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 1:
+        return np.ascontiguousarray(pixels.copy())
+
+    thr = max(0.0, min(100.0, float(level))) / 100.0
+    luma = _luma01(pixels)
+    bright = luma >= thr
+
+    style_key = str(style).strip()
+    if style_key.lower().startswith("dark"):
+        # Dark on light: high luma → black.
+        on = ~bright
+    else:
+        on = bright
+
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    tone = np.where(on, vmax, 0.0)
+    out[..., 0] = tone
+    out[..., 1] = tone
+    out[..., 2] = tone
+    return out.astype(pixels.dtype, copy=False)
+
+
 def _quantize_levels(value: np.ndarray, levels: int, vmax: float) -> np.ndarray:
     """Snap continuous channel values in [0, vmax] to ``levels`` evenly spaced steps."""
     n = max(2, int(levels))
@@ -324,17 +377,33 @@ def dither(
     return out.astype(pixels.dtype, copy=False)
 
 
-def _bilinear_sample(src: np.ndarray, y: np.ndarray, x: np.ndarray) -> np.ndarray:
-    """Sample HxWxC at float coords with edge clamping."""
+def _bilinear_sample(
+    src: np.ndarray,
+    y: np.ndarray,
+    x: np.ndarray,
+    *,
+    wrap: bool = False,
+) -> np.ndarray:
+    """Sample HxWxC at float coords with edge clamping (or toroidal wrap)."""
     h, w, _c = src.shape
-    y_cl = np.clip(y, 0.0, h - 1.0001)
-    x_cl = np.clip(x, 0.0, w - 1.0001)
-    y0 = np.floor(y_cl).astype(np.int32)
-    x0 = np.floor(x_cl).astype(np.int32)
-    y1 = np.minimum(y0 + 1, h - 1)
-    x1 = np.minimum(x0 + 1, w - 1)
-    wy = (y_cl - y0)[..., None]
-    wx = (x_cl - x0)[..., None]
+    if wrap and h > 0 and w > 0:
+        y_cl = np.mod(y, h)
+        x_cl = np.mod(x, w)
+        y0 = np.floor(y_cl).astype(np.int32) % h
+        x0 = np.floor(x_cl).astype(np.int32) % w
+        y1 = (y0 + 1) % h
+        x1 = (x0 + 1) % w
+        wy = (y_cl - np.floor(y_cl))[..., None]
+        wx = (x_cl - np.floor(x_cl))[..., None]
+    else:
+        y_cl = np.clip(y, 0.0, h - 1.0001)
+        x_cl = np.clip(x, 0.0, w - 1.0001)
+        y0 = np.floor(y_cl).astype(np.int32)
+        x0 = np.floor(x_cl).astype(np.int32)
+        y1 = np.minimum(y0 + 1, h - 1)
+        x1 = np.minimum(x0 + 1, w - 1)
+        wy = (y_cl - y0)[..., None]
+        wx = (x_cl - x0)[..., None]
     # Gather first, cast after: converting only the sampled neighbours (not the
     # whole image) keeps small brush stamps O(stamp) instead of O(image).
     # Integer -> float64 conversion is exact, so results are unchanged.
@@ -456,6 +525,7 @@ def liquify_brush_stamp(
     dir_x: float = 0.0,
     dir_y: float = 0.0,
     mask: np.ndarray | None = None,
+    wrap: bool = False,
 ) -> None:
     """Warp a soft circular neighborhood in-place (liquify brush stamp)."""
     r = max(0.5, float(radius))
@@ -467,6 +537,65 @@ def liquify_brush_stamp(
     if mode_key not in LIQUIFY_BRUSH_MODES:
         mode_key = "Push"
 
+    h, w = pixels.shape[:2]
+    if wrap and w > 0 and h > 0:
+        # Fold into the tile, then stamp edge replicas (same idea as paint.stamp_centers).
+        cx = float(x) - float(w) * math.floor(float(x) / float(w))
+        cy = float(y) - float(h) * math.floor(float(y) / float(h))
+        xs = [cx]
+        ys = [cy]
+        ext = r + 1.5
+        if cx - ext < 0:
+            xs.append(cx + w)
+        if cx + ext > w:
+            xs.append(cx - w)
+        if cy - ext < 0:
+            ys.append(cy + h)
+        if cy + ext > h:
+            ys.append(cy - h)
+        for py in ys:
+            for px in xs:
+                _liquify_brush_stamp_at(
+                    pixels,
+                    px,
+                    py,
+                    r,
+                    mode_key,
+                    amt,
+                    dir_x=dir_x,
+                    dir_y=dir_y,
+                    mask=mask,
+                    sample_wrap=True,
+                )
+        return
+
+    _liquify_brush_stamp_at(
+        pixels,
+        x,
+        y,
+        r,
+        mode_key,
+        amt,
+        dir_x=dir_x,
+        dir_y=dir_y,
+        mask=mask,
+        sample_wrap=False,
+    )
+
+
+def _liquify_brush_stamp_at(
+    pixels: np.ndarray,
+    x: float,
+    y: float,
+    r: float,
+    mode_key: str,
+    amt: float,
+    *,
+    dir_x: float,
+    dir_y: float,
+    mask: np.ndarray | None,
+    sample_wrap: bool,
+) -> None:
     h, w = pixels.shape[:2]
     x0 = max(0, int(math.floor(x - r - 1)))
     y0 = max(0, int(math.floor(y - r - 1)))
@@ -486,9 +615,6 @@ def liquify_brush_stamp(
         falloff = falloff * (mask[y0:y1, x0:x1] > 0).astype(np.float64)
     if not np.any(falloff):
         return
-
-    src_y = yy.copy()
-    src_x = xx.copy()
 
     if mode_key == "Push":
         mag = math.hypot(dir_x, dir_y)
@@ -515,16 +641,785 @@ def liquify_brush_stamp(
         src_x = x + dx / scale
         src_y = y + dy / scale
 
-    # Sample from a copy so in-place writes do not feed back within the stamp.
     region = pixels[y0:y1, x0:x1]
-    # Map absolute sample coords into the local region, then use full-image sampling
-    # for edge-correct bilinear (clamped) via the shared helper.
-    sampled = _bilinear_sample(pixels, src_y, src_x)
+    sampled = _bilinear_sample(pixels, src_y, src_x, wrap=sample_wrap)
     active = falloff > 1e-6
     out = region.astype(np.float64, copy=True)
     out[active] = sampled[active]
     lo, hi = 0, np.iinfo(pixels.dtype).max if np.issubdtype(pixels.dtype, np.integer) else 1
     pixels[y0:y1, x0:x1] = np.clip(out, lo, hi).astype(pixels.dtype, copy=False)
+
+
+def _channel_vmax(pixels: np.ndarray) -> float:
+    return float(np.iinfo(pixels.dtype).max) if np.issubdtype(pixels.dtype, np.integer) else 1.0
+
+
+def _luma01(pixels: np.ndarray) -> np.ndarray:
+    """Rec. 601 luma normalized to [0, 1]."""
+    src = pixels.astype(np.float64, copy=False)
+    vmax = max(_channel_vmax(pixels), 1e-6)
+    return (0.299 * src[..., 0] + 0.587 * src[..., 1] + 0.114 * src[..., 2]) / vmax
+
+
+def _sobel_gradients(height: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Sobel ∂h/∂x and ∂h/∂y with edge padding (image y increases downward)."""
+    p = np.pad(height, 1, mode="edge")
+    # Horizontal: [-1 0 1; -2 0 2; -1 0 1]
+    gx = (
+        -p[:-2, :-2]
+        + p[:-2, 2:]
+        - 2.0 * p[1:-1, :-2]
+        + 2.0 * p[1:-1, 2:]
+        - p[2:, :-2]
+        + p[2:, 2:]
+    )
+    # Vertical: [-1 -2 -1; 0 0 0; 1 2 1]
+    gy = (
+        -p[:-2, :-2]
+        - 2.0 * p[:-2, 1:-1]
+        - p[:-2, 2:]
+        + p[2:, :-2]
+        + 2.0 * p[2:, 1:-1]
+        + p[2:, 2:]
+    )
+    return gx, gy
+
+
+def edge_detect(
+    pixels: np.ndarray,
+    strength: float = 100.0,
+    threshold: float = 0.0,
+    radius: int = 0,
+    style: str = "Light on dark",
+) -> np.ndarray:
+    """Sobel edge detection on luma (alpha preserved).
+
+    ``strength`` scales the edge magnitude (0–200). ``threshold`` zeros weak
+    edges (0–100% of full scale). Optional ``radius`` pre-blurs luma.
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 2:
+        return np.ascontiguousarray(pixels.copy())
+
+    height = _luma01(pixels)
+    r = max(0, int(radius))
+    if r >= 1:
+        # Blur luma only via a 1-channel separable pass.
+        stacked = height[..., None]
+        height = _separable_convolve(stacked, _gaussian_kernel_1d(r))[..., 0]
+        height = np.clip(height, 0.0, 1.0)
+
+    gx, gy = _sobel_gradients(height)
+    # A unit step maps to Sobel magnitude ≈ 4; scale so strength 100 ≈ full white.
+    mag = np.sqrt(gx * gx + gy * gy) / 4.0
+    amt = max(0.0, min(200.0, float(strength))) / 100.0
+    mag = np.clip(mag * amt, 0.0, 1.0)
+
+    thr = max(0.0, min(100.0, float(threshold))) / 100.0
+    if thr > 1e-6:
+        mag = np.where(mag >= thr, mag, 0.0)
+
+    style_key = str(style).strip()
+    if style_key.lower().startswith("dark"):
+        gray = 1.0 - mag
+    else:
+        gray = mag
+
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    tone = gray * vmax
+    out[..., 0] = tone
+    out[..., 1] = tone
+    out[..., 2] = tone
+    return out.astype(pixels.dtype, copy=False)
+
+
+def normal_map(
+    pixels: np.ndarray,
+    strength: float = 100.0,
+    radius: int = 0,
+    y_convention: str = "OpenGL",
+) -> np.ndarray:
+    """Bake a tangent-space normal map from luma-as-height (alpha preserved).
+
+    RGB packs ``(nx, ny, nz)`` from [-1, 1] into [0, vmax]. ``strength`` scales
+    the XY gradients. ``radius`` optionally smooths the height field first.
+    ``y_convention`` flips the green channel for DirectX vs OpenGL tooling.
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 2:
+        return np.ascontiguousarray(pixels.copy())
+
+    height = _luma01(pixels)
+    r = max(0, int(radius))
+    if r >= 1:
+        stacked = height[..., None]
+        height = _separable_convolve(stacked, _gaussian_kernel_1d(r))[..., 0]
+        height = np.clip(height, 0.0, 1.0)
+
+    gx, gy = _sobel_gradients(height)
+    # Match common height→normal bake: stronger = steeper slopes.
+    s = max(0.0, min(500.0, float(strength))) / 100.0
+    nx = -gx * s
+    # Image y grows downward; OpenGL normal maps treat +Y as up in texture space.
+    ny = gy * s
+    nz = np.ones_like(height)
+    inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
+    nx, ny, nz = nx * inv, ny * inv, nz * inv
+
+    y_key = str(y_convention).strip().lower()
+    if y_key.startswith("direct"):
+        ny = -ny
+
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    out[..., 0] = (nx * 0.5 + 0.5) * vmax
+    out[..., 1] = (ny * 0.5 + 0.5) * vmax
+    out[..., 2] = (nz * 0.5 + 0.5) * vmax
+    lo, hi = 0.0, vmax
+    out[..., :3] = np.clip(out[..., :3], lo, hi)
+    return out.astype(pixels.dtype, copy=False)
+
+
+def _rgb_to_hsv(rgb: np.ndarray) -> np.ndarray:
+    """Vectorized RGB→HSV; ``rgb`` last-dim size 3, values in [0, 1]."""
+    r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    mx = np.maximum(np.maximum(r, g), b)
+    mn = np.minimum(np.minimum(r, g), b)
+    diff = mx - mn
+    h = np.zeros_like(mx)
+    mask = diff > 1e-8
+    r_is = mask & (mx == r)
+    g_is = mask & (mx == g) & ~r_is
+    b_is = mask & ~(r_is | g_is)
+    h[r_is] = ((g[r_is] - b[r_is]) / diff[r_is]) % 6.0
+    h[g_is] = (b[g_is] - r[g_is]) / diff[g_is] + 2.0
+    h[b_is] = (r[b_is] - g[b_is]) / diff[b_is] + 4.0
+    h = h / 6.0
+    s = np.where(mx > 1e-8, diff / np.maximum(mx, 1e-8), 0.0)
+    return np.stack([h, s, mx], axis=-1)
+
+
+def _hsv_to_rgb(hsv: np.ndarray) -> np.ndarray:
+    """Vectorized HSV→RGB; ``hsv`` last-dim size 3, H in [0,1], S/V in [0,1]."""
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    i = np.floor(h * 6.0).astype(np.int32)
+    f = h * 6.0 - i
+    p = v * (1.0 - s)
+    q = v * (1.0 - f * s)
+    t = v * (1.0 - (1.0 - f) * s)
+    i_mod = i % 6
+    r = np.choose(i_mod, [v, q, p, p, t, v])
+    g = np.choose(i_mod, [t, v, v, q, p, p])
+    b = np.choose(i_mod, [p, p, t, v, v, q])
+    return np.stack([r, g, b], axis=-1)
+
+
+def _shift_hue_rgb(rgb: tuple[float, float, float], hue_deg: float) -> np.ndarray:
+    """Rotate hue of a single RGB triple by ``hue_deg`` degrees; return (3,) array."""
+    base = np.asarray(rgb, dtype=np.float64).reshape(1, 1, 3)
+    hsv = _rgb_to_hsv(base)
+    hsv[..., 0] = (hsv[..., 0] + float(hue_deg) / 360.0) % 1.0
+    return _hsv_to_rgb(hsv).reshape(3)
+
+
+def metal_relief(
+    pixels: np.ndarray,
+    metal: str = "Copper",
+    depth: float = 70.0,
+    glossiness: float = 55.0,
+    shadow: float = 40.0,
+    reflections: float = 50.0,
+    exposure: float = 100.0,
+    hue: float = 0.0,
+    highlight_hue: float = 0.0,
+    shadow_hue: float = 0.0,
+    saturation: float = 100.0,
+    radius: int = 1,
+) -> np.ndarray:
+    """Render luma as embossed metal relief (copper / silver / gold / …).
+
+    Height comes from image luma. Lighting is Blinn-style with metal albedo,
+    contact shadows, and a fake environment reflection. Alpha is preserved.
+
+    ``depth``          — relief contrast / light wrap (0–100)
+    ``glossiness``     — specular sharpness (0–100)
+    ``shadow``         — dark-side / contact shadow strength (0–100)
+    ``reflections``    — environment / specular intensity (0–100)
+    ``exposure``       — overall light level (0–200; 100 = neutral)
+    ``hue``            — degrees shift of the metal base (−180…180)
+    ``highlight_hue``  — extra hue shift on lit / specular areas (−180…180)
+    ``shadow_hue``     — extra hue shift on dark / form-shadow areas (−180…180)
+    ``saturation``     — metal chroma (0–200; 100 = preset default)
+    ``radius``         — optional height-field pre-smooth
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 2:
+        return np.ascontiguousarray(pixels.copy())
+
+    metal_key = str(metal).strip()
+    base_rgb = _METAL_BASE.get(metal_key, _METAL_BASE["Copper"])
+    albedo = _shift_hue_rgb(base_rgb, float(hue))
+    # 100 → keep preset sat; 0 → grayscale metal; 200 → double chroma.
+    sat_n = max(0.0, min(200.0, float(saturation))) / 100.0
+    if abs(sat_n - 1.0) > 1e-6:
+        hsv = _rgb_to_hsv(albedo.reshape(1, 1, 3))
+        hsv[..., 1] = np.clip(hsv[..., 1] * sat_n, 0.0, 1.0)
+        albedo = _hsv_to_rgb(hsv).reshape(3)
+    albedo_hi = _shift_hue_rgb(tuple(float(c) for c in albedo), float(highlight_hue))
+    albedo_lo = _shift_hue_rgb(tuple(float(c) for c in albedo), float(shadow_hue))
+
+    depth_n = max(0.0, min(100.0, float(depth))) / 100.0
+    gloss_n = max(0.0, min(100.0, float(glossiness))) / 100.0
+    shadow_n = max(0.0, min(100.0, float(shadow))) / 100.0
+    refl_n = max(0.0, min(100.0, float(reflections))) / 100.0
+    # 100 → 1×, 0 → ~0.25×, 200 → ~2.5× (soft curve so mid stays usable).
+    exp_n = max(0.0, min(200.0, float(exposure))) / 100.0
+    exposure_mul = 0.25 + 0.75 * exp_n + 0.50 * max(0.0, exp_n - 1.0)
+
+    height = _luma01(pixels)
+    r = max(0, int(radius))
+    if r >= 1:
+        stacked = height[..., None]
+        height = _separable_convolve(stacked, _gaussian_kernel_1d(r))[..., 0]
+        height = np.clip(height, 0.0, 1.0)
+
+    gx, gy = _sobel_gradients(height)
+    # Steeper relief with depth; keep a floor so flat areas still catch light.
+    slope = 0.35 + 2.4 * depth_n
+    nx = -gx * slope
+    ny = gy * slope  # image y down → flip for upward lighting frame
+    nz = np.full_like(height, 0.45 + 0.35 * (1.0 - depth_n))
+    inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
+    nx, ny, nz = nx * inv, ny * inv, nz * inv
+
+    # Key light from upper-left.
+    lx, ly, lz = -0.45, -0.55, 0.70
+    invl = 1.0 / math.sqrt(lx * lx + ly * ly + lz * lz)
+    lx, ly, lz = lx * invl, ly * invl, lz * invl
+    ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
+
+    # Soft masks: lit vs dark sides for per-lobe hue tinting.
+    lit_w = ndotl * ndotl
+    dark_w = (1.0 - ndotl) ** 2
+
+    # Blinn half-vector vs camera looking down +Z.
+    hx, hy, hz = lx, ly, lz + 1.0
+    invh = 1.0 / math.sqrt(hx * hx + hy * hy + hz * hz)
+    ndoth = np.clip(nx * hx * invh + ny * hy * invh + nz * hz * invh, 0.0, 1.0)
+    # Gloss: soft plastic → hard metal highlight.
+    spec_pow = 4.0 + 96.0 * (gloss_n ** 1.4)
+    spec = ndoth ** spec_pow
+
+    # Fake environment: sky gradient along reflected view (R = 2(N·V)N − V, V≈(0,0,1)).
+    # With V=(0,0,1): R = (2 nz nx, 2 nz ny, 2 nz² − 1).
+    ry = 2.0 * nz * ny
+    rz = 2.0 * nz * nz - 1.0
+    # Map reflection to a cool→warm sky / floor gradient.
+    env_t = np.clip(0.5 + 0.5 * ry + 0.25 * rz, 0.0, 1.0)
+    # Local “reflection” from neighboring height (cheap chrome shimmer).
+    local = np.clip(0.5 + 0.5 * (height - 0.5) + 0.35 * ndotl, 0.0, 1.0)
+    env = 0.55 * env_t + 0.45 * local
+    # Cool fill from above, warm bounce from below — then tint by metal.
+    env_rgb = np.stack(
+        [
+            0.55 + 0.45 * env,
+            0.62 + 0.30 * env,
+            0.78 - 0.25 * env,
+        ],
+        axis=-1,
+    )
+    # Diffuse albedo lerps base → highlight hue on lit faces, → shadow hue in dark.
+    diffuse_albedo = (
+        albedo
+        + (albedo_hi - albedo) * lit_w[..., None]
+        + (albedo_lo - albedo) * dark_w[..., None]
+    )
+    # Specular / Fresnel use highlight-shifted metal; cool metals stay nearer white.
+    metal_sat = float(np.clip(np.max(albedo_hi) - np.min(albedo_hi), 0.0, 1.0))
+    spec_tint = (
+        (1.0 - 0.65 * metal_sat) * np.array([1.0, 1.0, 1.0])
+        + 0.65 * metal_sat * albedo_hi
+    )
+
+    ambient = 0.18 + 0.22 * (1.0 - depth_n)
+    diffuse = (0.35 + 0.55 * depth_n) * ndotl
+    # Soft rim so raised edges catch light.
+    rim = np.clip(1.0 - height, 0.0, 1.0) * ndotl * (0.08 + 0.22 * depth_n)
+    shade = ambient + diffuse + rim
+
+    rgb = diffuse_albedo * shade[..., None]
+    # Specular lobe + environment reflections (highlight-tinted).
+    gloss_boost = 0.15 + 0.85 * gloss_n
+    rgb = rgb + spec_tint * ((0.15 + 0.85 * refl_n) * gloss_boost * spec[..., None])
+    rgb = rgb + diffuse_albedo * env_rgb * (
+        (0.08 + 0.42 * refl_n) * (0.35 + 0.65 * gloss_n)
+    )
+    # Fresnel-ish edge lift for chrome look at grazing angles.
+    fresnel = np.clip(1.0 - nz, 0.0, 1.0) ** 2
+    rgb = rgb + spec_tint * (fresnel * (0.04 + 0.18 * refl_n))[..., None]
+
+    # Contact / form shadow on the dark side — multiply with shadow-hue tint.
+    form_shadow = (1.0 - ndotl) * (0.15 + 0.55 * shadow_n) * np.clip(
+        1.0 - height * 0.55, 0.0, 1.0
+    )
+    shadow_mul = 1.0 - form_shadow
+    # Lean residual shade toward shadow-hue metal instead of pure black crush.
+    shadow_tint = 0.55 + 0.45 * (albedo_lo / np.maximum(np.max(albedo_lo), 1e-6))
+    rgb = rgb * (
+        shadow_mul[..., None] * (1.0 - dark_w[..., None])
+        + (shadow_mul[..., None] * shadow_tint) * dark_w[..., None]
+    )
+
+    rgb = rgb * exposure_mul
+
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    out[..., :3] = np.clip(rgb * vmax, 0.0, vmax)
+    return out.astype(pixels.dtype, copy=False)
+
+
+def milk(
+    pixels: np.ndarray,
+    depth: float = 55.0,
+    glossiness: float = 75.0,
+    thickness: float = 90.0,
+    shadow: float = 30.0,
+    exposure: float = 100.0,
+    hue: float = 8.0,
+    saturation: float = 35.0,
+    radius: int = 8,
+    bubbles: float = 45.0,
+    bubble_size: float = 50.0,
+    clear_spots: float = 40.0,
+    edge_melt: float = 70.0,
+    wetness: float = 45.0,
+    expiration: float = 0.0,
+) -> np.ndarray:
+    """Render luma as creamy viscous fluid relief (milky / seminal look).
+
+    Same height-field emboss as metal relief, but shaded as soft pearlescent
+    white fluid with wet sheen, liquid content-edge melt, air bubbles, and
+    blurry translucent voids.
+
+    ``depth``        — relief contrast / light wrap (0–100)
+    ``glossiness``   — wet specular sheen (0–100)
+    ``thickness``    — opacity vs translucent edge glow (0–100)
+    ``shadow``       — form-shadow strength (0–100)
+    ``exposure``     — overall light level (0–200; 100 = neutral)
+    ``hue``          — degrees tint of the cream base (−180…180)
+    ``saturation``   — cream chroma (0–200; lower = whiter)
+    ``radius``       — height-field / liquid pre-smooth (blob feel)
+    ``bubbles``      — brush-mode air bubbles on flat color (0–100)
+    ``bubble_size``  — bubble diameter scale (0–100; 50 = default)
+    ``clear_spots``  — blurry see-through voids (0–100)
+    ``edge_melt``    — soft liquid falloff at content / silhouette edges (0–100)
+    ``wetness``      — surface wetness: darker troughs, hotter specular (0–100)
+    ``expiration``   — spoil the milk: yellow → mould → brown (0–100)
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 2:
+        return np.ascontiguousarray(pixels.copy())
+
+    wet_n = max(0.0, min(100.0, float(wetness))) / 100.0
+    spoil_n = max(0.0, min(100.0, float(expiration))) / 100.0
+
+    # Ivory cream base — warms / yellows / browns as expiration rises.
+    cream_fresh = (0.92, 0.89, 0.82)
+    cream_sour = (0.86, 0.78, 0.48)   # yellowy whey
+    cream_rot = (0.52, 0.36, 0.18)    # brown curd
+    # 0→0.45 yellow, 0.45→1.0 brown.
+    if spoil_n <= 0.45:
+        t = spoil_n / 0.45
+        cream0 = tuple(
+            cream_fresh[i] * (1.0 - t) + cream_sour[i] * t for i in range(3)
+        )
+    else:
+        t = (spoil_n - 0.45) / 0.55
+        cream0 = tuple(
+            cream_sour[i] * (1.0 - t) + cream_rot[i] * t for i in range(3)
+        )
+    cream = _shift_hue_rgb(cream0, float(hue))
+    sat_n = max(0.0, min(200.0, float(saturation))) / 100.0
+    # Spoilage pushes chroma up a bit even at low sat settings.
+    sat_eff = sat_n * (1.0 + 0.55 * spoil_n)
+    if abs(sat_eff - 1.0) > 1e-6:
+        hsv = _rgb_to_hsv(cream.reshape(1, 1, 3))
+        hsv[..., 1] = np.clip(hsv[..., 1] * sat_eff, 0.0, 1.0)
+        cream = _hsv_to_rgb(hsv).reshape(3)
+    undertone_fresh = (0.78, 0.82, 0.68)
+    undertone_spoil = (0.55, 0.48, 0.22)
+    ut0 = tuple(
+        undertone_fresh[i] * (1.0 - spoil_n) + undertone_spoil[i] * spoil_n
+        for i in range(3)
+    )
+    undertone = _shift_hue_rgb(ut0, float(hue) + 18.0)
+    undertone_hsv = _rgb_to_hsv(undertone.reshape(1, 1, 3))
+    undertone_hsv[..., 1] = np.clip(undertone_hsv[..., 1] * sat_eff * 0.85, 0.0, 1.0)
+    undertone = _hsv_to_rgb(undertone_hsv).reshape(3)
+    # Mould / rot accent colors.
+    mould_rgb = np.array([0.42, 0.52, 0.28])   # dull green mould
+    brown_stain = np.array([0.38, 0.22, 0.10])  # oxidized brown
+
+    depth_n = max(0.0, min(100.0, float(depth))) / 100.0
+    gloss_n = max(0.0, min(100.0, float(glossiness))) / 100.0
+    # Wetness boosts effective gloss; spoil dulls it a little.
+    gloss_eff = np.clip(gloss_n * (0.55 + 0.70 * wet_n) * (1.0 - 0.35 * spoil_n), 0.0, 1.35)
+    thick_n = max(0.0, min(100.0, float(thickness))) / 100.0
+    shadow_n = max(0.0, min(100.0, float(shadow))) / 100.0
+    bub_n = max(0.0, min(100.0, float(bubbles))) / 100.0
+    bub_size_n = max(0.0, min(100.0, float(bubble_size))) / 100.0
+    # 0 → ~0.35×, 50 → 1×, 100 → ~2.2× diameter.
+    bub_size_mul = 0.35 + 1.85 * bub_size_n
+    clear_n = max(0.0, min(100.0, float(clear_spots))) / 100.0
+    melt_n = max(0.0, min(100.0, float(edge_melt))) / 100.0
+    exp_n = max(0.0, min(200.0, float(exposure))) / 100.0
+    exposure_mul = 0.28 + 0.72 * exp_n + 0.40 * max(0.0, exp_n - 1.0)
+    # Spoiled milk reads a bit darker / dirtier.
+    exposure_mul *= 1.0 - 0.22 * spoil_n
+
+    src = pixels.astype(np.float64, copy=False)
+    vmax = _channel_vmax(pixels)
+    src_a = src[..., 3] / max(vmax, 1e-6) if src.shape[2] >= 4 else np.ones((h, w), dtype=np.float64)
+
+    height = _luma01(pixels)
+    r = max(0, int(radius))
+    # Extra gooey pre-smooth so mounds read as liquid, not emboss.
+    smooth_r = r if r >= 1 else 0
+    if smooth_r >= 1:
+        stacked = height[..., None]
+        height = _separable_convolve(stacked, _gaussian_kernel_1d(smooth_r))[..., 0]
+        height = np.clip(height, 0.0, 1.0)
+
+    # Deterministic UVs for voids / mould / post-smooth bubbles.
+    yy, xx = np.mgrid[0:h, 0:w]
+    u = (xx + 0.5) / w
+    v = (yy + 0.5) / h
+    span = float(min(h, w))
+
+    # Spoilage mottling: soft mould colonies + brown stains (procedural).
+    mould_mask = np.zeros((h, w), dtype=np.float64)
+    stain_mask = np.zeros((h, w), dtype=np.float64)
+    if spoil_n > 1e-4:
+        # Multi-octave value noise from sines — cheap, seamless-ish.
+        n1 = (
+            0.50 * np.sin(u * 23.7 + v * 17.1 + 1.3)
+            + 0.30 * np.sin(u * 41.2 - v * 29.4 + 4.1)
+            + 0.20 * np.sin(u * 67.5 + v * 53.8 + 2.7)
+        )
+        n2 = (
+            0.55 * np.sin(u * 19.3 - v * 31.6 + 0.8)
+            + 0.45 * np.sin(u * 53.1 + v * 11.9 + 5.5)
+        )
+        mould_mask = np.clip((n1 * 0.5 + 0.5) ** 1.8, 0.0, 1.0)
+        stain_mask = np.clip((n2 * 0.5 + 0.5) ** 1.4, 0.0, 1.0)
+        # Prefer mould on mid/high body; brown in troughs / creases.
+        mould_mask = mould_mask * (0.35 + 0.65 * height) * spoil_n
+        stain_mask = stain_mask * (0.25 + 0.75 * (1.0 - height)) * spoil_n
+        m_r = max(1, min(10, int(round(1 + 0.012 * span))))
+        mould_mask = _separable_convolve(mould_mask[..., None], _gaussian_kernel_1d(m_r))[..., 0]
+        stain_mask = _separable_convolve(stain_mask[..., None], _gaussian_kernel_1d(m_r))[..., 0]
+        mould_mask = np.clip(mould_mask, 0.0, 1.0)
+        stain_mask = np.clip(stain_mask, 0.0, 1.0)
+
+    # Soft irregular clear spots (blurry see-through puddles).
+    void_mask = np.zeros((h, w), dtype=np.float64)
+    if clear_n > 1e-4:
+        n_void = max(1, min(20, int(round(3 + 12 * clear_n * (span / 512.0) ** 0.35))))
+        rng_v = np.random.default_rng(0x564F4944)  # "VOID"
+        for _ in range(n_void):
+            cx = float(rng_v.uniform(0.08, 0.92))
+            cy = float(rng_v.uniform(0.08, 0.92))
+            rad = float(rng_v.uniform(0.06, 0.18)) * (0.6 + 0.8 * clear_n)
+            sx = float(rng_v.uniform(0.55, 1.55))
+            sy = float(rng_v.uniform(0.55, 1.55))
+            ang = float(rng_v.uniform(0.0, math.pi))
+            ca, sa = math.cos(ang), math.sin(ang)
+            rx = rad * max(sx, sy) * 1.25
+            x0 = max(0, int((cx - rx) * w))
+            x1 = min(w, int(math.ceil((cx + rx) * w)) + 1)
+            y0 = max(0, int((cy - rx) * h))
+            y1 = min(h, int(math.ceil((cy + rx) * h)) + 1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            uu = u[y0:y1, x0:x1]
+            vv = v[y0:y1, x0:x1]
+            dx0 = (uu - cx) / max(rad * sx, 1e-6)
+            dy0 = (vv - cy) / max(rad * sy, 1e-6)
+            dx = ca * dx0 + sa * dy0
+            dy = -sa * dx0 + ca * dy0
+            d2 = dx * dx + dy * dy
+            blob = np.clip(1.0 - d2, 0.0, 1.0) ** 2.2
+            patch = void_mask[y0:y1, x0:x1]
+            np.maximum(patch, blob * clear_n, out=patch)
+        wobble = 0.55 + 0.45 * np.sin(u * 17.3 + v * 11.7) * np.sin(u * 7.1 - v * 13.9)
+        void_mask = np.clip(void_mask * wobble, 0.0, 1.0)
+        void_r = max(1, min(24, int(round(2 + 0.028 * span * clear_n))))
+        void_mask = _separable_convolve(void_mask[..., None], _gaussian_kernel_1d(void_r))[..., 0]
+        void_mask = np.clip(void_mask, 0.0, 1.0)
+
+    gx, gy = _sobel_gradients(height)
+    slope = 0.22 + 1.7 * depth_n
+    nx = -gx * slope
+    ny = gy * slope
+    nz = np.full_like(height, 0.58 + 0.28 * (1.0 - depth_n))
+    inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
+    nx, ny, nz = nx * inv, ny * inv, nz * inv
+
+    lx, ly, lz = -0.40, -0.50, 0.76
+    invl = 1.0 / math.sqrt(lx * lx + ly * ly + lz * lz)
+    lx, ly, lz = lx * invl, ly * invl, lz * invl
+    ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
+
+    hx, hy, hz = lx, ly, lz + 1.0
+    invh = 1.0 / math.sqrt(hx * hx + hy * hy + hz * hz)
+    hx, hy, hz = hx * invh, hy * invh, hz * invh
+    ndoth = np.clip(nx * hx + ny * hy + nz * hz, 0.0, 1.0)
+    # Wet → tighter, hotter highlights; spoil → slightly softer/duller.
+    spec_pow = 2.5 + 28.0 * (min(gloss_eff, 1.0) ** 1.2) + 36.0 * wet_n
+    spec = ndoth ** spec_pow
+    bloom = ndoth ** (1.2 + 5.0 * min(gloss_eff, 1.0) + 4.0 * wet_n)
+
+    edge = np.clip(1.0 - nz, 0.0, 1.0)
+    thin = np.clip((1.0 - height) * (0.35 + 0.65 * edge), 0.0, 1.0)
+    thin = thin * (1.0 - 0.55 * thick_n)
+    # Wet surfaces look a touch more translucent in thin areas.
+    thin = np.clip(thin * (1.0 + 0.35 * wet_n), 0.0, 1.0)
+    albedo = cream * (1.0 - thin[..., None]) + undertone * thin[..., None]
+    if spoil_n > 1e-4:
+        albedo = (
+            albedo * (1.0 - 0.75 * mould_mask[..., None])
+            + mould_rgb * (0.75 * mould_mask[..., None])
+        )
+        albedo = (
+            albedo * (1.0 - 0.80 * stain_mask[..., None])
+            + brown_stain * (0.80 * stain_mask[..., None])
+        )
+
+    wrap = np.clip((ndotl + 0.35) / 1.35, 0.0, 1.0)
+    sss = (0.15 + 0.28 * (1.0 - thick_n)) * (1.0 - wrap) * height
+    warm_sss = np.array([1.05, 0.95, 0.78]) * (1.0 - 0.35 * spoil_n) + np.array(
+        [0.95, 0.75, 0.45]
+    ) * (0.35 * spoil_n)
+
+    ambient = 0.22 + 0.14 * thick_n
+    diffuse = (0.38 + 0.42 * depth_n) * wrap
+    rim = edge * ndotl * (0.05 + 0.14 * min(gloss_eff, 1.0) + 0.10 * wet_n)
+    shade = ambient + diffuse + rim
+
+    rgb = albedo * shade[..., None]
+    rgb = rgb + albedo * warm_sss * sss[..., None]
+
+    pearl = 0.82 * np.array([1.0, 1.0, 1.0]) + 0.18 * cream
+    gloss_boost = 0.18 + 0.72 * min(gloss_eff, 1.0) + 0.35 * wet_n
+    rgb = rgb + pearl * (gloss_boost * (0.38 * spec + 0.22 * bloom))[..., None]
+    fresnel = edge * edge
+    rgb = rgb + pearl * (fresnel * (0.04 + 0.12 * min(gloss_eff, 1.0) + 0.14 * wet_n))[..., None]
+
+    form_shadow = (1.0 - wrap) * (0.14 + 0.52 * shadow_n) * np.clip(
+        1.0 - height * 0.45, 0.0, 1.0
+    )
+    # Wet troughs go darker (pooled liquid).
+    wet_trough = (1.0 - height) * wet_n * (0.12 + 0.28 * (1.0 - wrap))
+    shadow_mul = 1.0 - form_shadow - wet_trough
+    shadow_mul = np.clip(shadow_mul, 0.15, 1.0)
+    cream_shadow = 0.55 + 0.45 * (undertone / np.maximum(np.max(undertone), 1e-6))
+    rgb = rgb * (shadow_mul[..., None] * cream_shadow)
+    rgb = rgb * exposure_mul
+
+    # Soft whole-field blur for viscous smoothness (scales with Smooth).
+    # Bubbles are composited after this so Smooth does not flatten them.
+    goo_r = max(0, min(10, int(round(smooth_r * 0.40))))
+    if goo_r >= 1:
+        rgb = _separable_convolve(rgb, _gaussian_kernel_1d(goo_r))
+
+    # Blurry see-through voids: heavily soften RGB and punch alpha later.
+    if clear_n > 1e-4 and void_mask.max() > 1e-4:
+        void_blur_r = max(2, min(12, int(round(2 + 0.030 * span * clear_n))))
+        rgb_blur = _separable_convolve(rgb, _gaussian_kernel_1d(void_blur_r))
+        glass = 0.55 * rgb_blur + 0.45 * cream * (0.75 + 0.25 * height[..., None])
+        vm = void_mask[..., None]
+        rgb = rgb * (1.0 - vm) + glass * vm
+
+    # --- Bubble placement via brush bubble mode (before edge melt) ---
+    placed_bubs: list[tuple[float, float, float, float]] = []
+    bub_protect = np.zeros((h, w), dtype=np.float64)
+    if bub_n > 1e-4:
+        # Local color uniformity — luma variance only (faster than full RGB + Sobel).
+        homo_r = max(1, min(8, int(round(1 + 0.012 * span))))
+        src_luma = _luma01(pixels)
+        k_homo = _gaussian_kernel_1d(homo_r)
+        mean_l = _separable_convolve(src_luma[..., None], k_homo)[..., 0]
+        mean2_l = _separable_convolve((src_luma * src_luma)[..., None], k_homo)[..., 0]
+        var_l = np.maximum(mean2_l - mean_l * mean_l, 0.0)
+        homo = (var_l < 0.0035) & (src_a > 0.35)
+        margin = max(2, int(0.02 * span))
+        homo[:margin, :] = False
+        homo[-margin:, :] = False
+        homo[:, :margin] = False
+        homo[:, -margin:] = False
+        cand_y, cand_x = np.nonzero(homo)
+
+        if cand_y.size > 0:
+            rng = np.random.default_rng(0x4D494C4B)  # "MILK"
+            dens = bub_n * 100.0
+            n_sites = max(1, min(20, int(round(3 + 14 * bub_n * (span / 512.0) ** 0.35))))
+            picks = rng.choice(cand_y.size, size=min(n_sites * 3, cand_y.size), replace=False)
+            max_bubbles = max(1, min(48, int(round(8 + 36 * bub_n * (span / 512.0) ** 0.35))))
+            # Brush-mode cluster radius: same span-relative sizing as milk Bubble Size.
+            site_rad = max(
+                1.5,
+                float(0.010 * span) * (0.75 + 0.50 * bub_n) * bub_size_mul,
+            )
+
+            def _homo_ok(cx_px: float, cy_px: float, rad_px: float) -> bool:
+                ix = int(round(cx_px))
+                iy = int(round(cy_px))
+                if not (0 <= ix < w and 0 <= iy < h) or not homo[iy, ix]:
+                    return False
+                pad = int(math.ceil(rad_px * 1.15)) + 1
+                x0 = max(0, ix - pad)
+                x1 = min(w, ix + pad + 1)
+                y0 = max(0, iy - pad)
+                y1 = min(h, iy + pad + 1)
+                if x1 <= x0 or y1 <= y0:
+                    return False
+                xs = xx[y0:y1, x0:x1].astype(np.float64) + 0.5
+                ys = yy[y0:y1, x0:x1].astype(np.float64) + 0.5
+                d2 = ((xs - cx_px) / rad_px) ** 2 + ((ys - cy_px) / rad_px) ** 2
+                inside = d2 < 1.0
+                if not np.any(inside):
+                    return False
+                if float(homo[y0:y1, x0:x1][inside].mean()) < 0.72:
+                    return False
+                if float(np.abs(src_luma[y0:y1, x0:x1][inside] - src_luma[iy, ix]).mean()) > 0.06:
+                    return False
+                return True
+
+            for pi in picks:
+                if len(placed_bubs) >= max_bubbles:
+                    break
+                sy = int(cand_y[pi])
+                sx = int(cand_x[pi])
+                # Same cluster layout as the Bubbles brush mode.
+                cluster = place_bubble_cluster(
+                    sx + 0.5,
+                    sy + 0.5,
+                    site_rad,
+                    rng,
+                    density=dens,
+                    force=True,
+                )
+                for cx_px, cy_px, rad_px, strength in cluster:
+                    if len(placed_bubs) >= max_bubbles:
+                        break
+                    if not _homo_ok(cx_px, cy_px, rad_px):
+                        continue
+                    placed_bubs.append(
+                        (cx_px, cy_px, rad_px, float(strength) * (0.55 + 0.45 * bub_n))
+                    )
+
+        if placed_bubs:
+            for cx_px, cy_px, rad_px, strength in placed_bubs:
+                bx0, by0, bx1, by1 = bubble_influence_bbox(cx_px, cy_px, rad_px)
+                x0, y0 = max(0, bx0), max(0, by0)
+                x1, y1 = min(w, bx1), min(h, by1)
+                if x1 <= x0 or y1 <= y0:
+                    continue
+                xs = xx[y0:y1, x0:x1].astype(np.float64) + 0.5
+                ys = yy[y0:y1, x0:x1].astype(np.float64) + 0.5
+                d2 = ((xs - cx_px) / max(rad_px, 1e-6)) ** 2 + (
+                    (ys - cy_px) / max(rad_px, 1e-6)
+                ) ** 2
+                disk = np.clip(1.0 - d2, 0.0, 1.0) ** 0.85
+                patch = bub_protect[y0:y1, x0:x1]
+                np.maximum(patch, disk * min(1.0, strength + 0.15), out=patch)
+
+    # Liquid edge melt — soften content silhouettes only (not canvas borders).
+    edge_fade = np.ones((h, w), dtype=np.float64)
+    if melt_n > 1e-4:
+        sil_r = max(1, min(16, int(round(1 + 0.035 * span * melt_n))))
+        if src_a.min() < 0.999:
+            sil = src_a
+        else:
+            sil = np.clip(height * 1.2, 0.0, 1.0)
+        edge_fade = _separable_convolve(sil[..., None], _gaussian_kernel_1d(sil_r))[..., 0]
+        edge_fade = np.clip(edge_fade, 0.0, 1.0)
+        melt_blur_r = max(1, min(10, int(round(1 + 0.025 * span * melt_n))))
+        rgb_edge = _separable_convolve(rgb, _gaussian_kernel_1d(melt_blur_r))
+        melt_w = (1.0 - edge_fade) * melt_n * (1.0 - bub_protect)
+        rgb = rgb * (1.0 - melt_w[..., None]) + rgb_edge * melt_w[..., None]
+
+    # Extra spoil pass after blur so mould stays blotchy on the gooey surface.
+    if spoil_n > 1e-4:
+        spoil_w = np.clip(0.55 * mould_mask + 0.70 * stain_mask, 0.0, 1.0)
+        spoil_col = (
+            mould_rgb * mould_mask[..., None] + brown_stain * stain_mask[..., None]
+        )
+        spoil_sum = np.maximum(
+            mould_mask[..., None] + stain_mask[..., None], 1e-6
+        )
+        spoil_col = spoil_col / spoil_sum
+        rgb = rgb * (1.0 - 0.65 * spoil_w[..., None]) + spoil_col * (
+            0.65 * spoil_w[..., None]
+        )
+        # Yellow cast over the whole body as it turns.
+        yellow_cast = np.array([1.06, 0.96, 0.72])
+        rgb = rgb * (1.0 - 0.25 * spoil_n) + rgb * yellow_cast * (0.25 * spoil_n)
+
+    # Alpha for the smoothed milk body (voids / melt). Bubbles reinforce opacity later.
+    alpha = src_a.copy()
+    alpha = alpha * (0.55 + 0.45 * thick_n + 0.45 * (1.0 - thick_n) * height)
+    if clear_n > 1e-4:
+        alpha = alpha * (1.0 - (0.55 + 0.40 * clear_n) * void_mask)
+    if melt_n > 1e-4:
+        melt_a = edge_fade ** (0.65 + 0.7 * melt_n)
+        # Keep bubble disks fully opaque w.r.t. edge melt.
+        alpha = alpha * (melt_a * (1.0 - bub_protect) + bub_protect)
+    alpha = np.clip(alpha, 0.0, 1.0)
+
+    a_blur_r = max(0, min(8, int(round(1 + 0.35 * smooth_r + 1.0 * melt_n + 1.0 * clear_n))))
+    if a_blur_r >= 1:
+        alpha_pre = alpha
+        alpha = _separable_convolve(alpha[..., None], _gaussian_kernel_1d(a_blur_r))[..., 0]
+        alpha = np.clip(alpha, 0.0, 1.0)
+        # Do not let alpha blur soften bubble disks.
+        if bub_protect.max() > 1e-4:
+            alpha = alpha * (1.0 - bub_protect) + alpha_pre * bub_protect
+
+    # --- Bubble shading: same renderer as the Bubbles brush ---
+    out = src.copy()
+    out[..., :3] = np.clip(rgb * vmax, 0.0, vmax)
+    out[..., 3] = np.clip(alpha * vmax, 0.0, vmax)
+    if placed_bubs:
+        # Tint bubbles with the milk cream albedo (incl. spoil / hue).
+        cr = [float(np.clip(c, 0.0, 1.0)) * vmax for c in cream]
+        bub_color = (cr[0], cr[1], cr[2], float(vmax))
+        # Slightly translucent over the milk body; wetness boosts presence.
+        bub_op = float(np.clip(0.55 + 0.35 * bub_n + 0.15 * wet_n, 0.35, 1.0))
+        render_bubbles_list(out, placed_bubs, bub_color, opacity=bub_op)
+    return out.astype(pixels.dtype, copy=False)
+
+
+def offset_wrap(pixels: np.ndarray, dx: int = 0, dy: int = 0) -> np.ndarray:
+    """Wrap-around shift (Photoshop Offset / seamless tile move).
+
+    Positive ``dx`` moves content right; positive ``dy`` moves content down.
+    Pixels that leave one edge re-enter on the opposite edge.
+    """
+    ox = int(dx)
+    oy = int(dy)
+    if ox == 0 and oy == 0:
+        return np.ascontiguousarray(pixels.copy())
+    out = pixels
+    if oy:
+        out = np.roll(out, oy, axis=0)
+    if ox:
+        out = np.roll(out, ox, axis=1)
+    return np.ascontiguousarray(out)
 
 
 def blend_effect(
