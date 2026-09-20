@@ -1,6 +1,6 @@
 # Inkobold
 
-GPU-accelerated layered drawing for Linux, with **libinput** / **libwacom** tablet awareness.
+GPU-accelerated drawing tool for Linux, with **libinput** / **libwacom** tablet awareness.
 
 ## Features
 
@@ -8,7 +8,7 @@ GPU-accelerated layered drawing for Linux, with **libinput** / **libwacom** tabl
 - **Layers** — RGBA8 layers, visibility, opacity-ready offsets, GPU composite; add / duplicate / rename / delete / merge down / merge all
 - **Animation** — Frames with FPS playback; onion-skin overlay of the previous frame while drawing; export as GIF or PNG sequence folder
 - **Tools** — Pen, Line, Curve (freehand / arc / circle), Brush (round / custom tip / bubbles), Weld Brush, Fill, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
-- **Effects** — Pixelate, Kuwahara, Gaussian Blur, Dither, Posterize, Threshold, Liquify, Edge Detect, Normal Map, Metal Relief, Milk
+- **Effects** — Pixelate, Kuwahara, Gaussian Blur, Drop Shadow, Dither, Posterize, Threshold, Liquify, Edge Detect, Normal Map, Metal Relief, Milk
 - **Libraries** — User brushes, patterns, and fonts under `~/.local/share/inkobold/libraries/` (or `$XDG_DATA_HOME/inkobold/libraries/`)
 - **Input** — GDK drawing path + libinput device poll + libwacom tablet identification
 - **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid overlay, Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
