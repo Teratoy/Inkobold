@@ -7,8 +7,8 @@ GPU-accelerated drawing tool for Linux, with **libinput** / **libwacom** tablet 
 - **File** — Multi-document tabs; New File (pixel size prompt), Open, Save (`.inkobold` multilayer ZIP), Export, Export Separated Layers, Import Image as Layer
 - **Layers** — RGBA8 layers, visibility, opacity-ready offsets, GPU composite; add / duplicate / rename / delete / merge down / merge all
 - **Animation** — Frames with FPS playback; onion-skin overlay of the previous frame while drawing; export as GIF or PNG sequence folder
-- **Tools** — Pen, Line, Curve (freehand / arc / circle), Brush (round / custom tip / bubbles), Weld Brush, Fill, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
-- **Effects** — Pixelate, Kuwahara, Gaussian Blur, Drop Shadow, Dither, Posterize, Threshold, Liquify, Edge Detect, Emboss, Normal Map, Metal Relief, Milk (apply to active layer or all layers)
+- **Tools** — Pen, Line, Curve (freehand / arc / circle), Brush (round / custom tip / bubbles), Weld Brush, Fill, Gradient, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
+- **Effects** — Pixelate, Kuwahara, Gaussian Blur, Drop Shadow, Dither, Posterize, Curves, Threshold, Liquify, Edge Detect, Emboss, Normal Map, Metal Relief, Milk (apply to active layer or all layers)
 - **Libraries** — User brushes, patterns, and fonts under `~/.local/share/inkobold/libraries/` (or `$XDG_DATA_HOME/inkobold/libraries/`)
 - **Input** — GDK drawing path + libinput device poll + libwacom tablet identification
 - **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid overlay, Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
@@ -48,7 +48,7 @@ Requires system **PyGObject** + **GTK4** (install via your distro; use a venv wi
 | Play / pause animation | `Space` or `F5` |
 | Stop animation | `F6` |
 | Brush size | `[` `]` |
-| Tools | `P` `L` `U` `B` `W` `G` `D` `F` `E` `M` `Y` `C`/`R` `V` `Q` `T` |
+| Tools | `P` `L` `U` `B` `W` `G` `A` `D` `F` `E` `M` `Y` `C`/`R` `V` `Q` `T` |
 | Pan | Middle mouse drag |
 
 Shortcuts are rebindable under **Settings → Shortcuts**.

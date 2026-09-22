@@ -3,6 +3,7 @@ from inkobold.tools.brush import BrushTool
 from inkobold.tools.curve import CurveTool
 from inkobold.tools.eraser import EraserTool
 from inkobold.tools.fill import FillTool
+from inkobold.tools.gradient import GradientTool
 from inkobold.tools.lasso import LassoTool
 from inkobold.tools.line import LineTool
 from inkobold.tools.liquify import LiquifyTool
@@ -23,6 +24,7 @@ def default_tools() -> dict:
         BrushTool(),
         WeldBrushTool(),
         FillTool(),
+        GradientTool(),
         Pen3DTool(),
         Fill3DTool(),
         EraserTool(),
@@ -45,6 +47,7 @@ __all__ = [
     "BrushTool",
     "WeldBrushTool",
     "FillTool",
+    "GradientTool",
     "Pen3DTool",
     "Fill3DTool",
     "EraserTool",

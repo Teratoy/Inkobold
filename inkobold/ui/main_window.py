@@ -24,6 +24,7 @@ from inkobold.core.effects import (
     LIQUIFY_MODES,
     METAL_PRESETS,
     NORMAL_MAP_Y,
+    apply_tone_curves,
     blend_effect,
     dither,
     drop_shadow,
@@ -68,6 +69,7 @@ from inkobold.ui.dialogs import (
     CaptureShortcutDialog,
     ColorDepthDialog,
     CropDialog,
+    CurvesDialog,
     DpiDialog,
     EFFECT_APPLY_TO_ALL,
     EffectOption,
@@ -91,6 +93,7 @@ TOOL_ORDER = [
     ("brush", "Brush"),
     ("weld_brush", "Weld Brush"),
     ("fill", "Fill"),
+    ("gradient", "Gradient"),
     ("pen3d", "3D Pen"),
     ("fill3d", "3D Fill"),
     ("eraser", "Eraser"),
@@ -203,6 +206,7 @@ class MainWindow(Gtk.ApplicationWindow):
             "effect_drop_shadow": self.action_effect_drop_shadow,
             "effect_dither": self.action_effect_dither,
             "effect_posterize": self.action_effect_posterize,
+            "effect_curves": self.action_effect_curves,
             "effect_threshold": self.action_effect_threshold,
             "effect_liquify": self.action_effect_liquify,
             "effect_edge_detect": self.action_effect_edge_detect,
@@ -356,8 +360,18 @@ class MainWindow(Gtk.ApplicationWindow):
             self.color_btn.set_rgba(rgba)
             if show_replace and getattr(tool, "replace_action", "replace") == "erase":
                 self.color_label.set_label("Erase Color")
+            elif bool(getattr(tool, "uses_end_color", False)):
+                self.color_label.set_label("Start Color")
             else:
                 self.color_label.set_label("Color")
+            show_end_color = bool(getattr(tool, "uses_end_color", False))
+            self.end_color_row.set_visible(show_end_color)
+            if show_end_color:
+                er, eg, eb, ea = getattr(tool, "end_color", (255, 255, 255, 255))
+                end_rgba = self.end_color_btn.get_rgba()
+                end_rgba.red, end_rgba.green = er / 255.0, eg / 255.0
+                end_rgba.blue, end_rgba.alpha = eb / 255.0, ea / 255.0
+                self.end_color_btn.set_rgba(end_rgba)
             show_thr = bool(getattr(tool, "uses_threshold", False))
             self.threshold_row.set_visible(show_thr)
             if show_thr:
@@ -494,6 +508,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self.corridor_color_btn.set_tooltip_text("Fill color for puzzle piece interiors")
         elif getattr(tool, "uses_replace_modes", False) and getattr(tool, "replace_action", "replace") == "erase":
             self.color_label.set_label("Erase Color")
+        elif bool(getattr(tool, "uses_end_color", False)):
+            self.color_label.set_label("Start Color")
         else:
             self.color_label.set_label("Color")
         self.pattern_row.set_visible(pattern_mode)
@@ -754,6 +770,22 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         c = btn.get_rgba()
         tool.corridor_color = (
+            int(c.red * 255),
+            int(c.green * 255),
+            int(c.blue * 255),
+            int(c.alpha * 255),
+        )
+        self.app_settings.recent_colors = btn.get_recent_colors()
+        save_settings(self.app_settings)
+
+    def _on_end_color(self, btn: ColorSelectButton) -> None:
+        if self._syncing_tool_ui:
+            return
+        tool = self._active_tool()
+        if not getattr(tool, "uses_end_color", False):
+            return
+        c = btn.get_rgba()
+        tool.end_color = (
             int(c.red * 255),
             int(c.green * 255),
             int(c.blue * 255),
@@ -1253,6 +1285,7 @@ class MainWindow(Gtk.ApplicationWindow):
         effects_menu.append("Drop Shadow…", "win.effect_drop_shadow")
         effects_menu.append("Dither…", "win.effect_dither")
         effects_menu.append("Posterize…", "win.effect_posterize")
+        effects_menu.append("Curves…", "win.effect_curves")
         effects_menu.append("Threshold…", "win.effect_threshold")
         effects_menu.append("Liquify…", "win.effect_liquify")
         effects_menu.append("Edge Detect…", "win.effect_edge_detect")
@@ -1711,6 +1744,19 @@ class MainWindow(Gtk.ApplicationWindow):
         self.color_btn.connect("color-set", self._on_color)
         opts.append(self.color_btn)
 
+        self.end_color_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
+        opts.append(self.end_color_row)
+        self.end_color_row.append(Gtk.Label(label="End Color", xalign=0))
+        self.end_color_btn = ColorSelectButton(use_alpha=True)
+        self.end_color_btn.set_hexpand(True)
+        self.end_color_btn.set_tooltip_text("Gradient finishing color")
+        self.end_color_btn.set_recent_colors(self.app_settings.recent_colors)
+        end_rgba = self.end_color_btn.get_rgba()
+        end_rgba.red, end_rgba.green, end_rgba.blue, end_rgba.alpha = 1.0, 1.0, 1.0, 1.0
+        self.end_color_btn.set_rgba(end_rgba)
+        self.end_color_btn.connect("color-set", self._on_end_color)
+        self.end_color_row.append(self.end_color_btn)
+
         self.threshold_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         opts.append(self.threshold_row)
         self.threshold_row.append(Gtk.Label(label="Threshold", xalign=0))
@@ -1718,7 +1764,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.threshold_spin.set_hexpand(True)
         self.threshold_spin.set_tooltip_text(
             "Color match tolerance (variance allowed). "
-            "Fill / Replace: how close pixels must be to the target color. "
+            "Fill / Replace / Gradient: how close pixels must be to the target color. "
             "Eraser: 255=all pixels, lower=only similar to click color."
         )
         self.threshold_spin.connect("value-changed", self._on_threshold_changed)
@@ -2332,6 +2378,9 @@ class MainWindow(Gtk.ApplicationWindow):
             debounce_ms=40,
         )
 
+    def action_effect_curves(self, *_a) -> None:
+        self._open_curves_dialog()
+
     def action_effect_threshold(self, *_a) -> None:
         self._open_effect_dialog(
             title="Threshold",
@@ -2665,6 +2714,34 @@ class MainWindow(Gtk.ApplicationWindow):
             on_preview,
             debounce_ms=debounce_ms,
         )
+        dlg.connect_response(self._on_effect_dialog_response)
+        dlg.present()
+
+    def _open_curves_dialog(self) -> None:
+        if not self.document or self._effect_session is not None:
+            return
+        snapshots: dict[str, np.ndarray] = {}
+        for ly in self.document.layers:
+            ly.apply_offset()
+            snapshots[ly.id] = ly.pixels.copy()
+        sel_mask = None
+        if self.document.selection.active and self.document.selection.mask is not None:
+            sel_mask = self.document.selection.mask.copy()
+
+        self._push_history()
+        self._effect_session = {
+            "snapshots": snapshots,
+            "active_layer_id": self.document.active_layer.id,
+            "selection": sel_mask,
+            "effect_fn": lambda src, p: apply_tone_curves(src, p.get("curves")),
+            "preview_max_side": None,
+            "last_params": None,
+        }
+
+        def on_preview(params: dict) -> None:
+            self._preview_effect(params, final=False)
+
+        dlg = CurvesDialog(self, on_preview, debounce_ms=40)
         dlg.connect_response(self._on_effect_dialog_response)
         dlg.present()
 

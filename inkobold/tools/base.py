@@ -27,6 +27,8 @@ class ToolContext:
     tile_scale: float = 1.0
     maze_cell_size: float = 8.0
     corridor_color: tuple[int, int, int, int] = (255, 255, 255, 255)
+    # Gradient tool end color
+    end_color: tuple[int, int, int, int] = (255, 255, 255, 255)
     # Replace tool: "replace" | "erase"
     replace_action: str = "replace"
     # Replace tool scope: "brush" | "fill" | "all"
@@ -72,6 +74,7 @@ class BaseTool:
     uses_replace_modes: bool = False
     uses_intensity: bool = False
     uses_opacity: bool = False
+    uses_end_color: bool = False
     uses_curve_modes: bool = False
     uses_eraser_modes: bool = False
     uses_liquify_modes: bool = False

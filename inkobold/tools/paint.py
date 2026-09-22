@@ -1139,6 +1139,77 @@ def flood_fill(
     pixels[region] = np.clip(out, 0, _max_v(pixels)).astype(pixels.dtype)
 
 
+def flood_fill_gradient(
+    pixels: np.ndarray,
+    sx: int,
+    sy: int,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    start_color: tuple[int, int, int, int],
+    end_color: tuple[int, int, int, int],
+    tolerance: int = 32,
+    mask: np.ndarray | None = None,
+    wrap: bool = False,
+) -> None:
+    """Flood a connected region, then lerp *start_color*→*end_color* along (x0,y0)→(x1,y1).
+
+    The guide axis is not drawn — only the filled gradient remains. Pixels before
+    the start clamp to *start_color*; past the end they clamp to *end_color*.
+    """
+    region = flood_fill_region(
+        pixels, sx, sy, tolerance=tolerance, mask=mask, wrap=wrap,
+    )
+    if region is None or not region.any():
+        return
+
+    max_v = _max_v(pixels)
+    start = np.asarray(start_color, dtype=np.float32)
+    end = np.asarray(end_color, dtype=np.float32)
+    dx = float(x1 - x0)
+    dy = float(y1 - y0)
+    length_sq = dx * dx + dy * dy
+
+    if length_sq < 1e-8:
+        a = float(start[3]) / max_v
+        if a >= 0.999:
+            pixels[region] = np.clip(start, 0, max_v).astype(pixels.dtype)
+        elif a > 0.0:
+            dest = pixels[region].astype(np.float32)
+            out = dest.copy()
+            out[..., :3] = start[:3] * a + dest[..., :3] * (1.0 - a)
+            out[..., 3] = start[3] + dest[..., 3] * (1.0 - a)
+            pixels[region] = np.clip(out, 0, max_v).astype(pixels.dtype)
+        return
+
+    ys, xs = np.nonzero(region)
+    t = np.clip(
+        ((xs.astype(np.float32) - x0) * dx + (ys.astype(np.float32) - y0) * dy) / length_sq,
+        0.0,
+        1.0,
+    ).astype(np.float32)
+    src = start[None, :] * (1.0 - t[:, None]) + end[None, :] * t[:, None]
+    a = src[:, 3] / max_v
+    write = a > 0.0
+    if not np.any(write):
+        return
+    ys_w, xs_w = ys[write], xs[write]
+    src_w = src[write]
+    a_w = a[write]
+    dest = pixels[ys_w, xs_w].astype(np.float32)
+    out = dest.copy()
+    opaque = a_w >= 0.999
+    mid = ~opaque
+    if np.any(opaque):
+        out[opaque] = np.clip(src_w[opaque], 0, max_v)
+    if np.any(mid):
+        am = a_w[mid, None]
+        out[mid, :3] = src_w[mid, :3] * am + dest[mid, :3] * (1.0 - am)
+        out[mid, 3] = src_w[mid, 3] + dest[mid, 3] * (1.0 - a_w[mid])
+    pixels[ys_w, xs_w] = np.clip(out, 0, max_v).astype(pixels.dtype)
+
+
 def replace_matching_colors(
     pixels: np.ndarray,
     sx: int,

@@ -1246,3 +1246,372 @@ class EffectPreviewDialog(Gtk.Window):
     def _on_close(self, *_a) -> bool:
         self._emit(Gtk.ResponseType.CANCEL)
         return True
+
+
+_CURVE_EDITOR_PAD = 14
+_CURVE_HIT_RADIUS = 10.0
+_CURVE_MAX_POINTS = 16
+_CURVE_CHANNEL_COLORS = {
+    "RGB": (0.92, 0.92, 0.92),
+    "Red": (0.92, 0.32, 0.28),
+    "Green": (0.35, 0.82, 0.38),
+    "Blue": (0.35, 0.55, 0.95),
+    "Value": (0.85, 0.85, 0.55),
+}
+
+
+class CurvesDialog(Gtk.Window):
+    """Tone-curve editor with live canvas preview (same session pattern as EffectPreviewDialog)."""
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        on_preview: Callable[[dict[str, Any]], None],
+        *,
+        debounce_ms: int = 40,
+    ) -> None:
+        from inkobold.core.effects import CURVES_CHANNELS, _curve_lut, _normalize_curve_points
+
+        super().__init__(title="Curves", transient_for=parent, modal=False)
+        _attach_shortcut_focus_guard(parent, self)
+        self.set_default_size(380, 460)
+        self.set_resizable(False)
+        self._callback: Optional[Callable] = None
+        self._on_preview = on_preview
+        self._debounce_ms = max(0, int(debounce_ms))
+        self._preview_source: Optional[int] = None
+        self._closed = False
+        self._channels = tuple(CURVES_CHANNELS)
+        self._normalize = _normalize_curve_points
+        self._curve_lut = _curve_lut
+        self._curves: dict[str, list[tuple[float, float]]] = {
+            ch: [(0.0, 0.0), (1.0, 1.0)] for ch in self._channels
+        }
+        self._channel = "RGB"
+        self._drag_index: Optional[int] = None
+        self._selected: Optional[int] = None
+
+        root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=10,
+            margin_top=16,
+            margin_bottom=16,
+            margin_start=16,
+            margin_end=16,
+        )
+        self.set_child(root)
+        root.append(
+            Gtk.Label(
+                label=(
+                    "Drag points to reshape tones. Click the grid to add a point; "
+                    "double-click a point to remove it."
+                ),
+                xalign=0,
+                wrap=True,
+            )
+        )
+
+        scope_row = Gtk.Box(spacing=8)
+        root.append(scope_row)
+        scope_row.append(Gtk.Label(label="Apply to", xalign=0, hexpand=True))
+        self._apply_dd = Gtk.DropDown.new_from_strings(list(EFFECT_APPLY_TO_CHOICES))
+        self._apply_dd.set_selected(0)
+        self._apply_dd.set_hexpand(True)
+        self._apply_dd.connect("notify::selected", self._schedule_preview)
+        scope_row.append(self._apply_dd)
+
+        ch_row = Gtk.Box(spacing=8)
+        root.append(ch_row)
+        ch_row.append(Gtk.Label(label="Channel", xalign=0, hexpand=True))
+        self._channel_dd = Gtk.DropDown.new_from_strings(list(self._channels))
+        self._channel_dd.set_selected(0)
+        self._channel_dd.set_hexpand(True)
+        self._channel_dd.connect("notify::selected", self._on_channel_changed)
+        ch_row.append(self._channel_dd)
+
+        self._area = Gtk.DrawingArea()
+        self._area.set_content_width(320)
+        self._area.set_content_height(320)
+        self._area.set_hexpand(True)
+        self._area.set_draw_func(self._draw_curve)
+        self._area.set_cursor(Gdk.Cursor.new_from_name("crosshair"))
+        root.append(self._area)
+
+        drag = Gtk.GestureDrag.new()
+        drag.set_button(1)
+        drag.connect("drag-begin", self._on_drag_begin)
+        drag.connect("drag-update", self._on_drag_update)
+        drag.connect("drag-end", self._on_drag_end)
+        self._area.add_controller(drag)
+
+        click = Gtk.GestureClick.new()
+        click.set_button(1)
+        click.connect("pressed", self._on_click_pressed)
+        self._area.add_controller(click)
+
+        btn_row = Gtk.Box(spacing=8)
+        root.append(btn_row)
+        reset = Gtk.Button(label="Reset channel")
+        reset.connect("clicked", self._on_reset_channel)
+        btn_row.append(reset)
+        reset_all = Gtk.Button(label="Reset all")
+        reset_all.connect("clicked", self._on_reset_all)
+        btn_row.append(reset_all)
+
+        hint = Gtk.Label(label="Preview updates on the canvas.", xalign=0)
+        hint.add_css_class("dim-label")
+        root.append(hint)
+
+        actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=4)
+        root.append(actions)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
+        apply = Gtk.Button(label="Apply")
+        apply.add_css_class("suggested-action")
+        apply.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.OK))
+        actions.append(cancel)
+        actions.append(apply)
+        self.connect("close-request", self._on_close)
+
+        GLib.idle_add(self._fire_preview)
+
+    def params(self) -> dict[str, Any]:
+        i = int(self._apply_dd.get_selected())
+        apply_to = EFFECT_APPLY_TO_CHOICES[max(0, min(i, len(EFFECT_APPLY_TO_CHOICES) - 1))]
+        curves = {ch: list(pts) for ch, pts in self._curves.items()}
+        return {"apply_to": apply_to, "curves": curves, "channel": self._channel}
+
+    def connect_response(self, callback) -> None:
+        self._callback = callback
+
+    def _current_points(self) -> list[tuple[float, float]]:
+        return self._curves[self._channel]
+
+    def _set_current_points(self, points: list[tuple[float, float]]) -> None:
+        self._curves[self._channel] = self._normalize(points)
+
+    def _on_channel_changed(self, *_a) -> None:
+        i = int(self._channel_dd.get_selected())
+        self._channel = self._channels[max(0, min(i, len(self._channels) - 1))]
+        self._drag_index = None
+        self._selected = None
+        self._area.queue_draw()
+        self._schedule_preview()
+
+    def _on_reset_channel(self, *_a) -> None:
+        self._curves[self._channel] = [(0.0, 0.0), (1.0, 1.0)]
+        self._selected = None
+        self._area.queue_draw()
+        self._schedule_preview()
+
+    def _on_reset_all(self, *_a) -> None:
+        for ch in self._channels:
+            self._curves[ch] = [(0.0, 0.0), (1.0, 1.0)]
+        self._selected = None
+        self._area.queue_draw()
+        self._schedule_preview()
+
+    def _plot_rect(self, width: float, height: float) -> tuple[float, float, float, float]:
+        pad = _CURVE_EDITOR_PAD
+        return pad, pad, max(1.0, width - 2 * pad), max(1.0, height - 2 * pad)
+
+    def _norm_to_px(self, x: float, y: float, width: float, height: float) -> tuple[float, float]:
+        ox, oy, w, h = self._plot_rect(width, height)
+        return ox + x * w, oy + (1.0 - y) * h
+
+    def _px_to_norm(self, px: float, py: float, width: float, height: float) -> tuple[float, float]:
+        ox, oy, w, h = self._plot_rect(width, height)
+        x = (px - ox) / w
+        y = 1.0 - (py - oy) / h
+        return max(0.0, min(1.0, x)), max(0.0, min(1.0, y))
+
+    def _hit_test(self, px: float, py: float, width: float, height: float) -> Optional[int]:
+        pts = self._current_points()
+        best: Optional[int] = None
+        best_d = _CURVE_HIT_RADIUS * _CURVE_HIT_RADIUS
+        for i, (x, y) in enumerate(pts):
+            sx, sy = self._norm_to_px(x, y, width, height)
+            d = (sx - px) * (sx - px) + (sy - py) * (sy - py)
+            if d <= best_d:
+                best_d = d
+                best = i
+        return best
+
+    def _draw_curve(self, _area: Gtk.DrawingArea, cr, width: int, height: int) -> None:
+        cr.set_source_rgb(0.14, 0.14, 0.16)
+        cr.rectangle(0, 0, width, height)
+        cr.fill()
+
+        ox, oy, w, h = self._plot_rect(float(width), float(height))
+        cr.set_source_rgb(0.20, 0.20, 0.23)
+        cr.rectangle(ox, oy, w, h)
+        cr.fill()
+
+        cr.set_source_rgba(1, 1, 1, 0.12)
+        cr.set_line_width(1)
+        for i in range(5):
+            t = i / 4.0
+            x = ox + t * w
+            y = oy + t * h
+            cr.move_to(x, oy)
+            cr.line_to(x, oy + h)
+            cr.move_to(ox, y)
+            cr.line_to(ox + w, y)
+        cr.stroke()
+
+        cr.set_source_rgba(1, 1, 1, 0.25)
+        cr.set_dash([4, 4])
+        cr.move_to(ox, oy + h)
+        cr.line_to(ox + w, oy)
+        cr.stroke()
+        cr.set_dash([])
+
+        pts = self._normalize(self._current_points())
+        lut = self._curve_lut(pts, max(64, int(w)))
+        color = _CURVE_CHANNEL_COLORS.get(self._channel, (0.9, 0.9, 0.9))
+        cr.set_source_rgb(*color)
+        cr.set_line_width(2.0)
+        for i, y01 in enumerate(lut):
+            x01 = i / max(1, len(lut) - 1)
+            px, py = self._norm_to_px(x01, float(y01), float(width), float(height))
+            if i == 0:
+                cr.move_to(px, py)
+            else:
+                cr.line_to(px, py)
+        cr.stroke()
+
+        for i, (x, y) in enumerate(pts):
+            px, py = self._norm_to_px(x, y, float(width), float(height))
+            r = 5.5 if i == self._selected or i == self._drag_index else 4.5
+            cr.set_source_rgb(0.08, 0.08, 0.1)
+            cr.arc(px, py, r + 1.5, 0, 6.2832)
+            cr.fill()
+            cr.set_source_rgb(*color)
+            cr.arc(px, py, r, 0, 6.2832)
+            cr.fill()
+
+        cr.set_source_rgba(1, 1, 1, 0.35)
+        cr.set_line_width(1)
+        cr.rectangle(ox + 0.5, oy + 0.5, w - 1, h - 1)
+        cr.stroke()
+
+    def _on_click_pressed(self, gesture: Gtk.GestureClick, n_press: int, x: float, y: float) -> None:
+        width = float(self._area.get_width())
+        height = float(self._area.get_height())
+        hit = self._hit_test(x, y, width, height)
+        pts = list(self._current_points())
+
+        if n_press >= 2 and hit is not None and hit not in (0, len(pts) - 1):
+            del pts[hit]
+            self._set_current_points(pts)
+            self._selected = None
+            self._area.queue_draw()
+            self._schedule_preview()
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            return
+
+        if hit is not None:
+            self._selected = hit
+            self._area.queue_draw()
+            return
+
+        if len(pts) >= _CURVE_MAX_POINTS:
+            return
+        nx, ny = self._px_to_norm(x, y, width, height)
+        nx = max(0.02, min(0.98, nx))
+        pts.append((nx, ny))
+        self._set_current_points(pts)
+        normed = self._current_points()
+        self._selected = min(range(len(normed)), key=lambda i: abs(normed[i][0] - nx))
+        if self._selected in (0, len(normed) - 1) and len(normed) > 2:
+            self._selected = min(
+                range(1, len(normed) - 1),
+                key=lambda i: abs(normed[i][0] - nx),
+            )
+        self._area.queue_draw()
+        self._schedule_preview()
+
+    def _on_drag_begin(self, gesture: Gtk.GestureDrag, x: float, y: float) -> None:
+        width = float(self._area.get_width())
+        height = float(self._area.get_height())
+        hit = self._hit_test(x, y, width, height)
+        if hit is None:
+            self._drag_index = None
+            return
+        self._drag_index = hit
+        self._selected = hit
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        self._area.queue_draw()
+
+    def _on_drag_update(self, gesture: Gtk.GestureDrag, offset_x: float, offset_y: float) -> None:
+        if self._drag_index is None:
+            return
+        ok, x0, y0 = gesture.get_start_point()
+        if not ok:
+            return
+        width = float(self._area.get_width())
+        height = float(self._area.get_height())
+        nx, ny = self._px_to_norm(x0 + offset_x, y0 + offset_y, width, height)
+        pts = list(self._current_points())
+        i = self._drag_index
+        if i <= 0:
+            pts[0] = (0.0, ny)
+        elif i >= len(pts) - 1:
+            pts[-1] = (1.0, ny)
+        else:
+            lo = pts[i - 1][0] + 0.01
+            hi = pts[i + 1][0] - 0.01
+            if lo >= hi:
+                nx = pts[i][0]
+            else:
+                nx = max(lo, min(hi, nx))
+            pts[i] = (nx, ny)
+        self._curves[self._channel] = pts
+        self._area.queue_draw()
+        self._schedule_preview()
+
+    def _on_drag_end(self, *_a) -> None:
+        if self._drag_index is not None:
+            self._set_current_points(self._current_points())
+            self._drag_index = None
+            self._area.queue_draw()
+            self._schedule_preview()
+
+    def _schedule_preview(self, *_a) -> None:
+        if self._closed:
+            return
+        if self._preview_source is not None:
+            GLib.source_remove(self._preview_source)
+            self._preview_source = None
+        if self._debounce_ms <= 0:
+            self._fire_preview()
+            return
+        self._preview_source = GLib.timeout_add(self._debounce_ms, self._fire_preview)
+
+    def _fire_preview(self) -> bool:
+        self._preview_source = None
+        if self._closed:
+            return False
+        try:
+            self._on_preview(self.params())
+        except Exception:
+            pass
+        return False
+
+    def _cancel_pending(self) -> None:
+        if self._preview_source is not None:
+            GLib.source_remove(self._preview_source)
+            self._preview_source = None
+
+    def _emit(self, response: Gtk.ResponseType) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._cancel_pending()
+        if self._callback:
+            self._callback(self, response)
+        self.destroy()
+
+    def _on_close(self, *_a) -> bool:
+        self._emit(Gtk.ResponseType.CANCEL)
+        return True

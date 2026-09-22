@@ -18,6 +18,7 @@ DITHER_MODES = ("Floyd–Steinberg", "Ordered", "Threshold")
 EDGE_STYLES = ("Light on dark", "Dark on light")
 NORMAL_MAP_Y = ("OpenGL", "DirectX")
 METAL_PRESETS = ("Copper", "Silver", "Gold", "Brass", "Bronze")
+CURVES_CHANNELS = ("RGB", "Red", "Green", "Blue", "Value")
 
 # Base metal albedo in linear-ish 0–1 RGB (warm metals tint specular too).
 _METAL_BASE: dict[str, tuple[float, float, float]] = {
@@ -366,6 +367,189 @@ def threshold(
     out[..., 1] = tone
     out[..., 2] = tone
     return out.astype(pixels.dtype, copy=False)
+
+
+def curves(
+    pixels: np.ndarray,
+    points: list[tuple[float, float]] | tuple[tuple[float, float], ...] | None = None,
+    channel: str = "RGB",
+) -> np.ndarray:
+    """Remap tones with a smooth curve of control points in [0, 1]² (alpha preserved).
+
+    ``channel`` is one of :data:`CURVES_CHANNELS`. ``RGB`` applies the same LUT to
+    R, G, and B; ``Value`` remaps Rec. 601 luma while preserving chromatic ratios.
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 1:
+        return np.ascontiguousarray(pixels.copy())
+
+    pts = _normalize_curve_points(points)
+    vmax = _channel_vmax(pixels)
+    n_lut = int(round(vmax)) + 1 if np.issubdtype(pixels.dtype, np.integer) else 256
+    n_lut = max(2, n_lut)
+    lut01 = _curve_lut(pts, n_lut)  # [0, 1] per entry
+
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    ch = str(channel).strip().lower()
+
+    def apply_lut(plane: np.ndarray) -> np.ndarray:
+        """Map channel values in [0, vmax] through the curve back to [0, vmax]."""
+        if np.issubdtype(pixels.dtype, np.integer):
+            idx = np.clip(np.rint(plane), 0, n_lut - 1).astype(np.intp)
+            return lut01[idx] * vmax
+        t = np.clip(plane / max(vmax, 1e-6), 0.0, 1.0)
+        pos = t * (n_lut - 1)
+        i0 = np.floor(pos).astype(np.intp)
+        i1 = np.minimum(i0 + 1, n_lut - 1)
+        f = pos - i0
+        return (lut01[i0] * (1.0 - f) + lut01[i1] * f) * vmax
+
+    if ch in ("red", "r"):
+        out[..., 0] = apply_lut(src[..., 0])
+    elif ch in ("green", "g"):
+        out[..., 1] = apply_lut(src[..., 1])
+    elif ch in ("blue", "b"):
+        out[..., 2] = apply_lut(src[..., 2])
+    elif ch in ("value", "luma", "v"):
+        luma = _luma01(pixels)
+        mapped = apply_lut(luma * vmax) / max(vmax, 1e-6)
+        scale = np.ones_like(luma)
+        nz = luma > 1e-8
+        scale[nz] = mapped[nz] / luma[nz]
+        # Near-black: lift toward gray so the curve still has an effect.
+        out[..., 0] = np.clip(src[..., 0] * scale, 0.0, vmax)
+        out[..., 1] = np.clip(src[..., 1] * scale, 0.0, vmax)
+        out[..., 2] = np.clip(src[..., 2] * scale, 0.0, vmax)
+        black = ~nz
+        if black.any():
+            lift = mapped[black] * vmax
+            out[black, 0] = lift
+            out[black, 1] = lift
+            out[black, 2] = lift
+    else:
+        out[..., 0] = apply_lut(src[..., 0])
+        out[..., 1] = apply_lut(src[..., 1])
+        out[..., 2] = apply_lut(src[..., 2])
+
+    return out.astype(pixels.dtype, copy=False)
+
+
+def apply_tone_curves(
+    pixels: np.ndarray,
+    curves_by_channel: dict[str, list[tuple[float, float]] | tuple[tuple[float, float], ...]]
+    | None = None,
+) -> np.ndarray:
+    """Apply per-channel tone curves in order RGB → Red → Green → Blue → Value."""
+    out = pixels
+    if not curves_by_channel:
+        return np.ascontiguousarray(pixels.copy())
+    for ch in CURVES_CHANNELS:
+        pts = curves_by_channel.get(ch)
+        if pts is None or _curve_is_identity(pts):
+            continue
+        out = curves(out, pts, ch)
+    return out if out is not pixels else np.ascontiguousarray(pixels.copy())
+
+
+def _curve_is_identity(
+    points: list[tuple[float, float]] | tuple[tuple[float, float], ...] | None,
+) -> bool:
+    """True when the curve is (approximately) y = x."""
+    pts = _normalize_curve_points(points)
+    if len(pts) == 2 and abs(pts[0][1]) < 1e-9 and abs(pts[1][1] - 1.0) < 1e-9:
+        return True
+    for x, y in pts:
+        if abs(x - y) > 1e-6:
+            return False
+    return True
+
+
+def _normalize_curve_points(
+    points: list[tuple[float, float]] | tuple[tuple[float, float], ...] | None,
+) -> list[tuple[float, float]]:
+    """Clamp, dedupe by x, and ensure endpoints at x=0 and x=1."""
+    raw: list[tuple[float, float]] = []
+    if points:
+        for p in points:
+            if not isinstance(p, (tuple, list)) or len(p) < 2:
+                continue
+            x = max(0.0, min(1.0, float(p[0])))
+            y = max(0.0, min(1.0, float(p[1])))
+            raw.append((x, y))
+    if not raw:
+        raw = [(0.0, 0.0), (1.0, 1.0)]
+
+    raw.sort(key=lambda p: (p[0], p[1]))
+    # Keep last point at each distinct x (within a small epsilon).
+    uniq: list[tuple[float, float]] = []
+    for x, y in raw:
+        if uniq and abs(uniq[-1][0] - x) < 1e-9:
+            uniq[-1] = (x, y)
+        else:
+            uniq.append((x, y))
+
+    if uniq[0][0] > 1e-9:
+        uniq.insert(0, (0.0, uniq[0][1]))
+    else:
+        uniq[0] = (0.0, uniq[0][1])
+    if uniq[-1][0] < 1.0 - 1e-9:
+        uniq.append((1.0, uniq[-1][1]))
+    else:
+        uniq[-1] = (1.0, uniq[-1][1])
+
+    if len(uniq) < 2:
+        return [(0.0, 0.0), (1.0, 1.0)]
+    return uniq
+
+
+def _curve_lut(points: list[tuple[float, float]], size: int) -> np.ndarray:
+    """Build a size-entry LUT with values in [0, 1] from normalized curve points."""
+    n = max(2, int(size))
+    xs = np.array([p[0] for p in points], dtype=np.float64)
+    ys = np.array([p[1] for p in points], dtype=np.float64)
+    t = np.linspace(0.0, 1.0, n, dtype=np.float64)
+    return np.clip(_eval_curve_hermite(xs, ys, t), 0.0, 1.0)
+
+
+def _eval_curve_hermite(xs: np.ndarray, ys: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Piecewise cubic Hermite with Catmull-Rom tangents; output in curve units."""
+    m = len(xs)
+    if m == 0:
+        return np.zeros_like(t)
+    if m == 1:
+        return np.full_like(t, float(ys[0]))
+
+    # Finite-difference / Catmull-Rom tangents along x.
+    tangents = np.zeros(m, dtype=np.float64)
+    for i in range(m):
+        if i == 0:
+            dx = xs[1] - xs[0]
+            tangents[i] = (ys[1] - ys[0]) / dx if dx > 1e-12 else 0.0
+        elif i == m - 1:
+            dx = xs[-1] - xs[-2]
+            tangents[i] = (ys[-1] - ys[-2]) / dx if dx > 1e-12 else 0.0
+        else:
+            dx = xs[i + 1] - xs[i - 1]
+            tangents[i] = (ys[i + 1] - ys[i - 1]) / dx if dx > 1e-12 else 0.0
+
+    idx = np.searchsorted(xs, t, side="right") - 1
+    idx = np.clip(idx, 0, m - 2)
+    x0 = xs[idx]
+    x1 = xs[idx + 1]
+    y0 = ys[idx]
+    y1 = ys[idx + 1]
+    m0 = tangents[idx]
+    m1 = tangents[idx + 1]
+    dx = np.maximum(x1 - x0, 1e-12)
+    u = (t - x0) / dx
+    u2 = u * u
+    u3 = u2 * u
+    h00 = 2.0 * u3 - 3.0 * u2 + 1.0
+    h10 = u3 - 2.0 * u2 + u
+    h01 = -2.0 * u3 + 3.0 * u2
+    h11 = u3 - u2
+    return h00 * y0 + h10 * dx * m0 + h01 * y1 + h11 * dx * m1
 
 
 def _quantize_levels(value: np.ndarray, levels: int, vmax: float) -> np.ndarray:
