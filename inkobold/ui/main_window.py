@@ -26,7 +26,9 @@ from inkobold.core.effects import (
     NORMAL_MAP_Y,
     blend_effect,
     dither,
+    drop_shadow,
     edge_detect,
+    emboss,
     gaussian_blur,
     kuwahara,
     liquify,
@@ -67,6 +69,7 @@ from inkobold.ui.dialogs import (
     ColorDepthDialog,
     CropDialog,
     DpiDialog,
+    EFFECT_APPLY_TO_ALL,
     EffectOption,
     EffectPreviewDialog,
     GridOverlayDialog,
@@ -157,9 +160,13 @@ class MainWindow(Gtk.ApplicationWindow):
         ensure_libraries()
         self._css_provider = Gtk.CssProvider()
 
+        self._typing_shortcuts_suspended = False
+        self._shortcut_focus_windows: set[Gtk.Window] = set()
+
         self._build_actions()
         self._build_ui()
         self._install_shortcuts()
+        self._watch_focus_for_shortcuts(self)
         self._open_at_startup = False
         GLib.idle_add(self._prompt_startup)
 
@@ -193,11 +200,13 @@ class MainWindow(Gtk.ApplicationWindow):
             "effect_pixelate": self.action_effect_pixelate,
             "effect_kuwahara": self.action_effect_kuwahara,
             "effect_gaussian_blur": self.action_effect_gaussian_blur,
+            "effect_drop_shadow": self.action_effect_drop_shadow,
             "effect_dither": self.action_effect_dither,
             "effect_posterize": self.action_effect_posterize,
             "effect_threshold": self.action_effect_threshold,
             "effect_liquify": self.action_effect_liquify,
             "effect_edge_detect": self.action_effect_edge_detect,
+            "effect_emboss": self.action_effect_emboss,
             "effect_normal_map": self.action_effect_normal_map,
             "effect_metal_relief": self.action_effect_metal_relief,
             "effect_milk": self.action_effect_milk,
@@ -294,6 +303,8 @@ class MainWindow(Gtk.ApplicationWindow):
             app.set_accels_for_action(action, [])
         for action, accels in self.shortcuts.items():
             app.set_accels_for_action(action, accels)
+        if self._typing_shortcuts_suspended:
+            self._apply_typing_shortcut_filter(True)
         self._rebuild_shortcuts_submenu()
         if getattr(self, "tool_buttons", None):
             self._refresh_tool_shortcut_tips()
@@ -823,7 +834,7 @@ class MainWindow(Gtk.ApplicationWindow):
             canvas.refresh_type_preview()
 
     def _on_type_editing_changed(self, active: bool) -> None:
-        self._set_typing_shortcuts_suspended(active)
+        self._refresh_typing_shortcut_suspend()
         if hasattr(self, "canvas"):
             if active:
                 self.canvas._catcher.grab_focus()
@@ -833,13 +844,64 @@ class MainWindow(Gtk.ApplicationWindow):
             self.canvas.refresh_guides()
             self._set_status()
 
-    def _set_typing_shortcuts_suspended(self, suspend: bool) -> None:
+    @staticmethod
+    def _is_text_input_widget(widget: Optional[Gtk.Widget]) -> bool:
+        """True if focus is (inside) an Entry, SpinButton, TextView, etc."""
+        w = widget
+        while w is not None:
+            if isinstance(w, (Gtk.Editable, Gtk.TextView)):
+                return True
+            w = w.get_parent()
+        return False
+
+    def _watch_focus_for_shortcuts(self, window: Gtk.Window) -> None:
+        """Suspend bare-key accelerators while this window focuses a text field."""
+        if window in self._shortcut_focus_windows:
+            return
+        self._shortcut_focus_windows.add(window)
+
+        def _on_focus_widget(*_a) -> None:
+            # Defer so leave→enter between fields sees the final focus widget.
+            GLib.idle_add(self._refresh_typing_shortcut_suspend)
+            return
+
+        def _on_destroy(*_a) -> None:
+            self._shortcut_focus_windows.discard(window)
+            self._refresh_typing_shortcut_suspend()
+
+        window.connect("notify::focus-widget", _on_focus_widget)
+        window.connect("destroy", _on_destroy)
+
+    def _any_text_input_focused(self) -> bool:
+        for win in list(self._shortcut_focus_windows):
+            if self._is_text_input_widget(win.get_focus()):
+                return True
+        return False
+
+    def _should_suspend_typing_shortcuts(self) -> bool:
+        type_tool = self.tools.get("type")
+        if type_tool is not None and getattr(type_tool, "editing", False):
+            return True
+        return self._any_text_input_focused()
+
+    def _refresh_typing_shortcut_suspend(self) -> bool:
+        suspend = self._should_suspend_typing_shortcuts()
+        if self._typing_shortcuts_suspended == suspend:
+            return False
+        self._typing_shortcuts_suspended = suspend
+        self._apply_typing_shortcut_filter(suspend)
+        return False
+
+    def _apply_typing_shortcut_filter(self, suspend: bool) -> None:
         """Drop bare letter/digit accelerators while typing so they insert text."""
         app = self.get_application()
         if app is None:
             return
         if not suspend:
-            self._install_shortcuts()
+            for action in DEFAULT_SHORTCUTS:
+                app.set_accels_for_action(action, [])
+            for action, accels in self.shortcuts.items():
+                app.set_accels_for_action(action, accels)
             return
         for action, accels in self.shortcuts.items():
             kept = [a for a in accels if "<" in a]
@@ -859,7 +921,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._on_doc_changed()
         else:
             type_tool.reset()
-        self._set_typing_shortcuts_suspended(False)
+        self._refresh_typing_shortcut_suspend()
 
     def _on_intensity_changed(self, spin: Gtk.SpinButton) -> None:
         if self._syncing_tool_ui:
@@ -960,8 +1022,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()
 
-    def _on_mirror_radials_changed(self, spin: Gtk.SpinButton) -> None:
-        self.mirror.radials = int(spin.get_value())
+    def _on_mirror_axes_changed(self, spin: Gtk.SpinButton) -> None:
+        self.mirror.axes = int(spin.get_value())
         self.mirror.clamp()
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()
@@ -1188,11 +1250,13 @@ class MainWindow(Gtk.ApplicationWindow):
         effects_menu.append("Pixelate…", "win.effect_pixelate")
         effects_menu.append("Kuwahara…", "win.effect_kuwahara")
         effects_menu.append("Gaussian Blur…", "win.effect_gaussian_blur")
+        effects_menu.append("Drop Shadow…", "win.effect_drop_shadow")
         effects_menu.append("Dither…", "win.effect_dither")
         effects_menu.append("Posterize…", "win.effect_posterize")
         effects_menu.append("Threshold…", "win.effect_threshold")
         effects_menu.append("Liquify…", "win.effect_liquify")
         effects_menu.append("Edge Detect…", "win.effect_edge_detect")
+        effects_menu.append("Emboss…", "win.effect_emboss")
         effects_menu.append("Normal Map…", "win.effect_normal_map")
         effects_menu.append("Metal Relief…", "win.effect_metal_relief")
         effects_menu.append("Milk…", "win.effect_milk")
@@ -1735,7 +1799,7 @@ class MainWindow(Gtk.ApplicationWindow):
         toolbox_page.append(mirror_box)
         self.mirror_toggle = Gtk.CheckButton(label="Mirror")
         self.mirror_toggle.set_tooltip_text(
-            "Live symmetry while drawing. Mirrors strokes across the canvas center."
+            "Live symmetry while drawing. Equally spaced axes through the canvas center."
         )
         self.mirror_toggle.connect("toggled", self._on_mirror_toggled)
         mirror_box.append(self.mirror_toggle)
@@ -1759,21 +1823,22 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mirror_orient_dropdown = Gtk.DropDown(model=Gtk.StringList.new(orient_labels))
         self.mirror_orient_dropdown.set_hexpand(True)
         self.mirror_orient_dropdown.set_tooltip_text(
-            "Horizontal: left↔right. Vertical: top↔bottom. Both: four-way."
+            "Rotates the axis set. Horizontal: left↔right first. "
+            "Vertical: top↔bottom first. Diagonal: 45°."
         )
         self.mirror_orient_dropdown.connect("notify::selected", self._on_mirror_orient_changed)
         self.mirror_opts.append(self.mirror_orient_dropdown)
 
-        self.mirror_opts.append(Gtk.Label(label="Radials", xalign=0))
-        self.mirror_radials_spin = Gtk.SpinButton.new_with_range(1, 16, 1)
-        self.mirror_radials_spin.set_value(1)
-        self.mirror_radials_spin.set_hexpand(True)
-        self.mirror_radials_spin.set_tooltip_text(
-            "Rotational copies around the center. 1 = orientation mirrors only; "
-            "2+ adds equal-angle radial symmetry (combined with orientation)."
+        self.mirror_opts.append(Gtk.Label(label="Axes", xalign=0))
+        self.mirror_axes_spin = Gtk.SpinButton.new_with_range(1, 16, 1)
+        self.mirror_axes_spin.set_value(1)
+        self.mirror_axes_spin.set_hexpand(True)
+        self.mirror_axes_spin.set_tooltip_text(
+            "Equally spaced mirror axes through the center. "
+            "1 = single axis; 2 = four-way (perpendicular); 3+ = kaleidoscope."
         )
-        self.mirror_radials_spin.connect("value-changed", self._on_mirror_radials_changed)
-        self.mirror_opts.append(self.mirror_radials_spin)
+        self.mirror_axes_spin.connect("value-changed", self._on_mirror_axes_changed)
+        self.mirror_opts.append(self.mirror_axes_spin)
 
         # Libraries tab — open category folders in the system file manager
         libraries_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["toolbox"])
@@ -2204,6 +2269,40 @@ class MainWindow(Gtk.ApplicationWindow):
             preview_max_side=720,
         )
 
+    def action_effect_drop_shadow(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Drop Shadow",
+            blurb=(
+                "Cast a shadow from the active layer’s alpha. "
+                "Direction: 0° = right, 90° = down. Color alpha sets opacity."
+            ),
+            options=[
+                EffectOption("distance", "Distance", "spin", 8, minimum=0, maximum=256, step=1),
+                EffectOption(
+                    "direction", "Direction °", "spin", 135, minimum=0, maximum=360, step=1
+                ),
+                EffectOption("blur", "Blur", "spin", 4, minimum=0, maximum=64, step=1),
+                EffectOption("spread", "Spread", "spin", 0, minimum=0, maximum=64, step=1),
+                EffectOption(
+                    "color",
+                    "Color",
+                    "color",
+                    (0, 0, 0, 255),
+                    use_alpha=True,
+                ),
+            ],
+            effect_fn=lambda src, p: drop_shadow(
+                src,
+                distance=int(p["distance"]),
+                direction=float(p["direction"]),
+                blur=int(p["blur"]),
+                spread=int(p["spread"]),
+                color=tuple(p["color"]),  # type: ignore[arg-type]
+            ),
+            debounce_ms=80,
+            preview_max_side=720,
+        )
+
     def action_effect_dither(self, *_a) -> None:
         self._open_effect_dialog(
             title="Dither",
@@ -2304,6 +2403,38 @@ class MainWindow(Gtk.ApplicationWindow):
                 threshold=float(p["threshold"]),
                 radius=int(p["radius"]),
                 style=str(p["style"]),
+            ),
+            debounce_ms=50,
+            preview_max_side=1280,
+        )
+
+    def action_effect_emboss(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Emboss",
+            blurb=(
+                "Classic directional emboss from luma — mid-gray flats with "
+                "bright / dark relief (alpha preserved). Direction matches Drop Shadow."
+            ),
+            options=[
+                EffectOption(
+                    "direction",
+                    "Direction °",
+                    "spin",
+                    135,
+                    minimum=0,
+                    maximum=360,
+                    step=1,
+                ),
+                EffectOption("depth", "Depth", "spin", 100, minimum=0, maximum=200, step=1),
+                EffectOption("height", "Height", "spin", 2, minimum=1, maximum=64, step=1),
+                EffectOption("radius", "Smooth", "spin", 0, minimum=0, maximum=16, step=1),
+            ],
+            effect_fn=lambda src, p: emboss(
+                src,
+                direction=float(p["direction"]),
+                depth=float(p["depth"]),
+                height=int(p["height"]),
+                radius=int(p["radius"]),
             ),
             debounce_ms=50,
             preview_max_side=1280,
@@ -2505,17 +2636,18 @@ class MainWindow(Gtk.ApplicationWindow):
     ) -> None:
         if not self.document or self._effect_session is not None:
             return
-        ly = self.document.active_layer
-        ly.apply_offset()
-        snapshot = ly.pixels.copy()
+        snapshots: dict[str, np.ndarray] = {}
+        for ly in self.document.layers:
+            ly.apply_offset()
+            snapshots[ly.id] = ly.pixels.copy()
         sel_mask = None
         if self.document.selection.active and self.document.selection.mask is not None:
             sel_mask = self.document.selection.mask.copy()
 
         self._push_history()
         self._effect_session = {
-            "snapshot": snapshot,
-            "layer_id": ly.id,
+            "snapshots": snapshots,
+            "active_layer_id": self.document.active_layer.id,
             "selection": sel_mask,
             "effect_fn": effect_fn,
             "preview_max_side": preview_max_side,
@@ -2536,8 +2668,14 @@ class MainWindow(Gtk.ApplicationWindow):
         dlg.connect_response(self._on_effect_dialog_response)
         dlg.present()
 
-    def _run_effect(self, session: dict, params: dict, *, final: bool) -> np.ndarray:
-        src = session["snapshot"]
+    def _run_effect(
+        self,
+        session: dict,
+        src: np.ndarray,
+        params: dict,
+        *,
+        final: bool,
+    ) -> np.ndarray:
         effect_fn = session["effect_fn"]
         max_side = session.get("preview_max_side")
         h, w = src.shape[:2]
@@ -2555,6 +2693,9 @@ class MainWindow(Gtk.ApplicationWindow):
             preview_params["radius"] = max(1, int(round(int(preview_params["radius"]) * scale)))
         if "block_size" in preview_params:
             preview_params["block_size"] = max(1, int(round(int(preview_params["block_size"]) * scale)))
+        for key in ("distance", "blur", "spread"):
+            if key in preview_params:
+                preview_params[key] = max(0, int(round(int(preview_params[key]) * scale)))
         small_out = effect_fn(small, preview_params)
         y_up = (np.linspace(0, small_h - 1, h)).astype(np.int32)
         x_up = (np.linspace(0, small_w - 1, w)).astype(np.int32)
@@ -2564,16 +2705,26 @@ class MainWindow(Gtk.ApplicationWindow):
         session = self._effect_session
         if not session or not self.document:
             return
-        ly = self.document.active_layer
-        if ly.id != session["layer_id"]:
+        snapshots: dict[str, np.ndarray] = session["snapshots"]
+        if session["active_layer_id"] not in snapshots:
             return
         session["last_params"] = dict(params)
-        effected = self._run_effect(session, params, final=final)
-        blended = blend_effect(session["snapshot"], effected, session["selection"])
-        np.copyto(ly.pixels, blended)
-        ly.bump()
+        apply_all = params.get("apply_to") == EFFECT_APPLY_TO_ALL
+        target_ids = set(snapshots) if apply_all else {session["active_layer_id"]}
+        for ly in self.document.layers:
+            snap = snapshots.get(ly.id)
+            if snap is None:
+                continue
+            if ly.id in target_ids:
+                effected = self._run_effect(session, snap, params, final=final)
+                blended = blend_effect(snap, effected, session["selection"])
+                np.copyto(ly.pixels, blended)
+            else:
+                # Restore layers left untouched (e.g. after switching from All → Active).
+                np.copyto(ly.pixels, snap)
+            ly.bump()
+            self.canvas.renderer.invalidate(ly.id)
         self.document.dirty = True
-        self.canvas.renderer.invalidate(ly.id)
         self.canvas.queue_render()
         self._set_status()
 
@@ -2582,7 +2733,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self._effect_session = None
         if not self.document or session is None:
             return
-        ly = self.document.active_layer
         if response == Gtk.ResponseType.OK:
             params = dlg.params()
             # Re-apply at full resolution (preview may have been downscaled).
@@ -2591,11 +2741,14 @@ class MainWindow(Gtk.ApplicationWindow):
             self._effect_session = None
             return
         # Cancel: restore original pixels and drop the undo entry pushed on open.
-        if ly.id == session["layer_id"]:
-            np.copyto(ly.pixels, session["snapshot"])
+        for ly in self.document.layers:
+            snap = session["snapshots"].get(ly.id)
+            if snap is None:
+                continue
+            np.copyto(ly.pixels, snap)
             ly.bump()
             self.canvas.renderer.invalidate(ly.id)
-            self.canvas.queue_render()
+        self.canvas.queue_render()
         self.history.discard_last_push()
         self._set_status()
 

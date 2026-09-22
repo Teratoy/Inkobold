@@ -8,11 +8,11 @@ GPU-accelerated drawing tool for Linux, with **libinput** / **libwacom** tablet 
 - **Layers** — RGBA8 layers, visibility, opacity-ready offsets, GPU composite; add / duplicate / rename / delete / merge down / merge all
 - **Animation** — Frames with FPS playback; onion-skin overlay of the previous frame while drawing; export as GIF or PNG sequence folder
 - **Tools** — Pen, Line, Curve (freehand / arc / circle), Brush (round / custom tip / bubbles), Weld Brush, Fill, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
-- **Effects** — Pixelate, Kuwahara, Gaussian Blur, Drop Shadow, Dither, Posterize, Threshold, Liquify, Edge Detect, Normal Map, Metal Relief, Milk
+- **Effects** — Pixelate, Kuwahara, Gaussian Blur, Drop Shadow, Dither, Posterize, Threshold, Liquify, Edge Detect, Emboss, Normal Map, Metal Relief, Milk (apply to active layer or all layers)
 - **Libraries** — User brushes, patterns, and fonts under `~/.local/share/inkobold/libraries/` (or `$XDG_DATA_HOME/inkobold/libraries/`)
 - **Input** — GDK drawing path + libinput device poll + libwacom tablet identification
 - **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid overlay, Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
-- **Edit** — Undo / Redo; Mirror / Flip / Rotate active layer; Crop Canvas (live size before apply; optional selection bounds)
+- **Edit** — Undo / Redo; stroke Mirror (1–16 axes, horizontal / vertical / diagonal); Flip / Rotate active layer; Crop Canvas (live size before apply; optional selection bounds)
 - **Settings** — Theme, Memory (undo steps), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (view & rebind), Debug Mode
 
 ## Run

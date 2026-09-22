@@ -16,7 +16,7 @@ from inkobold.core.shortcuts import (
     SHORTCUT_ORDER,
     format_accels,
 )
-from inkobold.ui.color_picker import configure_hue_chooser
+from inkobold.ui.color_picker import ColorSelectButton, configure_hue_chooser, rgba_to_tuple, tuple_to_rgba
 
 
 @dataclass
@@ -25,13 +25,26 @@ class EffectOption:
 
     key: str
     label: str
-    kind: str  # "spin" | "choice"
+    kind: str  # "spin" | "choice" | "color"
     default: Any
     minimum: float = 0
     maximum: float = 100
     step: float = 1
     digits: int = 0
     choices: tuple[str, ...] = field(default_factory=tuple)
+    use_alpha: bool = True
+
+
+EFFECT_APPLY_TO_ACTIVE = "Active layer"
+EFFECT_APPLY_TO_ALL = "All layers"
+EFFECT_APPLY_TO_CHOICES = (EFFECT_APPLY_TO_ACTIVE, EFFECT_APPLY_TO_ALL)
+
+
+def _attach_shortcut_focus_guard(parent: Gtk.Window, window: Gtk.Window) -> None:
+    """Suspend main-window bare-key shortcuts while this dialog focuses a text field."""
+    watch = getattr(parent, "_watch_focus_for_shortcuts", None)
+    if callable(watch):
+        watch(window)
 
 
 class StartupDialog(Gtk.Window):
@@ -39,6 +52,7 @@ class StartupDialog(Gtk.Window):
 
     def __init__(self, parent: Gtk.Window) -> None:
         super().__init__(title="Inkobold", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(360, 140)
         self.set_resizable(False)
         self._callback = None
@@ -90,6 +104,7 @@ class NewFileDialog(Gtk.Window):
 
     def __init__(self, parent: Gtk.Window, default_w: int = 1920, default_h: int = 1080) -> None:
         super().__init__(title="New File", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(380, 240)
         self.set_resizable(False)
         self._response = Gtk.ResponseType.CANCEL
@@ -181,6 +196,7 @@ class ThemeColorDialog(Gtk.Window):
     ) -> None:
         # Non-modal so the parent chrome stays undimmed for live preview.
         super().__init__(title="Theme Color", transient_for=parent, modal=False)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(380, 480)
         self.set_resizable(True)
         self._callback = None
@@ -283,6 +299,7 @@ class HistoryStepsDialog(Gtk.Window):
 
     def __init__(self, parent: Gtk.Window, steps: int) -> None:
         super().__init__(title="Memory", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(340, 180)
         self.set_resizable(False)
         self._callback = None
@@ -353,6 +370,7 @@ class VisibleToolsDialog(Gtk.Window):
         visible_ids: list[str],
     ) -> None:
         super().__init__(title="Visible Tools", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(320, 420)
         self.set_resizable(True)
         self._callback = None
@@ -446,6 +464,7 @@ class GridOverlayDialog(Gtk.Window):
 
     def __init__(self, parent: Gtk.Window, rows: int = 8, columns: int = 8) -> None:
         super().__init__(title="Grid Overlay", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(340, 200)
         self.set_resizable(False)
         self._callback = None
@@ -514,6 +533,7 @@ class QuitConfirmDialog(Gtk.Window):
 
     def __init__(self, parent: Gtk.Window, filename: str = "untitled") -> None:
         super().__init__(title="Exit Inkobold", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(420, 140)
         self.set_resizable(False)
         self._callback = None
@@ -566,6 +586,7 @@ class DpiDialog(Gtk.Window):
 
     def __init__(self, parent: Gtk.Window, dpi: int = DEFAULT_DPI) -> None:
         super().__init__(title="DPI", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(340, 180)
         self.set_resizable(False)
         self._callback = None
@@ -631,6 +652,7 @@ class ColorDepthDialog(Gtk.Window):
 
     def __init__(self, parent: Gtk.Window, color_depth: int = 32) -> None:
         super().__init__(title="Color Depth", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(360, 200)
         self.set_resizable(False)
         self._callback = None
@@ -695,6 +717,7 @@ class CropDialog(Gtk.Window):
         selection_bounds: Optional[tuple[int, int, int, int]] = None,
     ) -> None:
         super().__init__(title="Crop Canvas", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(420, 320)
         self.set_resizable(False)
         self._callback = None
@@ -879,6 +902,7 @@ class CaptureShortcutDialog(Gtk.Window):
 
     def __init__(self, parent: Gtk.Window, action: str, label: str) -> None:
         super().__init__(title="Rebind Shortcut", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(380, 140)
         self.set_resizable(False)
         self._callback: Optional[Callable] = None
@@ -954,6 +978,7 @@ class ShortcutsDialog(Gtk.Window):
 
     def __init__(self, parent: Gtk.Window, shortcuts: dict[str, list[str]]) -> None:
         super().__init__(title="Shortcuts", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(520, 480)
         self._callback = None
         self.shortcuts = {k: list(v) for k, v in shortcuts.items()}
@@ -1080,13 +1105,22 @@ class EffectPreviewDialog(Gtk.Window):
         debounce_ms: int = 60,
     ) -> None:
         super().__init__(title=title, transient_for=parent, modal=False)
+        _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(360, 220)
         self.set_resizable(False)
         self._callback: Optional[Callable] = None
         self._on_preview = on_preview
         self._debounce_ms = max(0, int(debounce_ms))
         self._preview_source: Optional[int] = None
-        self._options = list(options)
+        # Every effect gets layer scope; strip any caller duplicate of the same key.
+        scope = EffectOption(
+            "apply_to",
+            "Apply to",
+            "choice",
+            EFFECT_APPLY_TO_ACTIVE,
+            choices=EFFECT_APPLY_TO_CHOICES,
+        )
+        self._options = [scope] + [o for o in options if o.key != "apply_to"]
         self._widgets: dict[str, Gtk.Widget] = {}
         self._closed = False
 
@@ -1117,6 +1151,18 @@ class EffectPreviewDialog(Gtk.Window):
                 dd.set_hexpand(True)
                 row.append(dd)
                 self._widgets[opt.key] = dd
+            elif opt.kind == "color":
+                btn = ColorSelectButton(use_alpha=opt.use_alpha)
+                default = opt.default
+                if isinstance(default, (tuple, list)) and len(default) >= 3:
+                    r, g, b = int(default[0]), int(default[1]), int(default[2])
+                    a = int(default[3]) if len(default) > 3 else 255
+                    btn.set_rgba(tuple_to_rgba((r, g, b, a)))
+                btn.set_hexpand(True)
+                btn.set_size_request(120, -1)
+                btn.connect("color-set", self._schedule_preview)
+                row.append(btn)
+                self._widgets[opt.key] = btn
             else:
                 spin = Gtk.SpinButton.new_with_range(opt.minimum, opt.maximum, opt.step)
                 spin.set_digits(opt.digits)
@@ -1152,6 +1198,8 @@ class EffectPreviewDialog(Gtk.Window):
                 i = int(w.get_selected())  # type: ignore[attr-defined]
                 choices = opt.choices
                 out[opt.key] = choices[max(0, min(i, len(choices) - 1))]
+            elif opt.kind == "color":
+                out[opt.key] = rgba_to_tuple(w.get_rgba(), use_alpha=opt.use_alpha)  # type: ignore[attr-defined]
             else:
                 val = float(w.get_value())  # type: ignore[attr-defined]
                 out[opt.key] = int(round(val)) if opt.digits == 0 else val

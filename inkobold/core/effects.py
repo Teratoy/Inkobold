@@ -213,6 +213,109 @@ def gaussian_blur(pixels: np.ndarray, radius: int = 3) -> np.ndarray:
     return np.clip(blurred, lo, hi).astype(pixels.dtype, copy=False)
 
 
+def _dilate_2d(src: np.ndarray, radius: int) -> np.ndarray:
+    """Circular max dilation of a 2D float array (zeros outside bounds)."""
+    r = max(0, int(radius))
+    if r < 1:
+        return src
+    yy, xx = np.ogrid[-r : r + 1, -r : r + 1]
+    disk = (xx * xx + yy * yy) <= r * r
+    padded = np.pad(src, r, mode="constant", constant_values=0.0)
+    windows = np.lib.stride_tricks.sliding_window_view(padded, (2 * r + 1, 2 * r + 1))
+    # Max over disk taps only.
+    return windows[:, :, disk].max(axis=-1)
+
+
+def _shift_fill(src: np.ndarray, dx: int, dy: int, fill: float = 0.0) -> np.ndarray:
+    """Translate HxW[xC] by (dx, dy); vacated pixels get ``fill`` (no wrap)."""
+    ox, oy = int(dx), int(dy)
+    if ox == 0 and oy == 0:
+        return np.ascontiguousarray(src.copy())
+    out = np.full_like(src, fill, dtype=np.float64)
+    h, w = src.shape[:2]
+    src_y0, dst_y0 = (0, oy) if oy >= 0 else (-oy, 0)
+    src_x0, dst_x0 = (0, ox) if ox >= 0 else (-ox, 0)
+    src_y1 = h - max(oy, 0)
+    src_x1 = w - max(ox, 0)
+    dst_y1 = dst_y0 + (src_y1 - src_y0)
+    dst_x1 = dst_x0 + (src_x1 - src_x0)
+    if src_y1 > src_y0 and src_x1 > src_x0:
+        out[dst_y0:dst_y1, dst_x0:dst_x1] = src[src_y0:src_y1, src_x0:src_x1]
+    return out
+
+
+def drop_shadow(
+    pixels: np.ndarray,
+    *,
+    distance: int = 8,
+    direction: float = 135.0,
+    blur: int = 4,
+    spread: int = 0,
+    color: tuple[int, int, int, int] = (0, 0, 0, 255),
+) -> np.ndarray:
+    """Cast a drop shadow from the active-layer alpha, then composite the layer on top.
+
+    Direction is degrees in image space: 0° = right, 90° = down.
+    Spread dilates the alpha silhouette before blur (CSS-style).
+    ``color`` is 8-bit RGBA; alpha controls shadow opacity (default opaque black).
+    """
+    h, w = pixels.shape[:2]
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float64, copy=False)
+    src_a = (src[..., 3] / max(vmax, 1e-6)) if src.shape[2] >= 4 else np.ones((h, w), dtype=np.float64)
+
+    cr, cg, cb, ca = color
+    shadow_rgb = (
+        float(cr) / 255.0 * vmax,
+        float(cg) / 255.0 * vmax,
+        float(cb) / 255.0 * vmax,
+    )
+    shadow_op = float(np.clip(ca / 255.0, 0.0, 1.0))
+
+    mask = src_a * shadow_op
+    sp = max(0, int(spread))
+    if sp >= 1:
+        mask = _dilate_2d(mask, sp)
+
+    # Premultiplied shadow buffer so blur softens coverage without RGB fringing.
+    a_px = mask * vmax
+    shadow = np.zeros((h, w, 4), dtype=np.float64)
+    shadow[..., 0] = shadow_rgb[0] * mask
+    shadow[..., 1] = shadow_rgb[1] * mask
+    shadow[..., 2] = shadow_rgb[2] * mask
+    shadow[..., 3] = a_px
+
+    br = max(0, int(blur))
+    if br >= 1 and min(h, w) >= 2:
+        shadow = _separable_convolve(shadow, _gaussian_kernel_1d(br))
+
+    dist = max(0, int(distance))
+    ang = math.radians(float(direction))
+    dx = int(round(dist * math.cos(ang)))
+    dy = int(round(dist * math.sin(ang)))
+    if dx or dy:
+        shadow = _shift_fill(shadow, dx, dy, fill=0.0)
+
+    # Unpremultiply shadow for straight-alpha Porter–Duff over the source.
+    ba = np.clip(shadow[..., 3] / max(vmax, 1e-6), 0.0, 1.0)
+    safe = np.maximum(ba, 1e-8)
+    shadow_rgb_s = np.zeros((h, w, 3), dtype=np.float64)
+    for c in range(3):
+        shadow_rgb_s[..., c] = np.where(ba > 1e-6, (shadow[..., c] / safe) , 0.0)
+
+    # Original layer over shadow (source-over).
+    sa = np.clip(src[..., 3] / max(vmax, 1e-6), 0.0, 1.0)
+    out_a = sa + ba * (1.0 - sa)
+    out = np.zeros_like(src)
+    denom = np.maximum(out_a, 1e-8)
+    for c in range(3):
+        out[..., c] = (src[..., c] * sa + shadow_rgb_s[..., c] * ba * (1.0 - sa)) / denom
+    out[..., 3] = out_a * vmax
+    out[..., :3] = np.where(out_a[..., None] > 1e-6, out[..., :3], 0.0)
+    out = np.clip(out, 0.0, vmax)
+    return out.astype(pixels.dtype, copy=False)
+
+
 def posterize(pixels: np.ndarray, levels: int = 4) -> np.ndarray:
     """Reduce each RGB channel to a fixed number of tonal steps (alpha preserved)."""
     n = max(2, min(256, int(levels)))
@@ -683,6 +786,55 @@ def _sobel_gradients(height: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         + p[2:, 2:]
     )
     return gx, gy
+
+
+def emboss(
+    pixels: np.ndarray,
+    direction: float = 135.0,
+    depth: float = 100.0,
+    height: int = 2,
+    radius: int = 0,
+) -> np.ndarray:
+    """Classic directional emboss from luma-as-height (alpha preserved).
+
+    Flat areas map to mid-gray; slopes facing the light go bright and the
+    opposite side goes dark. ``direction`` is degrees in image space:
+    0° = right, 90° = down (same convention as Drop Shadow). ``depth`` scales
+    relief contrast (0–200). ``height`` is the sample offset in pixels.
+    Optional ``radius`` pre-smooths the height field.
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 2:
+        return np.ascontiguousarray(pixels.copy())
+
+    field = _luma01(pixels)
+    r = max(0, int(radius))
+    if r >= 1:
+        stacked = field[..., None]
+        field = _separable_convolve(stacked, _gaussian_kernel_1d(r))[..., 0]
+        field = np.clip(field, 0.0, 1.0)
+
+    # Sample height along the light ray; relief = local − opposite.
+    dist = max(1, min(64, int(height)))
+    ang = math.radians(float(direction))
+    dx = dist * math.cos(ang)
+    dy = dist * math.sin(ang)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    shifted = _bilinear_sample(field[..., None], yy + dy, xx + dx)[..., 0]
+    relief = field - shifted
+
+    # Unit step over ``height`` pixels → |relief| ≈ 1; depth 100 ≈ full swing.
+    amt = max(0.0, min(200.0, float(depth))) / 100.0
+    gray = np.clip(0.5 + relief * amt, 0.0, 1.0)
+
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    tone = gray * vmax
+    out[..., 0] = tone
+    out[..., 1] = tone
+    out[..., 2] = tone
+    return out.astype(pixels.dtype, copy=False)
 
 
 def edge_detect(
