@@ -6,6 +6,8 @@ import math
 
 import numpy as np
 
+from inkobold.core.sun import DEFAULT_MILK_LIGHT_DIR, normalize_light
+
 
 def _max_v(pixels: np.ndarray) -> float:
     return 65535.0 if pixels.dtype == np.uint16 else 255.0
@@ -101,6 +103,7 @@ def render_bubbles_list(
     mask: np.ndarray | None = None,
     opacity: float = 1.0,
     clip: tuple[int, int, int, int] | None = None,
+    light_dir: tuple[float, float, float] = DEFAULT_MILK_LIGHT_DIR,
 ) -> None:
     """Shade and composite a list of bubbles as one seamless translucent body.
 
@@ -159,9 +162,7 @@ def render_bubbles_list(
     gloss_eff = 0.85
     wet_n = 0.45
     bub_spec_pow = 18.0 + 70.0 * (min(gloss_eff, 1.0) ** 1.1) + 40.0 * wet_n
-    lx, ly, lz = -0.40, -0.50, 0.76
-    invl = 1.0 / math.sqrt(lx * lx + ly * ly + lz * lz)
-    lx, ly, lz = lx * invl, ly * invl, lz * invl
+    lx, ly, lz = normalize_light(*light_dir)
     hx, hy, hz = lx, ly, lz + 1.0
     invh = 1.0 / math.sqrt(hx * hx + hy * hy + hz * hz)
     hx, hy, hz = hx * invh, hy * invh, hz * invh

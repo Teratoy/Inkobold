@@ -528,6 +528,69 @@ class GridOverlayDialog(Gtk.Window):
         return True
 
 
+class SunSettingsDialog(Gtk.Window):
+    """Elevation for the canvas sun that drives 3D lighting."""
+
+    def __init__(self, parent: Gtk.Window, elevation: float = 0.70) -> None:
+        super().__init__(title="Sun Light", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
+        self.set_default_size(360, 200)
+        self.set_resizable(False)
+        self._callback = None
+
+        root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=16,
+            margin_bottom=16,
+            margin_start=16,
+            margin_end=16,
+        )
+        self.set_child(root)
+        root.append(Gtk.Label(
+            label="When Show Sun is on, drag the sun on the canvas to aim "
+            "shadows and highlights for 3D Pen, 3D Fill, Bubbles, Metal Relief, "
+            "and Milk. Elevation controls how frontal vs. raking the light is.",
+            xalign=0,
+            wrap=True,
+        ))
+
+        grid = Gtk.Grid(column_spacing=8, row_spacing=8)
+        root.append(grid)
+        self.elevation_spin = Gtk.SpinButton.new_with_range(0.15, 1.50, 0.05)
+        self.elevation_spin.set_digits(2)
+        self.elevation_spin.set_value(elevation)
+        self.elevation_spin.set_hexpand(True)
+        grid.attach(Gtk.Label(label="Elevation", xalign=0), 0, 0, 1, 1)
+        grid.attach(self.elevation_spin, 1, 0, 1, 1)
+
+        actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=8)
+        root.append(actions)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
+        apply = Gtk.Button(label="Apply")
+        apply.add_css_class("suggested-action")
+        apply.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.OK))
+        actions.append(cancel)
+        actions.append(apply)
+        self.connect("close-request", self._on_close)
+
+    def elevation(self) -> float:
+        return float(self.elevation_spin.get_value())
+
+    def connect_response(self, callback) -> None:
+        self._callback = callback
+
+    def _emit(self, response: Gtk.ResponseType) -> None:
+        if self._callback:
+            self._callback(self, response)
+        self.destroy()
+
+    def _on_close(self, *_a) -> bool:
+        self._emit(Gtk.ResponseType.CANCEL)
+        return True
+
+
 class QuitConfirmDialog(Gtk.Window):
     """Ask whether to save before quitting. YES=save, NO=discard, CANCEL=stay."""
 

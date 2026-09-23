@@ -11,6 +11,7 @@ from inkobold.core.bubbles import (
     place_bubble_cluster,
     render_bubbles_list,
 )
+from inkobold.core.sun import DEFAULT_LIGHT_DIR, DEFAULT_MILK_LIGHT_DIR, normalize_light
 
 LIQUIFY_MODES = ("Swirl", "Pinch", "Bulge")
 LIQUIFY_BRUSH_MODES = ("Push", "Swirl", "Pinch", "Bulge")
@@ -1174,6 +1175,7 @@ def metal_relief(
     shadow_hue: float = 0.0,
     saturation: float = 100.0,
     radius: int = 1,
+    light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
 ) -> np.ndarray:
     """Render luma as embossed metal relief (copper / silver / gold / …).
 
@@ -1231,10 +1233,8 @@ def metal_relief(
     inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
     nx, ny, nz = nx * inv, ny * inv, nz * inv
 
-    # Key light from upper-left.
-    lx, ly, lz = -0.45, -0.55, 0.70
-    invl = 1.0 / math.sqrt(lx * lx + ly * ly + lz * lz)
-    lx, ly, lz = lx * invl, ly * invl, lz * invl
+    # Key light (canvas sun when enabled).
+    lx, ly, lz = normalize_light(*light_dir)
     ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
     # Soft masks: lit vs dark sides for per-lobe hue tinting.
@@ -1334,6 +1334,7 @@ def milk(
     edge_melt: float = 70.0,
     wetness: float = 45.0,
     expiration: float = 0.0,
+    light_dir: tuple[float, float, float] = DEFAULT_MILK_LIGHT_DIR,
 ) -> np.ndarray:
     """Render luma as creamy viscous fluid relief (milky / seminal look).
 
@@ -1505,9 +1506,7 @@ def milk(
     inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
     nx, ny, nz = nx * inv, ny * inv, nz * inv
 
-    lx, ly, lz = -0.40, -0.50, 0.76
-    invl = 1.0 / math.sqrt(lx * lx + ly * ly + lz * lz)
-    lx, ly, lz = lx * invl, ly * invl, lz * invl
+    lx, ly, lz = normalize_light(*light_dir)
     ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
     hx, hy, hz = lx, ly, lz + 1.0
@@ -1736,7 +1735,7 @@ def milk(
         bub_color = (cr[0], cr[1], cr[2], float(vmax))
         # Slightly translucent over the milk body; wetness boosts presence.
         bub_op = float(np.clip(0.55 + 0.35 * bub_n + 0.15 * wet_n, 0.35, 1.0))
-        render_bubbles_list(out, placed_bubs, bub_color, opacity=bub_op)
+        render_bubbles_list(out, placed_bubs, bub_color, opacity=bub_op, light_dir=light_dir)
     return out.astype(pixels.dtype, copy=False)
 
 

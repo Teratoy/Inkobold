@@ -35,6 +35,11 @@ class AppSettings:
     shortcut_overrides: dict[str, list[str]] = field(default_factory=dict)
     # most-recent paint colors first (RGBA 0–255)
     recent_colors: list[tuple[int, int, int, int]] = field(default_factory=list)
+    # Movable sun light for 3D-illusion tools / relief effects
+    sun_enabled: bool = False
+    sun_x_norm: float = 0.18
+    sun_y_norm: float = 0.18
+    sun_elevation: float = 0.70
 
     def clamp(self) -> None:
         r, g, b = self.theme_rgb
@@ -79,6 +84,10 @@ class AppSettings:
             self.visible_tools = [str(t) for t in self.visible_tools if isinstance(t, str)]
         else:
             self.visible_tools = []
+        self.sun_enabled = bool(self.sun_enabled)
+        self.sun_x_norm = max(0.0, min(1.0, float(self.sun_x_norm)))
+        self.sun_y_norm = max(0.0, min(1.0, float(self.sun_y_norm)))
+        self.sun_elevation = max(0.15, min(1.5, float(self.sun_elevation)))
 
 
 def config_path() -> Path:
@@ -136,6 +145,20 @@ def load_settings() -> AppSettings:
     raw_visible = data.get("visible_tools")
     if isinstance(raw_visible, list):
         settings.visible_tools = [str(t) for t in raw_visible if isinstance(t, str)]
+    if "sun_enabled" in data:
+        settings.sun_enabled = bool(data.get("sun_enabled"))
+    try:
+        settings.sun_x_norm = float(data.get("sun_x_norm", 0.18))
+    except (TypeError, ValueError):
+        settings.sun_x_norm = 0.18
+    try:
+        settings.sun_y_norm = float(data.get("sun_y_norm", 0.18))
+    except (TypeError, ValueError):
+        settings.sun_y_norm = 0.18
+    try:
+        settings.sun_elevation = float(data.get("sun_elevation", 0.70))
+    except (TypeError, ValueError):
+        settings.sun_elevation = 0.70
     settings.clamp()
     return settings
 
@@ -159,6 +182,10 @@ def save_settings(settings: AppSettings) -> None:
                 k: list(v) for k, v in settings.shortcut_overrides.items()
             },
             "recent_colors": [list(c) for c in settings.recent_colors],
+            "sun_enabled": bool(settings.sun_enabled),
+            "sun_x_norm": float(settings.sun_x_norm),
+            "sun_y_norm": float(settings.sun_y_norm),
+            "sun_elevation": float(settings.sun_elevation),
         }
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     except OSError:

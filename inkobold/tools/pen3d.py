@@ -55,6 +55,7 @@ class Pen3DTool(BaseTool):
             bevel=ctx.bevel,
             frequency=ctx.frequency,
             wrap=ctx.tile_wrap,
+            light_dir=ctx.light_dir,
         )
         ctx.document.mark_dirty()
 
@@ -72,6 +73,7 @@ class Pen3DTool(BaseTool):
             bevel=ctx.bevel,
             frequency=ctx.frequency,
             wrap=ctx.tile_wrap,
+            light_dir=ctx.light_dir,
         )
         self._lx, self._ly = x, y
         ctx.document.mark_dirty()
@@ -120,5 +122,6 @@ class Fill3DTool(BaseTool):
             depth=ctx.depth,
             highlight=ctx.highlight,
             bevel=ctx.bevel,
+            light_dir=ctx.light_dir,
         )
         ctx.document.mark_dirty()

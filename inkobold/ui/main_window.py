@@ -61,6 +61,7 @@ from inkobold.core.shortcuts import (
     format_accels,
     merge_shortcuts,
 )
+from inkobold.core.sun import SunLight
 from inkobold.input import InputHub
 from inkobold.tools import default_tools
 from inkobold.ui.canvas import Canvas
@@ -78,6 +79,7 @@ from inkobold.ui.dialogs import (
     HistoryStepsDialog,
     NewFileDialog,
     QuitConfirmDialog,
+    SunSettingsDialog,
     ShortcutsDialog,
     StartupDialog,
     ThemeColorDialog,
@@ -157,6 +159,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self._layers_sig: Optional[tuple] = None
         self.mirror = MirrorModifier()
         self.grid = GridOverlay()
+        self.sun = SunLight(
+            enabled=bool(self.app_settings.sun_enabled),
+            x_norm=float(self.app_settings.sun_x_norm),
+            y_norm=float(self.app_settings.sun_y_norm),
+            elevation=float(self.app_settings.sun_elevation),
+        )
+        self.sun.clamp()
         self.tile_wrap = False
         self.input_hub = InputHub()
         self.input_hub.start()
@@ -249,6 +258,14 @@ class MainWindow(Gtk.ApplicationWindow):
         show_grid.connect("change-state", self._on_show_grid_change)
         self.add_action(show_grid)
 
+        show_sun = Gio.SimpleAction.new_stateful(
+            "show_sun",
+            None,
+            GLib.Variant.new_boolean(bool(self.sun.enabled)),
+        )
+        show_sun.connect("change-state", self._on_show_sun_change)
+        self.add_action(show_sun)
+
         tile_preview = Gio.SimpleAction.new_stateful(
             "tile_preview", None, GLib.Variant.new_boolean(False)
         )
@@ -288,6 +305,10 @@ class MainWindow(Gtk.ApplicationWindow):
         grid_settings = Gio.SimpleAction.new("grid_settings", None)
         grid_settings.connect("activate", self.action_grid_settings)
         self.add_action(grid_settings)
+
+        sun_settings = Gio.SimpleAction.new("sun_settings", None)
+        sun_settings.connect("activate", self.action_sun_settings)
+        self.add_action(sun_settings)
 
         rebind = Gio.SimpleAction.new("shortcut_rebind", GLib.VariantType.new("s"))
         rebind.connect("activate", self._on_shortcut_rebind_action)
@@ -1067,6 +1088,33 @@ class MainWindow(Gtk.ApplicationWindow):
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()
 
+    def _on_show_sun_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
+        enabled = bool(value.get_boolean())
+        action.set_state(value)
+        self.sun.enabled = enabled
+        self.app_settings.sun_enabled = enabled
+        self._persist_settings()
+        if hasattr(self, "canvas"):
+            self.canvas.refresh_guides()
+
+    def _on_sun_moved(self) -> None:
+        self.app_settings.sun_x_norm = float(self.sun.x_norm)
+        self.app_settings.sun_y_norm = float(self.sun.y_norm)
+        self.app_settings.sun_elevation = float(self.sun.elevation)
+        self._persist_settings()
+
+    def _sun_light_dir(self) -> tuple[float, float, float]:
+        doc = self.document
+        if doc is None:
+            return self.sun.light_dir()
+        return self.sun.light_dir(float(doc.width), float(doc.height))
+
+    def _sun_milk_light_dir(self) -> tuple[float, float, float]:
+        doc = self.document
+        if doc is None:
+            return self.sun.milk_light_dir()
+        return self.sun.milk_light_dir(float(doc.width), float(doc.height))
+
     def _on_tile_preview_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
         enabled = bool(value.get_boolean())
         action.set_state(value)
@@ -1192,6 +1240,26 @@ class MainWindow(Gtk.ApplicationWindow):
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()
 
+    def action_sun_settings(self, *_a) -> None:
+        dlg = SunSettingsDialog(self, self.sun.elevation)
+        dlg.connect_response(self._on_sun_settings_response)
+        dlg.present()
+
+    def _on_sun_settings_response(self, dlg: SunSettingsDialog, response: int) -> None:
+        if response != Gtk.ResponseType.OK:
+            return
+        self.sun.elevation = dlg.elevation()
+        self.sun.clamp()
+        self.app_settings.sun_elevation = float(self.sun.elevation)
+        self._persist_settings()
+        # Enabling sun from the dialog makes the control immediately usable.
+        if not self.sun.enabled:
+            action = self.lookup_action("show_sun")
+            if action is not None:
+                action.change_state(GLib.Variant.new_boolean(True))
+        elif hasattr(self, "canvas"):
+            self.canvas.refresh_guides()
+
     def action_brush_smaller(self, *_a) -> None:
         self.brush_spin.set_value(max(1, self.brush_spin.get_value() - 1))
 
@@ -1301,6 +1369,8 @@ class MainWindow(Gtk.ApplicationWindow):
         view_menu.append("Fit Canvas", "win.fit")
         view_menu.append("Show Grid", "win.show_grid")
         view_menu.append("Grid…", "win.grid_settings")
+        view_menu.append("Show Sun", "win.show_sun")
+        view_menu.append("Sun…", "win.sun_settings")
         view_menu.append("Tile Preview", "win.tile_preview")
         view_menu.append("Wrap Moves", "win.tile_wrap")
         view_menu.append("Light Transparent Background", "win.checker_light")
@@ -1939,8 +2009,10 @@ class MainWindow(Gtk.ApplicationWindow):
             push_history=self._push_history,
             get_mirror=lambda: self.mirror,
             get_grid=lambda: self.grid,
+            get_sun=lambda: self.sun,
             get_tile_wrap=lambda: self.tile_wrap,
             on_type_editing=self._on_type_editing_changed,
+            on_sun_moved=self._on_sun_moved,
         )
         type_tool = self.tools.get("type")
         if type_tool is not None and hasattr(type_tool, "set_editing_changed_callback"):
@@ -2584,6 +2656,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 shadow_hue=float(p["shadow_hue"]),
                 saturation=float(p["saturation"]),
                 radius=int(p["radius"]),
+                light_dir=self._sun_light_dir(),
             ),
             debounce_ms=50,
             preview_max_side=1280,
@@ -2667,6 +2740,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 edge_melt=float(p["edge_melt"]),
                 wetness=float(p["wetness"]),
                 expiration=float(p["expiration"]),
+                light_dir=self._sun_milk_light_dir(),
             ),
             # Downscaled live preview for speed; Apply still runs full-res.
             debounce_ms=90,

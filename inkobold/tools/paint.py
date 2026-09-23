@@ -14,6 +14,12 @@ from inkobold.core.bubbles import (
     place_bubble_cluster as _place_bubble_cluster,
     render_bubbles_list,
 )
+from inkobold.core.sun import (
+    DEFAULT_LIGHT_DIR,
+    DEFAULT_MILK_LIGHT_DIR,
+    fill_light_from_key,
+    normalize_light,
+)
 
 def _max_v(pixels: np.ndarray) -> float:
     return 65535.0 if pixels.dtype == np.uint16 else 255.0
@@ -520,6 +526,7 @@ def stamp_bubbles(
     density: float = 50.0,
     *,
     force: bool = False,
+    light_dir: tuple[float, float, float] = DEFAULT_MILK_LIGHT_DIR,
 ) -> None:
     """Stamp milk-style air bubbles (soft hemispheres + rim + shared membranes).
 
@@ -535,7 +542,7 @@ def stamp_bubbles(
             stamp_bubbles(
                 pixels, px, py, radius, color,
                 mask=mask, opacity=opacity, wrap=False, seed=seed,
-                density=density, force=force,
+                density=density, force=force, light_dir=light_dir,
             )
         return
 
@@ -549,7 +556,7 @@ def stamp_bubbles(
     placed = _place_bubble_cluster(x, y, r, rng, density=density, force=force)
     if not placed:
         return
-    render_bubbles_list(pixels, placed, color, mask=mask, opacity=op)
+    render_bubbles_list(pixels, placed, color, mask=mask, opacity=op, light_dir=light_dir)
 
 
 def collect_bubbles_along_segment(
@@ -622,6 +629,7 @@ def stroke_segment_bubbles(
     opacity: float = 1.0,
     wrap: bool = False,
     density: float = 50.0,
+    light_dir: tuple[float, float, float] = DEFAULT_MILK_LIGHT_DIR,
 ) -> None:
     """Stamp milk-style bubble clusters along a pressure-tapered segment.
 
@@ -639,17 +647,17 @@ def stroke_segment_bubbles(
         for cx, cy, rad, strength in placed:
             render_bubbles_list(
                 pixels, [(cx, cy, rad, strength)], color,
-                mask=mask, opacity=opacity,
+                mask=mask, opacity=opacity, light_dir=light_dir,
             )
             for px, py in stamp_centers(cx, cy, rad * 1.6 + 2.0, w, h, True):
                 if abs(px - cx) < 1e-6 and abs(py - cy) < 1e-6:
                     continue
                 render_bubbles_list(
                     pixels, [(px, py, rad, strength)], color,
-                    mask=mask, opacity=opacity,
+                    mask=mask, opacity=opacity, light_dir=light_dir,
                 )
         return
-    render_bubbles_list(pixels, placed, color, mask=mask, opacity=opacity)
+    render_bubbles_list(pixels, placed, color, mask=mask, opacity=opacity, light_dir=light_dir)
 
 
 def _same_color_coverage(
@@ -2397,6 +2405,7 @@ def stamp_disk_3d(
     highlight: float = 55.0,
     bevel: float = 40.0,
     wrap: bool = False,
+    light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
 ) -> None:
     """Soft disc shaded as a lit sphere (bevel + specular highlight)."""
     h, w = pixels.shape[:2]
@@ -2414,6 +2423,7 @@ def stamp_disk_3d(
                 highlight=highlight,
                 bevel=bevel,
                 wrap=False,
+                light_dir=light_dir,
             )
         return
     x0 = max(0, int(x - r - 1))
@@ -2442,9 +2452,7 @@ def stamp_disk_3d(
     ny = np.clip(fy / r, -1.0, 1.0) * roundness
     nz = np.sqrt(np.clip(1.0 - nx * nx - ny * ny, 0.0, 1.0))
 
-    lx, ly, lz = -0.45, -0.55, 0.70
-    inv = 1.0 / np.sqrt(lx * lx + ly * ly + lz * lz)
-    lx, ly, lz = lx * inv, ly * inv, lz * inv
+    lx, ly, lz = normalize_light(*light_dir)
     ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
     hx, hy, hz = lx * 0.5, ly * 0.5, (lz + 1.0) * 0.5
@@ -2485,6 +2493,7 @@ def stroke_segment_3d(
     bevel: float = 40.0,
     frequency: float = 60.0,
     wrap: bool = False,
+    light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
 ) -> None:
     """Stamp lit spheres along a segment.
 
@@ -2509,6 +2518,7 @@ def stroke_segment_3d(
             highlight=highlight,
             bevel=bevel,
             wrap=wrap,
+            light_dir=light_dir,
         )
 
 
@@ -2519,6 +2529,7 @@ def shade_region_3d(
     depth: float = 70.0,
     highlight: float = 55.0,
     bevel: float = 40.0,
+    light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
 ) -> None:
     """Emboss a filled region: soft height from blur, directional light + highlight."""
     from PIL import Image, ImageFilter
@@ -2552,9 +2563,7 @@ def shade_region_3d(
     inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
     nx, ny, nz = nx * inv, ny * inv, nz * inv
 
-    lx, ly, lz = -0.50, -0.60, 0.65
-    invl = 1.0 / np.sqrt(lx * lx + ly * ly + lz * lz)
-    lx, ly, lz = lx * invl, ly * invl, lz * invl
+    lx, ly, lz = normalize_light(*light_dir)
     ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
     hx, hy, hz = lx, ly, lz + 1.0
@@ -2599,6 +2608,7 @@ def shade_region_addiction(
     depth: float = 70.0,
     highlight: float = 55.0,
     bevel: float = 40.0,
+    light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
 ) -> None:
     """Deep emboss with multi-scale height, lobed ridges, and dual specular."""
     from PIL import Image, ImageFilter
@@ -2680,14 +2690,10 @@ def shade_region_addiction(
     nx, ny, nz = nx * invn, ny * invn, nz * invn
 
     # Key light + cooler fill light for more dimensional shading
-    lx, ly, lz = -0.55, -0.62, 0.58
-    invl = 1.0 / np.sqrt(lx * lx + ly * ly + lz * lz)
-    lx, ly, lz = lx * invl, ly * invl, lz * invl
+    lx, ly, lz = normalize_light(*light_dir)
     ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
-    fx, fy, fz = 0.35, -0.15, 0.92
-    invf = 1.0 / np.sqrt(fx * fx + fy * fy + fz * fz)
-    fx, fy, fz = fx * invf, fy * invf, fz * invf
+    fx, fy, fz = fill_light_from_key(lx, ly, lz)
     fill_l = np.clip(nx * fx + ny * fy + nz * fz, 0.0, 1.0)
 
     hx, hy, hz = lx, ly, lz + 1.0
@@ -2736,6 +2742,7 @@ def shade_region_drift(
     depth: float = 70.0,
     highlight: float = 55.0,
     bevel: float = 40.0,
+    light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
 ) -> None:
     """Addiction-style emboss with silhouette contours and directional ridges (no center pinch)."""
     from PIL import Image, ImageFilter
@@ -2807,14 +2814,10 @@ def shade_region_drift(
     invn = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
     nx, ny, nz = nx * invn, ny * invn, nz * invn
 
-    lx, ly, lz = -0.55, -0.62, 0.58
-    invl = 1.0 / np.sqrt(lx * lx + ly * ly + lz * lz)
-    lx, ly, lz = lx * invl, ly * invl, lz * invl
+    lx, ly, lz = normalize_light(*light_dir)
     ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
-    fx, fy, fz = 0.35, -0.15, 0.92
-    invf = 1.0 / np.sqrt(fx * fx + fy * fy + fz * fz)
-    fx, fy, fz = fx * invf, fy * invf, fz * invf
+    fx, fy, fz = fill_light_from_key(lx, ly, lz)
     fill_l = np.clip(nx * fx + ny * fy + nz * fz, 0.0, 1.0)
 
     hx, hy, hz = lx, ly, lz + 1.0
@@ -2862,6 +2865,7 @@ def shade_region_wavy(
     depth: float = 70.0,
     highlight: float = 55.0,
     bevel: float = 40.0,
+    light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
 ) -> None:
     """Emboss with corner-distance waves: highlights and shadows radiate from bbox corners."""
     from PIL import Image, ImageFilter
@@ -2936,9 +2940,7 @@ def shade_region_wavy(
     invn = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
     nx, ny, nz = nx * invn, ny * invn, nz * invn
 
-    lx, ly, lz = -0.52, -0.55, 0.65
-    invl = 1.0 / np.sqrt(lx * lx + ly * ly + lz * lz)
-    lx, ly, lz = lx * invl, ly * invl, lz * invl
+    lx, ly, lz = normalize_light(*light_dir)
     ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
     hx, hy, hz = lx, ly, lz + 1.0

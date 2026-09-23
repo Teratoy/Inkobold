@@ -18,6 +18,8 @@ class ToolContext:
     depth: float = 70.0
     highlight: float = 55.0
     bevel: float = 40.0
+    # Unit key-light direction in image space (y down); from canvas sun
+    light_dir: tuple[float, float, float] = (-0.45, -0.55, 0.70)
     # 3D fill style: "classic" | "addiction" | "wavy" | "drift"
     fill3d_type: str = "classic"
     # 3D pen stamp density (0–100)

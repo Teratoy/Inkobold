@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from typing import Callable, Optional
 
 import gi
@@ -14,6 +15,7 @@ from inkobold.core.document import Document
 from inkobold.core.grid import GridOverlay
 from inkobold.core.image_meta import constrain_pixels, has_alpha, is_gray
 from inkobold.core.mirror import MirrorModifier
+from inkobold.core.sun import SunLight
 from inkobold.gpu.renderer import GpuRenderer
 from inkobold.input import InputHub
 from inkobold.tools.base import ToolContext
@@ -35,8 +37,10 @@ class Canvas(Gtk.Overlay):
         push_history: Callable[[], None] | None = None,
         get_mirror: Callable[[], MirrorModifier] | None = None,
         get_grid: Callable[[], GridOverlay] | None = None,
+        get_sun: Callable[[], SunLight] | None = None,
         get_tile_wrap: Callable[[], bool] | None = None,
         on_type_editing: Callable[[bool], None] | None = None,
+        on_sun_moved: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self.set_hexpand(True)
@@ -51,8 +55,10 @@ class Canvas(Gtk.Overlay):
         self._push_history = push_history
         self._get_mirror = get_mirror or (lambda: MirrorModifier())
         self._get_grid = get_grid or (lambda: GridOverlay())
+        self._get_sun = get_sun or (lambda: SunLight())
         self._get_tile_wrap = get_tile_wrap or (lambda: False)
         self._on_type_editing = on_type_editing
+        self._on_sun_moved = on_sun_moved
         self.renderer = GpuRenderer()
         self._needs_fit = True
         self._panning = False
@@ -61,6 +67,7 @@ class Canvas(Gtk.Overlay):
         self._pan_ox = 0.0
         self._pan_oy = 0.0
         self._drawing = False
+        self._dragging_sun = False
         self._btn1 = False
         self._pointer_x = 0.0
         self._pointer_y = 0.0
@@ -308,7 +315,39 @@ class Canvas(Gtk.Overlay):
             opacity=float(getattr(tool, "opacity", 100)),
             density=float(getattr(tool, "density", 50)),
             tile_wrap=bool(self._get_tile_wrap()),
+            light_dir=self._light_dir_for_doc(doc),
         )
+
+    def _light_dir_for_doc(self, doc: Document) -> tuple[float, float, float]:
+        sun = self._get_sun()
+        return sun.light_dir(float(doc.width), float(doc.height))
+
+    def _sun_screen_pos(self, doc: Document) -> tuple[float, float]:
+        sun = self._get_sun()
+        dx, dy = sun.doc_xy(float(doc.width), float(doc.height))
+        return self.renderer.doc_to_screen(dx, dy)
+
+    def _hit_sun(self, screen_x: float, screen_y: float) -> bool:
+        sun = self._get_sun()
+        if not sun.enabled:
+            return False
+        doc = self._get_document()
+        if doc is None:
+            return False
+        sx, sy = self._sun_screen_pos(doc)
+        # ~22px hit radius so the glyph is easy to grab at any zoom.
+        return (screen_x - sx) ** 2 + (screen_y - sy) ** 2 <= 22.0 ** 2
+
+    def _move_sun_to_screen(self, screen_x: float, screen_y: float, *, commit: bool = False) -> None:
+        doc = self._get_document()
+        if doc is None:
+            return
+        sun = self._get_sun()
+        dx, dy = self.renderer.screen_to_doc(screen_x, screen_y)
+        sun.set_doc_xy(dx, dy, float(doc.width), float(doc.height))
+        self.refresh_guides()
+        if commit and self._on_sun_moved is not None:
+            self._on_sun_moved()
 
     def _tool_xy(self, x: float, y: float) -> tuple[Optional[ToolContext], object, float, float]:
         ctx = self._ctx()
@@ -397,6 +436,7 @@ class Canvas(Gtk.Overlay):
                     mask = tool._mask(ctx) if hasattr(tool, "_mask") else None
                     render_bubbles_list(
                         pixels, placed, color, mask=mask, opacity=opacity,
+                        light_dir=ctx.light_dir,
                     )
                     ctx.document.mark_dirty()
         else:
@@ -463,6 +503,35 @@ class Canvas(Gtk.Overlay):
                     cr.line_to(sx1, sy1)
                 cr.stroke()
                 cr.restore()
+
+        sun = self._get_sun()
+        if sun.enabled:
+            sx, sy = self._sun_screen_pos(doc)
+            cr.save()
+            # Soft glow
+            cr.set_source_rgba(1.0, 0.85, 0.25, 0.22)
+            cr.arc(sx, sy, 18.0, 0, math.tau)
+            cr.fill()
+            # Rays
+            cr.set_source_rgba(1.0, 0.78, 0.15, 0.85)
+            cr.set_line_width(2.0)
+            cr.set_line_cap(1)  # CAIRO_LINE_CAP_ROUND
+            for i in range(8):
+                ang = i * (math.pi / 4.0)
+                c = math.cos(ang)
+                s = math.sin(ang)
+                cr.move_to(sx + c * 10.0, sy + s * 10.0)
+                cr.line_to(sx + c * 16.5, sy + s * 16.5)
+            cr.stroke()
+            # Disc
+            cr.set_source_rgba(1.0, 0.92, 0.35, 0.95)
+            cr.arc(sx, sy, 8.0, 0, math.tau)
+            cr.fill()
+            cr.set_source_rgba(1.0, 0.65, 0.05, 0.95)
+            cr.set_line_width(1.5)
+            cr.arc(sx, sy, 8.0, 0, math.tau)
+            cr.stroke()
+            cr.restore()
 
         tool = self._get_tool()
         points = getattr(tool, "points", None) if tool is not None else None
@@ -587,8 +656,13 @@ class Canvas(Gtk.Overlay):
         self._catcher.grab_focus()
         # GestureDrag is CAPTURE-phase, so drag-begin often starts the stroke
         # before click pressed. Don't apply / checkpoint twice.
-        if self._drawing:
+        if self._drawing or self._dragging_sun:
             self._btn1 = True
+            return
+        if self._hit_sun(x, y):
+            self._dragging_sun = True
+            self._btn1 = True
+            self._move_sun_to_screen(x, y)
             return
         self._pressure = self._read_pressure(gesture)
         ctx, tool, lx, ly = self._tool_xy(x, y)
@@ -609,6 +683,11 @@ class Canvas(Gtk.Overlay):
         self._bind_type_editing_callback()
 
     def _on_click_released(self, gesture: Gtk.GestureClick, _n: int, x: float, y: float) -> None:
+        if self._dragging_sun:
+            self._dragging_sun = False
+            self._btn1 = False
+            self._move_sun_to_screen(x, y, commit=True)
+            return
         if self._panning and not self._drawing:
             self._panning = False
             return
@@ -626,6 +705,12 @@ class Canvas(Gtk.Overlay):
         self._after_tool(ctx, tool)
 
     def _on_drag_begin(self, gesture: Gtk.GestureDrag, x: float, y: float) -> None:
+        if self._dragging_sun:
+            return
+        if self._hit_sun(x, y):
+            self._dragging_sun = True
+            self._move_sun_to_screen(x, y)
+            return
         # If click already started the stroke, keep it; else start here.
         if not self._drawing:
             self._pressure = self._read_pressure(gesture)
@@ -650,6 +735,9 @@ class Canvas(Gtk.Overlay):
         if not ok:
             return
         x, y = sx + offset_x, sy + offset_y
+        if self._dragging_sun:
+            self._move_sun_to_screen(x, y)
+            return
         if self._panning:
             self.renderer.pan_x = self._pan_ox + (x - self._pan_sx)
             self.renderer.pan_y = self._pan_oy + (y - self._pan_sy)
@@ -677,6 +765,11 @@ class Canvas(Gtk.Overlay):
         ok, sx, sy = gesture.get_start_point()
         x = sx + offset_x if ok else 0.0
         y = sy + offset_y if ok else 0.0
+        if self._dragging_sun:
+            self._dragging_sun = False
+            self._btn1 = False
+            self._move_sun_to_screen(x, y, commit=True)
+            return
         if self._panning:
             self._panning = False
             self.refresh_guides()
@@ -698,6 +791,7 @@ class Canvas(Gtk.Overlay):
     def _start_pan(self, x: float, y: float) -> None:
         self._panning = True
         self._drawing = False
+        self._dragging_sun = False
         self._stroke_tools = None
         self._pan_sx, self._pan_sy = x, y
         self._pan_ox, self._pan_oy = self.renderer.pan_x, self.renderer.pan_y

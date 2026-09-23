@@ -7,6 +7,7 @@ import numpy as np
 from PIL import Image
 
 from inkobold.tools.base import BaseTool, ToolContext
+from inkobold.core.sun import DEFAULT_MILK_LIGHT_DIR
 from inkobold.tools.paint import (
     bubble_influence_bbox,
     collect_bubbles_along_segment,
@@ -52,6 +53,7 @@ def render_bubbles_incremental(
     color: tuple[int, int, int, int],
     mask: np.ndarray | None,
     opacity: float,
+    light_dir: tuple[float, float, float] = DEFAULT_MILK_LIGHT_DIR,
 ) -> None:
     """Exact live update: only the region ``new_bubs`` can influence is
     restored from ``base`` and re-rendered with every bubble touching it."""
@@ -68,6 +70,7 @@ def render_bubbles_incremental(
         mask=mask,
         opacity=opacity,
         clip=(x0, y0, x1, y1),
+        light_dir=light_dir,
     )
 
 
@@ -105,6 +108,7 @@ class BrushTool(BaseTool):
         self._bubble_color: tuple[int, int, int, int] = (255, 255, 255, 255)
         self._bubble_opacity: float = 1.0
         self._bubble_wrap: bool = False
+        self._bubble_light_dir: tuple[float, float, float] = DEFAULT_MILK_LIGHT_DIR
 
     def set_brush_path(self, path: Optional[Path]) -> None:
         self.brush_path = Path(path) if path is not None else None
@@ -188,6 +192,7 @@ class BrushTool(BaseTool):
         self._bubble_color = color
         self._bubble_opacity = opacity
         self._bubble_wrap = bool(ctx.tile_wrap)
+        self._bubble_light_dir = tuple(ctx.light_dir)
 
         if self._bubble_base is None or self._bubble_base.shape != pixels.shape:
             self._bubble_base = np.array(pixels, copy=True)
@@ -204,7 +209,7 @@ class BrushTool(BaseTool):
         # seamlessly while dragging (not just after release).
         render_bubbles_incremental(
             pixels, self._bubble_base, self._bubble_placed, new_bubs,
-            color, mask, opacity,
+            color, mask, opacity, light_dir=self._bubble_light_dir,
         )
 
     def _finalize_bubbles(self, ctx: ToolContext) -> None:
@@ -228,6 +233,7 @@ class BrushTool(BaseTool):
             self._bubble_color,
             mask=self._mask(ctx),
             opacity=self._bubble_opacity,
+            light_dir=self._bubble_light_dir,
         )
 
     def take_bubble_stroke(
