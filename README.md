@@ -11,7 +11,7 @@ GPU-accelerated drawing tool for Linux, with **libinput** / **libwacom** tablet 
 - **Effects** — Pixelate, Kuwahara, Gaussian Blur, Drop Shadow, Dither, Posterize, Curves, Threshold, Liquify, Edge Detect, Emboss, Normal Map, Metal Relief, Milk (apply to active layer or all layers)
 - **Libraries** — User brushes, patterns, and fonts under `~/.local/share/inkobold/libraries/` (or `$XDG_DATA_HOME/inkobold/libraries/`)
 - **Input** — GDK drawing path + libinput device poll + libwacom tablet identification
-- **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid overlay, Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
+- **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid overlay, Show Sun (draggable light for 3D tools / Metal Relief / Milk), Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
 - **Edit** — Undo / Redo; stroke Mirror (1–16 axes, horizontal / vertical / diagonal); Flip / Rotate active layer; Crop Canvas (live size before apply; optional selection bounds)
 - **Settings** — Theme, Memory (undo steps), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (view & rebind), Debug Mode
 
