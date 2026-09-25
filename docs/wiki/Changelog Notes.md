@@ -17,4 +17,4 @@ Notes for the Windows / Rectangle / Flora / paths wave (around 2026-09). Not a f
 | **Gradient tool** | `tools/gradient.py` | key `A` |
 | **Categorized effects** | Main window menus | Blur, Stylize, Color, Distort, Edge, Materials |
 
-See also [[Tools/Rectangle]] · [[Effects/Stylize]] · [[Windows]] · [[Paths and Settings]] · [[View]]
+See also [[Rectangle]] · [[Stylize]] · [[Windows]] · [[Paths and Settings]] · [[View]]

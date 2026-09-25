@@ -8,6 +8,6 @@ tags: [inkobold, wiki, tools]
 
 Interactive liquify brush: **Push**, **Swirl**, **Pinch**, **Bulge**.
 
-For a full-image liquify filter, see [[Effects/Distort|Distort]] effects.
+For a full-image liquify filter, see [[Distort|Distort]] effects.
 
 Parent: [[Tools]]

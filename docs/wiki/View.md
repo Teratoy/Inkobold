@@ -27,6 +27,6 @@ Stroke mirror: **1–16** axes; horizontal / vertical / diagonal. Applies to too
 
 ## Sun
 
-Defaults: `x_norm`/`y_norm` = **0.18**, `elevation` = **0.70**. Used by [[Tools/3D Pen|3D Pen]], [[Tools/3D Fill|3D Fill]], [[Effects/Materials|Materials]].
+Defaults: `x_norm`/`y_norm` = **0.18**, `elevation` = **0.70**. Used by [[3D Pen|3D Pen]], [[3D Fill|3D Fill]], [[Materials|Materials]].
 
 Related: [[Paths and Settings]] · [[Architecture]]

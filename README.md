@@ -19,8 +19,9 @@ Version **0.1.0** · Python **≥3.11** · App id `trinkets.inkobold`
 
 ## Documentation
 
+- **[Wiki](https://github.com/Teratoy/Inkobold/wiki)** — Full documentation (GitHub Wiki)
 - **[docs/WINDOWS.md](docs/WINDOWS.md)** — Windows setup, packaging, known gaps
-- **[docs/wiki/](docs/wiki/)** — Full wiki (Obsidian-friendly `[[wikilinks]]`; also mirrored in the Stele vault)
+- **[docs/wiki/](docs/wiki/)** — Wiki source (Obsidian + GitHub Wiki compatible)
 
 ## Run (Linux)
 

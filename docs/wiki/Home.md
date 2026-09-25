@@ -3,13 +3,10 @@ tags:
   - inkobold
   - wiki
   - trinkets
-aliases:
-  - Inkobold Wiki
-  - Inkobold Home
 ported: 2026-09-25
 ---
 
-# Inkobold
+# Inkobold Wiki
 
 GPU-accelerated layered drawing for Linux and Windows. GTK4 UI, OpenGL composite, optional Linux tablet enrichment via libinput / libwacom.
 

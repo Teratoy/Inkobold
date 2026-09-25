@@ -1,9 +1,10 @@
----
-tags: [inkobold, wiki]
----
+# Wiki source
 
-# Wiki
+Markdown wiki for Inkobold. Compatible with **Obsidian** and **GitHub Wiki**.
 
-Obsidian-friendly documentation for Inkobold. Open [[Inkobold]] as the hub.
+- Hub: [[Home]] (also [[Inkobold]])
+- GitHub Wiki: https://github.com/Teratoy/Inkobold/wiki
+- Flat `[[Page Name]]` links (unique basenames; folders are for organization only)
+- GitHub extras: `_Sidebar.md`, `_Footer.md`, `Home.md`
 
-Mirrored into the Stele vault as `Inkobold/`.
+Published to the GitHub wiki from this tree (nested path links are not used).

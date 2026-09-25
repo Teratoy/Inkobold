@@ -8,6 +8,6 @@ tags: [inkobold, wiki, effects]
 |--------|-------|
 | Liquify (full image) | Modes: Swirl, Pinch, Bulge; grid 1–8; strength |
 
-Interactive brush liquify is a separate [[Tools/Liquify|tool]].
+Interactive brush liquify is a separate [[Liquify|tool]].
 
 Parent: [[Effects]]
