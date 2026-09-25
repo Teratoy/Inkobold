@@ -54,25 +54,7 @@ Overrides: `INKOBOLD_CONFIG_HOME`, `INKOBOLD_DATA_HOME`, `INKOBOLD_ICON`.
 
 ## Shortcuts
 
-| Action | Keys |
-|--------|------|
-| New / Open / Save / Save As | `Ctrl+N` `Ctrl+O` `Ctrl+S` `Ctrl+Shift+S` |
-| Import image / Export | `Ctrl+I` / `Ctrl+E` |
-| Undo / Redo | `Ctrl+Z` `Ctrl+Shift+Z` or `Ctrl+Y` |
-| Fit Canvas | `Ctrl+0` or `Ctrl+F` |
-| Fullscreen | `F11` |
-| Clear selection | `Esc` or `Ctrl+D` |
-| Tile Preview / Wrap Moves | `Ctrl+Shift+T` / `Ctrl+Shift+W` |
-| Add / duplicate / delete layer | `Ctrl+Shift+N` / `Ctrl+J` / `Ctrl+Shift+Delete` |
-| Merge layer down | `Ctrl+Shift+E` |
-| Add / duplicate / delete frame | `Ctrl+Alt+N` / `Ctrl+Alt+D` / `Ctrl+Alt+Delete` |
-| Play / pause animation | `Space` or `F5` |
-| Stop animation | `F6` |
-| Brush size | `[` `]` |
-| Tools | Pen `P` · Line `L` · Rect `O` · Curve `U` · Brush `B` · Weld `W` · Fill `G` · Gradient `A` · 3D Pen `D` · 3D Fill `F` · Eraser `E` · Smear `M` · Liquify `Y` · Replace `C`/`R` · Transform `V` · Lasso `Q` · Type `T` |
-| Pan | Middle mouse drag |
-
-Shortcuts are rebindable under **Settings → Shortcuts**.
+Shortcuts are rebindable under **Settings → Shortcuts**. Defaults are listed in the [wiki](https://github.com/Teratoy/Inkobold/wiki/Shortcuts).
 
 ## File format
 
