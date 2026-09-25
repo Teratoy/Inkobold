@@ -215,6 +215,38 @@ def gaussian_blur(pixels: np.ndarray, radius: int = 3) -> np.ndarray:
     return np.clip(blurred, lo, hi).astype(pixels.dtype, copy=False)
 
 
+def sharpen(
+    pixels: np.ndarray,
+    amount: float = 100.0,
+    radius: int = 1,
+    threshold: float = 0.0,
+) -> np.ndarray:
+    """Unsharp-mask sharpen RGB (alpha preserved).
+
+    ``amount`` is percent strength (0–500). ``radius`` is the Gaussian detail
+    scale in pixels. ``threshold`` (0–100) skips sharpening where the detail
+    magnitude is below that percent of full scale (reduces noise boost).
+    """
+    h, w = pixels.shape[:2]
+    amt = max(0.0, min(500.0, float(amount))) / 100.0
+    r = max(1, int(radius))
+    thr = max(0.0, min(100.0, float(threshold))) / 100.0
+    if amt < 1e-9 or min(h, w) < 2:
+        return np.ascontiguousarray(pixels.copy())
+
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    rgb = src[..., :3]
+    blurred = _separable_convolve(rgb, _gaussian_kernel_1d(r))
+    detail = rgb - blurred
+    if thr > 1e-9:
+        mag = np.max(np.abs(detail), axis=-1, keepdims=True)
+        detail = np.where(mag >= thr * vmax, detail, 0.0)
+    out[..., :3] = np.clip(rgb + amt * detail, 0.0, vmax)
+    return out.astype(pixels.dtype, copy=False)
+
+
 def _dilate_2d(src: np.ndarray, radius: int) -> np.ndarray:
     """Circular max dilation of a 2D float array (zeros outside bounds)."""
     r = max(0, int(radius))
@@ -335,6 +367,309 @@ def posterize(pixels: np.ndarray, levels: int = 4) -> np.ndarray:
     return out.astype(pixels.dtype, copy=False)
 
 
+def invert(pixels: np.ndarray) -> np.ndarray:
+    """Invert RGB channels (alpha preserved)."""
+    h, w = pixels.shape[:2]
+    if min(h, w) < 1:
+        return np.ascontiguousarray(pixels.copy())
+
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    out[..., :3] = vmax - src[..., :3]
+    return out.astype(pixels.dtype, copy=False)
+
+
+def grayscale(pixels: np.ndarray, amount: float = 100.0) -> np.ndarray:
+    """Convert to Rec. 601 grayscale (alpha preserved).
+
+    ``amount`` is how far toward gray (0–100; 100 = full grayscale).
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 1:
+        return np.ascontiguousarray(pixels.copy())
+
+    amt = max(0.0, min(100.0, float(amount))) / 100.0
+    if amt < 1e-9:
+        return np.ascontiguousarray(pixels.copy())
+
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    luma = (0.299 * src[..., 0] + 0.587 * src[..., 1] + 0.114 * src[..., 2])
+    if amt >= 1.0 - 1e-9:
+        out[..., 0] = luma
+        out[..., 1] = luma
+        out[..., 2] = luma
+    else:
+        gray = np.stack([luma, luma, luma], axis=-1)
+        out[..., :3] = src[..., :3] * (1.0 - amt) + gray * amt
+    return out.astype(pixels.dtype, copy=False)
+
+
+def solarize(pixels: np.ndarray, level: float = 50.0) -> np.ndarray:
+    """Invert RGB channels at or above a threshold (alpha preserved).
+
+    ``level`` is the cutoff as a percent of full scale (0–100). Values below
+    the level are unchanged; values at or above are inverted (Sabattier look).
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 1:
+        return np.ascontiguousarray(pixels.copy())
+
+    vmax = _channel_vmax(pixels)
+    thr = max(0.0, min(100.0, float(level))) / 100.0 * vmax
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    rgb = src[..., :3]
+    out[..., :3] = np.where(rgb >= thr, vmax - rgb, rgb)
+    return out.astype(pixels.dtype, copy=False)
+
+
+def _resize_rgb01(rgb: np.ndarray, nh: int, nw: int) -> np.ndarray:
+    """Bilinear resize of HxWx3 float01 via Pillow (avoids huge float temporaries)."""
+    from PIL import Image
+
+    u8 = np.clip(np.rint(rgb * 255.0), 0, 255).astype(np.uint8)
+    im = Image.fromarray(u8, mode="RGB").resize((nw, nh), Image.Resampling.BILINEAR)
+    return np.asarray(im, dtype=np.float32) * (1.0 / 255.0)
+
+
+def _resize_rgba_u8(pixels: np.ndarray, nh: int, nw: int) -> np.ndarray:
+    """Bilinear resize of HxWx4 uint8 (or castable) via Pillow."""
+    from PIL import Image
+
+    if pixels.dtype != np.uint8:
+        vmax = (
+            float(np.iinfo(pixels.dtype).max)
+            if np.issubdtype(pixels.dtype, np.integer)
+            else 1.0
+        )
+        u8 = np.clip(np.rint(pixels.astype(np.float32) * (255.0 / max(vmax, 1e-6))), 0, 255).astype(
+            np.uint8
+        )
+    else:
+        u8 = pixels
+    im = Image.fromarray(u8, mode="RGBA").resize((nw, nh), Image.Resampling.BILINEAR)
+    return np.asarray(im)
+
+
+def _blur_rgb01_pyramid(rgb: np.ndarray, radius: int, max_side: int = 480) -> np.ndarray:
+    """Wide Gaussian on RGB float01; always blur small so large radii stay cheap."""
+    h, w = rgb.shape[:2]
+    r = max(1, int(radius))
+    # Keep working radius ≤ 8 taps and side ≤ max_side.
+    scale = 1.0
+    if r > 8:
+        scale = min(scale, 8.0 / float(r))
+    if max(h, w) > max_side:
+        scale = min(scale, max_side / float(max(h, w)))
+    nw = max(2, int(round(w * scale)))
+    nh = max(2, int(round(h * scale)))
+    small = rgb if (nw, nh) == (w, h) else _resize_rgb01(rgb, nh, nw)
+    r_small = max(1, min(8, int(round(r * scale))))
+    blurred = _separable_convolve(small, _gaussian_kernel_1d(r_small))
+    blurred = np.clip(blurred, 0.0, 1.0).astype(np.float32, copy=False)
+    if (nw, nh) != (w, h):
+        return _resize_rgb01(blurred, h, w)
+    return blurred
+
+
+def _overlay01(base: np.ndarray, blend: np.ndarray) -> np.ndarray:
+    low = 2.0 * base * blend
+    high = 1.0 - 2.0 * (1.0 - base) * (1.0 - blend)
+    return np.where(base < 0.5, low, high)
+
+
+def _soft_light01(base: np.ndarray, blend: np.ndarray) -> np.ndarray:
+    # Lighter approx than full soft-light (avoids sqrt on every pixel).
+    return base * (base + (2.0 * blend) * (1.0 - base))
+
+
+def _screen01(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return 1.0 - (1.0 - a) * (1.0 - b)
+
+
+def _flora_hash_grit(h: int, w: int) -> np.ndarray:
+    """Cheap deterministic noise in [-1, 1] (no sin / mgrid)."""
+    xx = np.arange(w, dtype=np.uint32)
+    yy = np.arange(h, dtype=np.uint32)[:, None]
+    n = (xx * np.uint32(374761393)) ^ (yy * np.uint32(668265263))
+    n *= np.uint32(2246822519)
+    return n.astype(np.float32) * (2.0 / 4294967295.0) - 1.0
+
+
+# Flora never processes above this side — large docs are downscaled, filtered, upscaled.
+_FLORA_MAX_SIDE = 1280
+
+
+def flora_cpu(
+    pixels: np.ndarray,
+    clarity: float = 75.0,
+    bloom: float = 28.0,
+    grit: float = 45.0,
+    neon: float = 70.0,
+    bleach: float = 55.0,
+    lift: float = 30.0,
+    clarity_radius: int = 28,
+    bloom_radius: int = 14,
+) -> np.ndarray:
+    """CPU Flora look — float32 RGB, pyramid blurs, alpha preserved."""
+    h, w = pixels.shape[:2]
+    if min(h, w) < 2:
+        return np.ascontiguousarray(pixels.copy())
+
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float32, copy=False)
+    rgb = np.clip(src[..., :3] / max(vmax, 1e-6), 0.0, 1.0).astype(np.float32, copy=False)
+
+    c_amt = max(0.0, min(150.0, float(clarity))) / 100.0
+    b_amt = max(0.0, min(100.0, float(bloom))) / 100.0
+    g_amt = max(0.0, min(100.0, float(grit))) / 100.0
+    n_amt = max(0.0, min(150.0, float(neon))) / 100.0
+    bl_amt = max(0.0, min(100.0, float(bleach))) / 100.0
+    lift_n = max(0.0, min(100.0, float(lift))) / 100.0 * 0.45
+
+    soft = _blur_rgb01_pyramid(rgb, max(1, int(clarity_radius)))
+    bloom_c = _blur_rgb01_pyramid(rgb, max(1, int(bloom_radius)))
+
+    # Lift + mild S-curve
+    toned = lift_n + (1.0 - lift_n) * rgb
+    toned = toned * toned * (3.0 - 2.0 * toned)
+    toned = rgb * 0.45 + toned * 0.55
+
+    # Local contrast (one soft-light + one overlay — was three full passes).
+    inv_soft = 1.0 - soft
+    local = toned * (1.0 - c_amt * 0.7) + _soft_light01(toned, inv_soft) * (c_amt * 0.7)
+    hp = np.clip(toned - soft + 0.5, 0.0, 1.0)
+    local = local * (1.0 - c_amt * 0.55) + _overlay01(local, hp) * (c_amt * 0.55)
+
+    if b_amt > 1e-4:
+        glow = np.clip(bloom_c * 1.15, 0.0, 1.0)
+        local = local * (1.0 - b_amt) + _screen01(local, glow) * b_amt
+
+    # Single HSV pass: bleach neutrals/flesh + neon accents.
+    hsv = _rgb_to_hsv(np.clip(local, 0.0, 1.0))
+    hh, ss, vv = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    flesh = np.clip((0.14 - np.abs(hh - 0.05)) / 0.12, 0.0, 1.0)
+    flesh *= np.clip((0.55 - ss) / 0.40, 0.0, 1.0)
+    neutral = np.clip((0.35 - ss) / 0.27, 0.0, 1.0)
+    bleach_w = np.maximum(flesh, neutral * 0.85)
+    ss = ss * (1.0 - 0.75 * bl_amt * bleach_w)
+
+    yellow = np.clip((0.18 - np.abs(hh - 0.14)) / 0.10, 0.0, 1.0)
+    magenta = np.clip(
+        (0.12 - np.minimum(np.abs(hh - 0.88), np.abs(hh - 0.92))) / 0.08, 0.0, 1.0
+    )
+    cyan = np.clip((0.14 - np.abs(hh - 0.50)) / 0.10, 0.0, 1.0)
+    accent = np.maximum(yellow, np.maximum(magenta, cyan)) * np.clip(
+        (ss - 0.12) / 0.28, 0.0, 1.0
+    )
+    ss = np.clip(ss * (1.0 + n_amt * 0.95 * accent) + n_amt * 0.12 * accent, 0.0, 1.0)
+    local = _hsv_to_rgb(np.stack([hh, ss, vv], axis=-1))
+
+    # Cool ash on bleached areas (no second HSV).
+    if bl_amt > 1e-4:
+        luma = (local[..., 0] * 0.299 + local[..., 1] * 0.587 + local[..., 2] * 0.114)[
+            ..., None
+        ]
+        ash = luma * np.array([0.96, 0.99, 1.04], dtype=np.float32)
+        mix_g = (bleach_w * bl_amt * 0.7)[..., None]
+        local = local * (1.0 - mix_g) + (local * 0.6 + ash * 0.4) * mix_g
+
+    if g_amt > 1e-4:
+        detail = np.max(np.abs(rgb - soft), axis=-1)
+        edge = np.clip(detail * 3.0, 0.0, 1.0)
+        luma1 = local[..., 0] * 0.299 + local[..., 1] * 0.587 + local[..., 2] * 0.114
+        mid = np.clip((luma1 - 0.08) / 0.27, 0.0, 1.0) * np.clip(
+            (0.95 - luma1) / 0.40, 0.0, 1.0
+        )
+        noise = _flora_hash_grit(h, w)
+        local = local + (noise * g_amt * 0.22 * mid * (1.0 - edge))[..., None]
+
+    out = src.copy()
+    out[..., :3] = np.clip(local * vmax, 0.0, vmax)
+    return out.astype(pixels.dtype, copy=False)
+
+
+def flora(
+    pixels: np.ndarray,
+    clarity: float = 75.0,
+    bloom: float = 28.0,
+    grit: float = 45.0,
+    neon: float = 70.0,
+    bleach: float = 55.0,
+    lift: float = 30.0,
+    clarity_radius: int = 28,
+    bloom_radius: int = 14,
+    gpu_apply=None,
+) -> np.ndarray:
+    """Flora / Flower look: local HDR contrast, grit, neon accents, Orton bloom.
+
+    Always processes at most :data:`_FLORA_MAX_SIDE` on the long edge (downscale →
+    filter → upscale) so large documents cannot freeze the UI. Tries ``gpu_apply``
+    on that working size when provided. Alpha is taken from the source.
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 2:
+        return np.ascontiguousarray(pixels.copy())
+
+    params = dict(
+        clarity=float(clarity),
+        bloom=float(bloom),
+        grit=float(grit),
+        neon=float(neon),
+        bleach=float(bleach),
+        lift=float(lift),
+        clarity_radius=int(clarity_radius),
+        bloom_radius=int(bloom_radius),
+    )
+
+    max_side = max(h, w)
+    scale = 1.0
+    work = pixels
+    if max_side > _FLORA_MAX_SIDE:
+        scale = _FLORA_MAX_SIDE / float(max_side)
+        nw = max(2, int(round(w * scale)))
+        nh = max(2, int(round(h * scale)))
+        work = _resize_rgba_u8(pixels, nh, nw)
+        params["clarity_radius"] = max(1, int(round(params["clarity_radius"] * scale)))
+        params["bloom_radius"] = max(1, int(round(params["bloom_radius"] * scale)))
+
+    out_small = None
+    if gpu_apply is not None:
+        try:
+            out_small = gpu_apply(work, **params)
+        except Exception:
+            out_small = None
+    if out_small is None:
+        out_small = flora_cpu(work, **params)
+
+    if scale >= 1.0 - 1e-9:
+        return out_small
+
+    # Upscale RGB; keep original alpha (and dtype).
+    from PIL import Image
+
+    rgb_u8 = np.ascontiguousarray(out_small[..., :3])
+    if rgb_u8.dtype != np.uint8:
+        vmax = _channel_vmax(out_small)
+        rgb_u8 = np.clip(np.rint(rgb_u8.astype(np.float32) * (255.0 / max(vmax, 1e-6))), 0, 255).astype(
+            np.uint8
+        )
+    up = Image.fromarray(rgb_u8, mode="RGB").resize((w, h), Image.Resampling.BILINEAR)
+    rgb_up = np.asarray(up)
+    out = np.ascontiguousarray(pixels.copy())
+    vmax = _channel_vmax(pixels)
+    if np.issubdtype(pixels.dtype, np.integer) and int(vmax) == 255:
+        out[..., :3] = rgb_up
+    else:
+        out[..., :3] = np.clip(
+            rgb_up.astype(np.float32) * (vmax / 255.0), 0.0, vmax
+        ).astype(pixels.dtype, copy=False)
+    return out
+
+
 def threshold(
     pixels: np.ndarray,
     level: float = 50.0,
@@ -367,6 +702,52 @@ def threshold(
     out[..., 0] = tone
     out[..., 1] = tone
     out[..., 2] = tone
+    return out.astype(pixels.dtype, copy=False)
+
+
+def color_basics(
+    pixels: np.ndarray,
+    hue: float = 0.0,
+    brightness: float = 0.0,
+    contrast: float = 0.0,
+    exposure: float = 100.0,
+) -> np.ndarray:
+    """Hue, brightness, contrast, and exposure (alpha preserved).
+
+    ``hue`` is degrees (−180…180). ``brightness`` and ``contrast`` are percents
+    (−100…100): brightness offsets midtones; contrast scales around mid-gray.
+    ``exposure`` is overall light level (0–200; 100 = neutral).
+    """
+    h, w = pixels.shape[:2]
+    if min(h, w) < 1:
+        return np.ascontiguousarray(pixels.copy())
+
+    hue_deg = float(hue) % 360.0
+    if hue_deg > 180.0:
+        hue_deg -= 360.0
+    b = max(-100.0, min(100.0, float(brightness))) / 100.0
+    c = max(-100.0, min(100.0, float(contrast))) / 100.0
+    exp_n = max(0.0, min(200.0, float(exposure))) / 100.0
+    if abs(hue_deg) < 1e-9 and abs(b) < 1e-9 and abs(c) < 1e-9 and abs(exp_n - 1.0) < 1e-9:
+        return np.ascontiguousarray(pixels.copy())
+
+    vmax = _channel_vmax(pixels)
+    src = pixels.astype(np.float64, copy=False)
+    out = src.copy()
+    rgb = np.clip(src[..., :3] / max(vmax, 1e-6), 0.0, 1.0)
+
+    # Exposure first (multiplicative), then contrast around mid-gray, then brightness.
+    rgb = rgb * exp_n
+    factor = 1.0 + c
+    rgb = (rgb - 0.5) * factor + 0.5 + b
+    rgb = np.clip(rgb, 0.0, 1.0)
+
+    if abs(hue_deg) >= 1e-9:
+        hsv = _rgb_to_hsv(rgb)
+        hsv[..., 0] = (hsv[..., 0] + hue_deg / 360.0) % 1.0
+        rgb = _hsv_to_rgb(hsv)
+
+    out[..., :3] = np.clip(rgb * vmax, 0.0, vmax)
     return out.astype(pixels.dtype, copy=False)
 
 

@@ -1,24 +1,31 @@
-"""Unified tablet / pointer input: GDK primary, libinput enrichment."""
+"""Unified tablet / pointer input: GDK primary, optional libinput on Linux."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Optional
 
-from inkobold.input.libinput_bind import Libinput, LibinputError, PointerSample
-from inkobold.input.libwacom_bind import LibwacomDB, LibwacomError, TabletInfo
+from inkobold.core.paths import is_linux
+from inkobold.input.libinput_bind import PointerSample
 
 
 @dataclass
 class InputHub:
-    libinput: Optional[Libinput] = None
-    libwacom: Optional[LibwacomDB] = None
-    tablets: list[TabletInfo] = field(default_factory=list)
+    libinput: object | None = None
+    libwacom: object | None = None
+    tablets: list = field(default_factory=list)
     devices: list[dict] = field(default_factory=list)
     last_sample: Optional[PointerSample] = None
     status: str = "GDK pointer only"
 
     def start(self) -> None:
+        if not is_linux():
+            self.status = "GDK pointer / tablet axes (libinput is Linux-only)"
+            return
+
+        from inkobold.input.libinput_bind import Libinput, LibinputError
+        from inkobold.input.libwacom_bind import LibwacomDB, LibwacomError
+
         try:
             self.libwacom = LibwacomDB()
             self.tablets = self.libwacom.list_known()

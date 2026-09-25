@@ -1331,7 +1331,7 @@ class CurvesDialog(Gtk.Window):
         parent: Gtk.Window,
         on_preview: Callable[[dict[str, Any]], None],
         *,
-        debounce_ms: int = 40,
+        debounce_ms: int = 16,
     ) -> None:
         from inkobold.core.effects import CURVES_CHANNELS, _curve_lut, _normalize_curve_points
 
@@ -1353,6 +1353,8 @@ class CurvesDialog(Gtk.Window):
         self._channel = "RGB"
         self._drag_index: Optional[int] = None
         self._selected: Optional[int] = None
+        self._draw_w = 320.0
+        self._draw_h = 320.0
 
         root = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -1366,7 +1368,7 @@ class CurvesDialog(Gtk.Window):
         root.append(
             Gtk.Label(
                 label=(
-                    "Drag points to reshape tones. Click the grid to add a point; "
+                    "Drag the curve to reshape tones. Click to place a point; "
                     "double-click a point to remove it."
                 ),
                 xalign=0,
@@ -1397,8 +1399,17 @@ class CurvesDialog(Gtk.Window):
         self._area.set_content_height(320)
         self._area.set_hexpand(True)
         self._area.set_draw_func(self._draw_curve)
-        self._area.set_cursor(Gdk.Cursor.new_from_name("crosshair"))
+        cursor = Gdk.Cursor.new_from_name("crosshair")
+        if cursor is not None:
+            self._area.set_cursor(cursor)
         root.append(self._area)
+
+        # Click before drag in controller order (last added = first to receive):
+        # press selects/inserts, then drag moves that point once the threshold is met.
+        click = Gtk.GestureClick.new()
+        click.set_button(1)
+        click.connect("pressed", self._on_click_pressed)
+        self._area.add_controller(click)
 
         drag = Gtk.GestureDrag.new()
         drag.set_button(1)
@@ -1406,11 +1417,6 @@ class CurvesDialog(Gtk.Window):
         drag.connect("drag-update", self._on_drag_update)
         drag.connect("drag-end", self._on_drag_end)
         self._area.add_controller(drag)
-
-        click = Gtk.GestureClick.new()
-        click.set_button(1)
-        click.connect("pressed", self._on_click_pressed)
-        self._area.add_controller(click)
 
         btn_row = Gtk.Box(spacing=8)
         root.append(btn_row)
@@ -1441,7 +1447,7 @@ class CurvesDialog(Gtk.Window):
     def params(self) -> dict[str, Any]:
         i = int(self._apply_dd.get_selected())
         apply_to = EFFECT_APPLY_TO_CHOICES[max(0, min(i, len(EFFECT_APPLY_TO_CHOICES) - 1))]
-        curves = {ch: list(pts) for ch, pts in self._curves.items()}
+        curves = {ch: [tuple(p) for p in pts] for ch, pts in self._curves.items()}
         return {"apply_to": apply_to, "curves": curves, "channel": self._channel}
 
     def connect_response(self, callback) -> None:
@@ -1478,6 +1484,12 @@ class CurvesDialog(Gtk.Window):
         pad = _CURVE_EDITOR_PAD
         return pad, pad, max(1.0, width - 2 * pad), max(1.0, height - 2 * pad)
 
+    def _event_to_draw(self, x: float, y: float) -> tuple[float, float]:
+        """Map widget event coords onto the draw_func pixel space (HiDPI-safe)."""
+        aw = float(max(self._area.get_width(), 1))
+        ah = float(max(self._area.get_height(), 1))
+        return x * (self._draw_w / aw), y * (self._draw_h / ah)
+
     def _norm_to_px(self, x: float, y: float, width: float, height: float) -> tuple[float, float]:
         ox, oy, w, h = self._plot_rect(width, height)
         return ox + x * w, oy + (1.0 - y) * h
@@ -1500,12 +1512,47 @@ class CurvesDialog(Gtk.Window):
                 best = i
         return best
 
+    def _insert_point_at(self, px: float, py: float) -> Optional[int]:
+        """Insert a control point at draw-space (px, py). Returns its index."""
+        pts = list(self._current_points())
+        if len(pts) >= _CURVE_MAX_POINTS:
+            return None
+        nx, ny = self._px_to_norm(px, py, self._draw_w, self._draw_h)
+        nx = max(0.02, min(0.98, nx))
+        pts.append((nx, ny))
+        self._set_current_points(pts)
+        normed = self._current_points()
+        idx = min(range(len(normed)), key=lambda i: abs(normed[i][0] - nx))
+        if idx in (0, len(normed) - 1) and len(normed) > 2:
+            idx = min(range(1, len(normed) - 1), key=lambda i: abs(normed[i][0] - nx))
+        return idx
+
+    def _move_point(self, index: int, px: float, py: float) -> None:
+        nx, ny = self._px_to_norm(px, py, self._draw_w, self._draw_h)
+        pts = list(self._current_points())
+        if index <= 0:
+            pts[0] = (0.0, ny)
+        elif index >= len(pts) - 1:
+            pts[-1] = (1.0, ny)
+        else:
+            lo = pts[index - 1][0] + 0.01
+            hi = pts[index + 1][0] - 0.01
+            if lo >= hi:
+                nx = pts[index][0]
+            else:
+                nx = max(lo, min(hi, nx))
+            pts[index] = (nx, ny)
+        self._curves[self._channel] = pts
+
     def _draw_curve(self, _area: Gtk.DrawingArea, cr, width: int, height: int) -> None:
+        self._draw_w = float(max(width, 1))
+        self._draw_h = float(max(height, 1))
+
         cr.set_source_rgb(0.14, 0.14, 0.16)
         cr.rectangle(0, 0, width, height)
         cr.fill()
 
-        ox, oy, w, h = self._plot_rect(float(width), float(height))
+        ox, oy, w, h = self._plot_rect(self._draw_w, self._draw_h)
         cr.set_source_rgb(0.20, 0.20, 0.23)
         cr.rectangle(ox, oy, w, h)
         cr.fill()
@@ -1536,7 +1583,7 @@ class CurvesDialog(Gtk.Window):
         cr.set_line_width(2.0)
         for i, y01 in enumerate(lut):
             x01 = i / max(1, len(lut) - 1)
-            px, py = self._norm_to_px(x01, float(y01), float(width), float(height))
+            px, py = self._norm_to_px(x01, float(y01), self._draw_w, self._draw_h)
             if i == 0:
                 cr.move_to(px, py)
             else:
@@ -1544,7 +1591,7 @@ class CurvesDialog(Gtk.Window):
         cr.stroke()
 
         for i, (x, y) in enumerate(pts):
-            px, py = self._norm_to_px(x, y, float(width), float(height))
+            px, py = self._norm_to_px(x, y, self._draw_w, self._draw_h)
             r = 5.5 if i == self._selected or i == self._drag_index else 4.5
             cr.set_source_rgb(0.08, 0.08, 0.1)
             cr.arc(px, py, r + 1.5, 0, 6.2832)
@@ -1559,50 +1606,50 @@ class CurvesDialog(Gtk.Window):
         cr.stroke()
 
     def _on_click_pressed(self, gesture: Gtk.GestureClick, n_press: int, x: float, y: float) -> None:
-        width = float(self._area.get_width())
-        height = float(self._area.get_height())
-        hit = self._hit_test(x, y, width, height)
-        pts = list(self._current_points())
+        dx, dy = self._event_to_draw(x, y)
+        hit = self._hit_test(dx, dy, self._draw_w, self._draw_h)
 
-        if n_press >= 2 and hit is not None and hit not in (0, len(pts) - 1):
-            del pts[hit]
-            self._set_current_points(pts)
-            self._selected = None
-            self._area.queue_draw()
-            self._schedule_preview()
+        if n_press >= 2 and hit is not None:
+            pts = list(self._current_points())
+            if hit not in (0, len(pts) - 1):
+                del pts[hit]
+                self._set_current_points(pts)
+                self._selected = None
+                self._drag_index = None
+                self._area.queue_draw()
+                self._schedule_preview()
             gesture.set_state(Gtk.EventSequenceState.CLAIMED)
             return
 
         if hit is not None:
             self._selected = hit
+            self._drag_index = hit
             self._area.queue_draw()
             return
 
-        if len(pts) >= _CURVE_MAX_POINTS:
+        idx = self._insert_point_at(dx, dy)
+        if idx is None:
             return
-        nx, ny = self._px_to_norm(x, y, width, height)
-        nx = max(0.02, min(0.98, nx))
-        pts.append((nx, ny))
-        self._set_current_points(pts)
-        normed = self._current_points()
-        self._selected = min(range(len(normed)), key=lambda i: abs(normed[i][0] - nx))
-        if self._selected in (0, len(normed) - 1) and len(normed) > 2:
-            self._selected = min(
-                range(1, len(normed) - 1),
-                key=lambda i: abs(normed[i][0] - nx),
-            )
+        self._selected = idx
+        self._drag_index = idx
         self._area.queue_draw()
         self._schedule_preview()
 
     def _on_drag_begin(self, gesture: Gtk.GestureDrag, x: float, y: float) -> None:
-        width = float(self._area.get_width())
-        height = float(self._area.get_height())
-        hit = self._hit_test(x, y, width, height)
-        if hit is None:
-            self._drag_index = None
+        dx, dy = self._event_to_draw(x, y)
+        # Prefer the point chosen/created on press so the drag threshold
+        # does not leave a brand-new point stranded on the identity line.
+        if self._drag_index is None:
+            hit = self._hit_test(dx, dy, self._draw_w, self._draw_h)
+            if hit is None:
+                hit = self._insert_point_at(dx, dy)
+                if hit is not None:
+                    self._area.queue_draw()
+                    self._schedule_preview()
+            self._drag_index = hit
+        if self._drag_index is None:
             return
-        self._drag_index = hit
-        self._selected = hit
+        self._selected = self._drag_index
         gesture.set_state(Gtk.EventSequenceState.CLAIMED)
         self._area.queue_draw()
 
@@ -1612,24 +1659,13 @@ class CurvesDialog(Gtk.Window):
         ok, x0, y0 = gesture.get_start_point()
         if not ok:
             return
-        width = float(self._area.get_width())
-        height = float(self._area.get_height())
-        nx, ny = self._px_to_norm(x0 + offset_x, y0 + offset_y, width, height)
-        pts = list(self._current_points())
-        i = self._drag_index
-        if i <= 0:
-            pts[0] = (0.0, ny)
-        elif i >= len(pts) - 1:
-            pts[-1] = (1.0, ny)
-        else:
-            lo = pts[i - 1][0] + 0.01
-            hi = pts[i + 1][0] - 0.01
-            if lo >= hi:
-                nx = pts[i][0]
-            else:
-                nx = max(lo, min(hi, nx))
-            pts[i] = (nx, ny)
-        self._curves[self._channel] = pts
+        dx0, dy0 = self._event_to_draw(x0, y0)
+        # Offsets are in widget space; scale like the start point.
+        aw = float(max(self._area.get_width(), 1))
+        ah = float(max(self._area.get_height(), 1))
+        dx = dx0 + offset_x * (self._draw_w / aw)
+        dy = dy0 + offset_y * (self._draw_h / ah)
+        self._move_point(self._drag_index, dx, dy)
         self._area.queue_draw()
         self._schedule_preview()
 
@@ -1658,7 +1694,9 @@ class CurvesDialog(Gtk.Window):
         try:
             self._on_preview(self.params())
         except Exception:
-            pass
+            import traceback
+
+            traceback.print_exc()
         return False
 
     def _cancel_pending(self) -> None:

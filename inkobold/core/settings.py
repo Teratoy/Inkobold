@@ -1,9 +1,8 @@
-"""Persistent app settings (XDG config)."""
+"""Persistent app settings (platform config dir)."""
 
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,6 +12,7 @@ from inkobold.core.image_meta import (
     COLOR_DEPTH_RGBA32,
     DEFAULT_DPI,
 )
+from inkobold.core.paths import config_dir
 
 # DaemonDomain default: white accent on black glass chrome
 DEFAULT_THEME_RGB: tuple[int, int, int] = (255, 255, 255)
@@ -91,12 +91,7 @@ class AppSettings:
 
 
 def config_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME")
-    if base:
-        root = Path(base) / "inkobold"
-    else:
-        root = Path.home() / ".config" / "inkobold"
-    return root / "settings.json"
+    return config_dir() / "settings.json"
 
 
 def load_settings() -> AppSettings:

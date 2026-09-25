@@ -144,9 +144,10 @@ class GpuRenderer:
         self.pan_y = 40.0
         self.zoom = 1.0
         self.checker_light = False
-        # When True, composite a 3×3 repeat so seamless tiles can be judged live.
+        # When True, composite a 5×5 repeat so seamless tiles can be judged live.
         self.tile_preview = False
         self.init_error: str | None = None
+        self.flora = None  # lazy FloraGpu
 
     def _loc(self, prog: int, name: str) -> int:
         table = self._uniforms.get(prog)
@@ -208,8 +209,26 @@ class GpuRenderer:
         GL.glBlendFunc(GL.GL_SRC_ALPHA, GL.GL_ONE_MINUS_SRC_ALPHA)
         GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
         self._uniforms.clear()
+        if self.flora is None:
+            from inkobold.gpu.flora import FloraGpu
+
+            self.flora = FloraGpu()
+        try:
+            self.flora.ensure(self.es)
+        except Exception:
+            self.flora = None
         self.ready = True
         self.init_error = None
+
+    def apply_flora(self, pixels: np.ndarray, **params) -> Optional[np.ndarray]:
+        """Run Flora on the current GL context; ``None`` if not ready / failed."""
+        if not self.ready:
+            return None
+        if self.flora is None:
+            from inkobold.gpu.flora import FloraGpu
+
+            self.flora = FloraGpu()
+        return self.flora.apply(pixels, es=self.es, **params)
 
     def _tex_for(self, key: str) -> int:
         tid = self.textures.get(key)
@@ -330,7 +349,8 @@ class GpuRenderer:
             self.pan_x = 0.0
             self.pan_y = 0.0
             return
-        # Tile preview draws a 3×3 repeat; zoom out so all nine tiles fit.
+        # Tile preview draws a 5×5 repeat; fit ~3 tiles so the center stays
+        # large while neighbors (and seams) remain visible at the edges.
         span = 3 if self.tile_preview else 1
         zx = (vw - margin * 2) / max(1, doc.width * span)
         zy = (vh - margin * 2) / max(1, doc.height * span)
@@ -361,8 +381,8 @@ class GpuRenderer:
         if self.tile_preview:
             tile_offsets = [
                 (float(dx) * doc_w, float(dy) * doc_h)
-                for dy in (-1, 0, 1)
-                for dx in (-1, 0, 1)
+                for dy in (-2, -1, 0, 1, 2)
+                for dx in (-2, -1, 0, 1, 2)
             ]
         else:
             tile_offsets = [(0.0, 0.0)]

@@ -1,7 +1,7 @@
 [project]
 name = "inkobold"
 version = "0.1.0"
-description = "GPU-accelerated layered drawing with libinput/libwacom tablet support"
+description = "GPU-accelerated layered drawing (GTK4; libinput/libwacom on Linux)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

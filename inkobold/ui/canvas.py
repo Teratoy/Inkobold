@@ -233,6 +233,16 @@ class Canvas(Gtk.Overlay):
         if self._needs_fit:
             GLib.idle_add(self.request_fit)
 
+    def apply_flora(self, pixels, **params):
+        """GPU Flora when GL is ready; returns ``None`` to trigger CPU fallback."""
+        if not self.renderer.ready:
+            return None
+        self.gl.make_current()
+        err = self.gl.get_error()
+        if err:
+            return None
+        return self.renderer.apply_flora(pixels, **params)
+
     def _on_gl_resize(self, _area, width: int, height: int) -> None:
         self.renderer.set_view(width, height)
         if self._needs_fit and width > 32 and height > 32:

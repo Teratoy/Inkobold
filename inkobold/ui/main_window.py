@@ -30,7 +30,11 @@ from inkobold.core.effects import (
     drop_shadow,
     edge_detect,
     emboss,
+    flora,
     gaussian_blur,
+    color_basics,
+    grayscale,
+    invert,
     kuwahara,
     liquify,
     metal_relief,
@@ -38,6 +42,8 @@ from inkobold.core.effects import (
     normal_map,
     pixelate,
     posterize,
+    sharpen,
+    solarize,
     threshold,
 )
 from inkobold.core.grid import GridOverlay
@@ -91,6 +97,7 @@ from inkobold.ui.theme import DEFAULT_CSS, build_theme_css
 TOOL_ORDER = [
     ("pen", "Pen"),
     ("line", "Line"),
+    ("rectangle", "Rectangle"),
     ("curve", "Curve"),
     ("brush", "Brush"),
     ("weld_brush", "Weld Brush"),
@@ -212,9 +219,15 @@ class MainWindow(Gtk.ApplicationWindow):
             "effect_pixelate": self.action_effect_pixelate,
             "effect_kuwahara": self.action_effect_kuwahara,
             "effect_gaussian_blur": self.action_effect_gaussian_blur,
+            "effect_sharpen": self.action_effect_sharpen,
             "effect_drop_shadow": self.action_effect_drop_shadow,
             "effect_dither": self.action_effect_dither,
             "effect_posterize": self.action_effect_posterize,
+            "effect_flora": self.action_effect_flora,
+            "effect_color_basics": self.action_effect_color_basics,
+            "effect_grayscale": self.action_effect_grayscale,
+            "effect_invert": self.action_effect_invert,
+            "effect_solarize": self.action_effect_solarize,
             "effect_curves": self.action_effect_curves,
             "effect_threshold": self.action_effect_threshold,
             "effect_liquify": self.action_effect_liquify,
@@ -1347,20 +1360,45 @@ class MainWindow(Gtk.ApplicationWindow):
 
         effects_btn = Gtk.MenuButton(label="Effects")
         effects_menu = Gio.Menu()
-        effects_menu.append("Pixelate…", "win.effect_pixelate")
-        effects_menu.append("Kuwahara…", "win.effect_kuwahara")
-        effects_menu.append("Gaussian Blur…", "win.effect_gaussian_blur")
-        effects_menu.append("Drop Shadow…", "win.effect_drop_shadow")
-        effects_menu.append("Dither…", "win.effect_dither")
-        effects_menu.append("Posterize…", "win.effect_posterize")
-        effects_menu.append("Curves…", "win.effect_curves")
-        effects_menu.append("Threshold…", "win.effect_threshold")
-        effects_menu.append("Liquify…", "win.effect_liquify")
-        effects_menu.append("Edge Detect…", "win.effect_edge_detect")
-        effects_menu.append("Emboss…", "win.effect_emboss")
-        effects_menu.append("Normal Map…", "win.effect_normal_map")
-        effects_menu.append("Metal Relief…", "win.effect_metal_relief")
-        effects_menu.append("Milk…", "win.effect_milk")
+
+        blur_menu = Gio.Menu()
+        blur_menu.append("Gaussian Blur…", "win.effect_gaussian_blur")
+        blur_menu.append("Sharpen…", "win.effect_sharpen")
+        blur_menu.append("Kuwahara…", "win.effect_kuwahara")
+        effects_menu.append_submenu("Blur & Sharpen", blur_menu)
+
+        stylize_menu = Gio.Menu()
+        stylize_menu.append("Pixelate…", "win.effect_pixelate")
+        stylize_menu.append("Drop Shadow…", "win.effect_drop_shadow")
+        stylize_menu.append("Dither…", "win.effect_dither")
+        stylize_menu.append("Posterize…", "win.effect_posterize")
+        stylize_menu.append("Flora…", "win.effect_flora")
+        effects_menu.append_submenu("Stylize", stylize_menu)
+
+        color_menu = Gio.Menu()
+        color_menu.append("Color Basics…", "win.effect_color_basics")
+        color_menu.append("Grayscale…", "win.effect_grayscale")
+        color_menu.append("Invert…", "win.effect_invert")
+        color_menu.append("Solarize…", "win.effect_solarize")
+        color_menu.append("Curves…", "win.effect_curves")
+        color_menu.append("Threshold…", "win.effect_threshold")
+        effects_menu.append_submenu("Color", color_menu)
+
+        distort_menu = Gio.Menu()
+        distort_menu.append("Liquify…", "win.effect_liquify")
+        effects_menu.append_submenu("Distort", distort_menu)
+
+        edge_menu = Gio.Menu()
+        edge_menu.append("Edge Detect…", "win.effect_edge_detect")
+        edge_menu.append("Emboss…", "win.effect_emboss")
+        edge_menu.append("Normal Map…", "win.effect_normal_map")
+        effects_menu.append_submenu("Edge & Depth", edge_menu)
+
+        materials_menu = Gio.Menu()
+        materials_menu.append("Metal Relief…", "win.effect_metal_relief")
+        materials_menu.append("Milk…", "win.effect_milk")
+        effects_menu.append_submenu("Materials", materials_menu)
+
         effects_btn.set_menu_model(effects_menu)
         menubar.append(effects_btn)
 
@@ -2061,14 +2099,10 @@ class MainWindow(Gtk.ApplicationWindow):
         add_fr = Gtk.Button(label="+")
         add_fr.set_tooltip_text("Add blank frame after current")
         add_fr.connect("clicked", lambda *_: self.action_add_frame(None, None))
-        dup_fr = Gtk.Button(label="Dup")
-        dup_fr.set_tooltip_text("Duplicate current frame")
-        dup_fr.connect("clicked", lambda *_: self.action_duplicate_frame(None, None))
         del_fr = Gtk.Button(label="−")
         del_fr.set_tooltip_text("Delete current frame")
         del_fr.connect("clicked", lambda *_: self.action_delete_frame(None, None))
         frame_btns.append(add_fr)
-        frame_btns.append(dup_fr)
         frame_btns.append(del_fr)
         frames_body.append(frame_btns)
 
@@ -2387,6 +2421,30 @@ class MainWindow(Gtk.ApplicationWindow):
             preview_max_side=720,
         )
 
+    def action_effect_sharpen(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Sharpen",
+            blurb=(
+                "Unsharp-mask sharpen on the active layer’s RGB (alpha preserved). "
+                "Threshold skips weak detail to limit noise."
+            ),
+            options=[
+                EffectOption("amount", "Amount", "spin", 100, minimum=0, maximum=500, step=1),
+                EffectOption("radius", "Radius", "spin", 1, minimum=1, maximum=32, step=1),
+                EffectOption(
+                    "threshold", "Threshold", "spin", 0, minimum=0, maximum=100, step=1
+                ),
+            ],
+            effect_fn=lambda src, p: sharpen(
+                src,
+                amount=float(p["amount"]),
+                radius=int(p["radius"]),
+                threshold=float(p["threshold"]),
+            ),
+            debounce_ms=80,
+            preview_max_side=720,
+        )
+
     def action_effect_drop_shadow(self, *_a) -> None:
         self._open_effect_dialog(
             title="Drop Shadow",
@@ -2447,6 +2505,114 @@ class MainWindow(Gtk.ApplicationWindow):
                 EffectOption("levels", "Levels", "spin", 4, minimum=2, maximum=32, step=1),
             ],
             effect_fn=lambda src, p: posterize(src, int(p["levels"])),
+            debounce_ms=40,
+        )
+
+    def action_effect_flora(self, *_a) -> None:
+        def _gpu(src, **kw):
+            return self.canvas.apply_flora(src, **kw)
+
+        self._open_effect_dialog(
+            title="Flora",
+            blurb=(
+                "Gritty pseudo-HDR look: wide local contrast, midtone grit, "
+                "neon yellow/magenta/cyan accents, bleached neutrals, and Orton bloom. "
+                "Uses the GPU when available; alpha is preserved."
+            ),
+            options=[
+                EffectOption("clarity", "Clarity", "spin", 75, minimum=0, maximum=150, step=1),
+                EffectOption(
+                    "clarity_radius", "Clarity radius", "spin", 28, minimum=4, maximum=96, step=1
+                ),
+                EffectOption("bloom", "Bloom", "spin", 28, minimum=0, maximum=100, step=1),
+                EffectOption(
+                    "bloom_radius", "Bloom radius", "spin", 14, minimum=2, maximum=64, step=1
+                ),
+                EffectOption("grit", "Grit", "spin", 45, minimum=0, maximum=100, step=1),
+                EffectOption("neon", "Neon accents", "spin", 70, minimum=0, maximum=150, step=1),
+                EffectOption("bleach", "Midtone bleach", "spin", 55, minimum=0, maximum=100, step=1),
+                EffectOption("lift", "Shadow lift", "spin", 30, minimum=0, maximum=100, step=1),
+            ],
+            effect_fn=lambda src, p: flora(
+                src,
+                clarity=float(p["clarity"]),
+                bloom=float(p["bloom"]),
+                grit=float(p["grit"]),
+                neon=float(p["neon"]),
+                bleach=float(p["bleach"]),
+                lift=float(p["lift"]),
+                clarity_radius=int(p["clarity_radius"]),
+                bloom_radius=int(p["bloom_radius"]),
+                gpu_apply=_gpu,
+            ),
+            debounce_ms=80,
+            preview_max_side=512,
+        )
+
+    def action_effect_color_basics(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Color Basics",
+            blurb=(
+                "Hue, brightness, contrast, and exposure on the active layer "
+                "(alpha preserved). Brightness / contrast are percents; "
+                "exposure 100 is neutral."
+            ),
+            options=[
+                EffectOption("hue", "Hue °", "spin", 0, minimum=-180, maximum=180, step=1),
+                EffectOption(
+                    "brightness", "Brightness", "spin", 0, minimum=-100, maximum=100, step=1
+                ),
+                EffectOption(
+                    "contrast", "Contrast", "spin", 0, minimum=-100, maximum=100, step=1
+                ),
+                EffectOption(
+                    "exposure", "Exposure", "spin", 100, minimum=0, maximum=200, step=1
+                ),
+            ],
+            effect_fn=lambda src, p: color_basics(
+                src,
+                hue=float(p["hue"]),
+                brightness=float(p["brightness"]),
+                contrast=float(p["contrast"]),
+                exposure=float(p["exposure"]),
+            ),
+            debounce_ms=40,
+        )
+
+    def action_effect_grayscale(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Grayscale",
+            blurb=(
+                "Convert to Rec. 601 grayscale on the active layer "
+                "(alpha preserved). Amount 100 is full gray."
+            ),
+            options=[
+                EffectOption("amount", "Amount", "spin", 100, minimum=0, maximum=100, step=1),
+            ],
+            effect_fn=lambda src, p: grayscale(src, amount=float(p["amount"])),
+            debounce_ms=40,
+        )
+
+    def action_effect_invert(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Invert",
+            blurb="Invert RGB on the active layer (alpha preserved).",
+            options=[],
+            effect_fn=lambda src, _p: invert(src),
+            debounce_ms=40,
+        )
+
+    def action_effect_solarize(self, *_a) -> None:
+        self._open_effect_dialog(
+            title="Solarize",
+            blurb=(
+                "Invert RGB channels at or above a threshold (Sabattier). "
+                "Alpha is preserved."
+            ),
+            options=[
+                EffectOption("level", "Level", "spin", 50, minimum=0, maximum=100, step=1),
+            ],
+            effect_fn=lambda src, p: solarize(src, level=float(p["level"])),
             debounce_ms=40,
         )
 
@@ -2815,7 +2981,7 @@ class MainWindow(Gtk.ApplicationWindow):
         def on_preview(params: dict) -> None:
             self._preview_effect(params, final=False)
 
-        dlg = CurvesDialog(self, on_preview, debounce_ms=40)
+        dlg = CurvesDialog(self, on_preview, debounce_ms=16)
         dlg.connect_response(self._on_effect_dialog_response)
         dlg.present()
 
@@ -2842,6 +3008,14 @@ class MainWindow(Gtk.ApplicationWindow):
         preview_params = dict(params)
         if "radius" in preview_params:
             preview_params["radius"] = max(1, int(round(int(preview_params["radius"]) * scale)))
+        if "clarity_radius" in preview_params:
+            preview_params["clarity_radius"] = max(
+                1, int(round(int(preview_params["clarity_radius"]) * scale))
+            )
+        if "bloom_radius" in preview_params:
+            preview_params["bloom_radius"] = max(
+                1, int(round(int(preview_params["bloom_radius"]) * scale))
+            )
         if "block_size" in preview_params:
             preview_params["block_size"] = max(1, int(round(int(preview_params["block_size"]) * scale)))
         for key in ("distance", "blur", "spread"):
@@ -4140,6 +4314,13 @@ class MainWindow(Gtk.ApplicationWindow):
         self._persist_settings()
         self.shutdown_input()
         argv = [sys.executable, "-m", "inkobold", *sys.argv[1:]]
+        if sys.platform == "win32":
+            # os.execv is unreliable with Windows paths/spaces; spawn then quit.
+            import subprocess
+
+            subprocess.Popen(argv)
+            self._do_quit()
+            return
         os.execv(sys.executable, argv)
 
     def action_export(self, *_a) -> None:

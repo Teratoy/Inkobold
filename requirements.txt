@@ -1,4 +1,5 @@
 numpy>=2.0
 PyOpenGL>=3.1.7
 Pillow>=10.0
-# PyGObject + GTK4 come from the system (use venv --system-site-packages)
+# PyGObject + GTK4 come from the system / MSYS2 (use venv --system-site-packages)
+# Windows setup: see docs/WINDOWS.md

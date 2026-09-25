@@ -1,21 +1,28 @@
 # Inkobold
 
-GPU-accelerated drawing tool for Linux, with **libinput** / **libwacom** tablet awareness.
+GPU-accelerated layered drawing for **Linux** and **Windows** (GTK4 + OpenGL). On Linux it can enrich tablets via **libinput** / **libwacom**; on Windows it uses **GDK** pointer/tablet axes.
+
+Version **0.1.0** · Python **≥3.11** · App id `trinkets.inkobold`
 
 ## Features
 
-- **File** — Multi-document tabs; New File (pixel size prompt), Open, Save (`.inkobold` multilayer ZIP), Export, Export Separated Layers, Import Image as Layer
-- **Layers** — RGBA8 layers, visibility, opacity-ready offsets, GPU composite; add / duplicate / rename / delete / merge down / merge all
-- **Animation** — Frames with FPS playback; onion-skin overlay of the previous frame while drawing; export as GIF or PNG sequence folder
-- **Tools** — Pen, Line, Curve (freehand / arc / circle), Brush (round / custom tip / bubbles), Weld Brush, Fill, Gradient, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
-- **Effects** — Pixelate, Kuwahara, Gaussian Blur, Drop Shadow, Dither, Posterize, Curves, Threshold, Liquify, Edge Detect, Emboss, Normal Map, Metal Relief, Milk (apply to active layer or all layers)
-- **Libraries** — User brushes, patterns, and fonts under `~/.local/share/inkobold/libraries/` (or `$XDG_DATA_HOME/inkobold/libraries/`)
-- **Input** — GDK drawing path + libinput device poll + libwacom tablet identification
-- **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid overlay, Show Sun (draggable light for 3D tools / Metal Relief / Milk), Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
-- **Edit** — Undo / Redo; stroke Mirror (1–16 axes, horizontal / vertical / diagonal); Flip / Rotate active layer; Crop Canvas (live size before apply; optional selection bounds)
-- **Settings** — Theme, Memory (undo steps), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (view & rebind), Debug Mode
+- **File** — Multi-document tabs; New File (pixel size), Open, Save (`.inkobold` multilayer ZIP), Export, Export Separated Layers, Import Image as Layer
+- **Layers** — RGBA layers (8 or 16 bpc), visibility, opacity, offsets, GPU composite; add / duplicate / rename / delete / merge down / merge all
+- **Animation** — Frames with FPS playback; onion-skin of the previous frame; export GIF or PNG sequence
+- **Tools** — Pen, Line, Rectangle, Curve (freehand / arc / circle), Brush (round / custom tip / bubbles), Weld Brush, Fill, Gradient, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
+- **Effects** — Blur & Sharpen, Stylize (Pixelate, Drop Shadow, Dither, Posterize, **Flora**), Color, Distort, Edge & Depth, Materials (Metal Relief, Milk); apply to active layer or all layers
+- **Libraries** — User brushes, patterns, and fonts under the platform data dir (see Paths below)
+- **Input** — GDK drawing path; on Linux, optional libinput poll + libwacom tablet identification
+- **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid, Show Sun (draggable light for 3D / Metal / Milk), Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
+- **Edit** — Undo / Redo; stroke Mirror (1–16 axes, H / V / diagonal); Flip / Rotate layer; Crop Canvas (live size; optional selection bounds)
+- **Settings** — Theme, Memory (undo steps), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (rebind), Debug Mode
 
-## Run
+## Documentation
+
+- **[docs/WINDOWS.md](docs/WINDOWS.md)** — Windows setup, packaging, known gaps
+- **[docs/wiki/](docs/wiki/)** — Full wiki (Obsidian-friendly `[[wikilinks]]`; also mirrored in the Stele vault)
+
+## Run (Linux)
 
 ```bash
 ./scripts/run.sh
@@ -29,7 +36,20 @@ python3 -m venv --system-site-packages .venv
 .venv/bin/python -m inkobold
 ```
 
-Requires system **PyGObject** + **GTK4** (install via your distro; use a venv with `--system-site-packages`).
+Requires system **PyGObject** + **GTK4** (distro packages; use a venv with `--system-site-packages`).
+
+## Run / package (Windows)
+
+See **[docs/WINDOWS.md](docs/WINDOWS.md)** (MSYS2 MINGW64 recommended) and `scripts/run.ps1`.
+
+## Paths
+
+| | Linux | Windows |
+|--|-------|---------|
+| Config / settings | `~/.config/inkobold/settings.json` | `%APPDATA%\Inkobold\settings.json` |
+| Libraries | `~/.local/share/inkobold/libraries/` | `%LOCALAPPDATA%\Inkobold\libraries\` |
+
+Overrides: `INKOBOLD_CONFIG_HOME`, `INKOBOLD_DATA_HOME`, `INKOBOLD_ICON`.
 
 ## Shortcuts
 
@@ -37,7 +57,7 @@ Requires system **PyGObject** + **GTK4** (install via your distro; use a venv wi
 |--------|------|
 | New / Open / Save / Save As | `Ctrl+N` `Ctrl+O` `Ctrl+S` `Ctrl+Shift+S` |
 | Import image / Export | `Ctrl+I` / `Ctrl+E` |
-| Undo / Redo | `Ctrl+Z` / `Ctrl+Shift+Z` or `Ctrl+Y` |
+| Undo / Redo | `Ctrl+Z` `Ctrl+Shift+Z` or `Ctrl+Y` |
 | Fit Canvas | `Ctrl+0` or `Ctrl+F` |
 | Fullscreen | `F11` |
 | Clear selection | `Esc` or `Ctrl+D` |
@@ -48,14 +68,22 @@ Requires system **PyGObject** + **GTK4** (install via your distro; use a venv wi
 | Play / pause animation | `Space` or `F5` |
 | Stop animation | `F6` |
 | Brush size | `[` `]` |
-| Tools | `P` `L` `U` `B` `W` `G` `A` `D` `F` `E` `M` `Y` `C`/`R` `V` `Q` `T` |
+| Tools | Pen `P` · Line `L` · Rect `O` · Curve `U` · Brush `B` · Weld `W` · Fill `G` · Gradient `A` · 3D Pen `D` · 3D Fill `F` · Eraser `E` · Smear `M` · Liquify `Y` · Replace `C`/`R` · Transform `V` · Lasso `Q` · Type `T` |
 | Pan | Middle mouse drag |
 
 Shortcuts are rebindable under **Settings → Shortcuts**.
 
 ## File format
 
-`.inkobold` is a ZIP containing `document.json` and `layers/NNN.png` (RGBA).
+`.inkobold` is a ZIP (`document.json` **version 3**) with per-frame layers:
+
+```
+document.json
+frames/FFF/layers/LLL.png   # or .npy for 16 bpc
+layers/LLL.png              # legacy mirror of the current frame
+```
+
+Also opens PNG / JPEG / WebP / BMP / GIF (multi-frame GIF → animation).
 
 ## Author
 

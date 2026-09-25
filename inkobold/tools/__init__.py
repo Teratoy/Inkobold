@@ -10,6 +10,7 @@ from inkobold.tools.liquify import LiquifyTool
 from inkobold.tools.move import MoveTool, TransformTool
 from inkobold.tools.pen import PenTool
 from inkobold.tools.pen3d import Fill3DTool, Pen3DTool
+from inkobold.tools.rectangle import RectangleTool
 from inkobold.tools.replace_color import ReplaceColorTool
 from inkobold.tools.smear import SmearTool
 from inkobold.tools.type_tool import TypeTool
@@ -20,6 +21,7 @@ def default_tools() -> dict:
     tools = [
         PenTool(),
         LineTool(),
+        RectangleTool(),
         CurveTool(),
         BrushTool(),
         WeldBrushTool(),
@@ -43,6 +45,7 @@ __all__ = [
     "default_tools",
     "PenTool",
     "LineTool",
+    "RectangleTool",
     "CurveTool",
     "BrushTool",
     "WeldBrushTool",
