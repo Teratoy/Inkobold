@@ -4,7 +4,7 @@ Markdown wiki for Inkobold. Compatible with **Obsidian** and **GitHub Wiki**.
 
 - Hub: [[Home]] (also [[Inkobold]])
 - GitHub Wiki: https://github.com/Teratoy/Inkobold/wiki
-- Flat `[[Page Name]]` links (unique basenames; folders are for organization only)
+- **Flat layout** — all pages at `docs/wiki/*.md` (unique basenames). GitHub Wiki breaks links if a page and a folder share a name (e.g. `Tools.md` + `Tools/`).
 - GitHub extras: `_Sidebar.md`, `_Footer.md`, `Home.md`
 
-Published to the GitHub wiki from this tree (nested path links are not used).
+Publish: `./scripts/push-wiki.sh`
