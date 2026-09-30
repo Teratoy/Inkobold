@@ -6,6 +6,6 @@ tags: [inkobold, wiki, tools]
 
 **id** `fill3d` · **key** `F`
 
-Flood then shade. Modes: `classic`, `addiction`, `wavy`, `drift`. Uses [[View|Sun]].
+Flood then shade. Modes: `classic`, `addiction`, `wavy`, `drift`, `depression`. Uses [[View|Sun]].
 
 Parent: [[Tools]]

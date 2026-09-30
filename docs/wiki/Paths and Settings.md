@@ -38,6 +38,8 @@ Resolved by `inkobold/core/paths.py`.
 
 `theme_rgb` (default white), `use_custom_theme`, `checker_light`, `history_steps`, `default_dpi`, `default_color_depth`, `color_follows_tools`, `debug_mode`, `visible_tools`, `shortcut_overrides`, `recent_colors` (max 8), `sun_enabled`, `sun_x_norm`, `sun_y_norm`, `sun_elevation`.
 
+Tool options, mirror/grid/wrap, and canvas view are saved per document in the `.inkobold` `workspace` blob — see [[File Format]].
+
 Sun defaults: `x_norm`/`y_norm` = **0.18**, `elevation` = **0.70**. See [[View]].
 
 ## Color depths

@@ -23,7 +23,7 @@
 * [[Changelog Notes]]
 
 **Tools**
-* [[Pen]] · [[Line]] · [[Rectangle]] · [[Curve]]
+* [[Pen]] · [[Line]] · [[Rectangle]] · [[Curve]] · [[Lay]]
 * [[Brush]] · [[Weld Brush]] · [[Fill]] · [[Gradient]]
 * [[3D Pen]] · [[3D Fill]] · [[Eraser]] · [[Smear]]
 * [[Liquify]] · [[Replace]] · [[Transform]] · [[Lasso]] · [[Type]]

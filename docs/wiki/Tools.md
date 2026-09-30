@@ -12,6 +12,7 @@ Registered in `inkobold/tools/` via `default_tools()`. Shared paint helpers live
 | [[Line\|Line]] | `line` | `L` | Straight segment; **Shift** → 45° snap |
 | [[Rectangle\|Rectangle]] | `rectangle` | `O` | Outline; **Shift** → square; **Alt** → from center |
 | [[Curve\|Curve]] | `curve` | `U` | Modes: freehand / arc / circle |
+| [[Lay\|Lay]] | `lay` | `K` | Pattern stamps along line / curve path |
 | [[Brush\|Brush]] | `brush` | `B` | Pressure; round / custom tip / bubbles |
 | [[Weld Brush\|Weld Brush]] | `weld_brush` | `W` | Pressure + live morphological weld |
 | [[Fill\|Fill]] | `fill` | `G` | Flood: color / pattern / maze / puzzle |

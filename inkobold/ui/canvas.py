@@ -318,6 +318,7 @@ class Canvas(Gtk.Overlay):
             tile_scale=float(getattr(tool, "tile_scale", 1.0)),
             maze_cell_size=float(getattr(tool, "maze_cell_size", 8.0)),
             corridor_color=tuple(getattr(tool, "corridor_color", (255, 255, 255, 255))),
+            lay_spacing=float(getattr(tool, "lay_spacing", 40.0)),
             end_color=tuple(getattr(tool, "end_color", (255, 255, 255, 255))),
             replace_action=str(getattr(tool, "replace_action", "replace")),
             apply_mode=str(getattr(tool, "apply_mode", "all")),

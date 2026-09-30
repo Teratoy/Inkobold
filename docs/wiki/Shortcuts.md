@@ -38,6 +38,7 @@ Defaults from `inkobold/core/shortcuts.py`. Rebind under **Settings → Shortcut
 | Line | `L` |
 | Rectangle | `O` |
 | Curve | `U` |
+| Lay | `K` |
 | Brush | `B` |
 | Weld Brush | `W` |
 | Fill | `G` |
@@ -54,7 +55,8 @@ Defaults from `inkobold/core/shortcuts.py`. Rebind under **Settings → Shortcut
 
 ## Unbound by default (menu only)
 
-`export_layers`, `export_anim_gif`, `export_anim_png`, `merge_all_layers`.
+`export_layers`, `export_anim_gif`, `export_anim_png`, `merge_all_layers`,
+`move_layer_to_top`, `move_layer_to_bottom`.
 
 ## Pointer
 

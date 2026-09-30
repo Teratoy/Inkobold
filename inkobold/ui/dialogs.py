@@ -215,7 +215,7 @@ class ThemeColorDialog(Gtk.Window):
         )
         self.set_child(root)
         root.append(Gtk.Label(
-            label="Accent tint for the glass chrome (white keeps the DaemonDomain look).",
+            label="Any color becomes the chrome accent (white keeps the DaemonDomain look).",
             xalign=0,
             wrap=True,
         ))

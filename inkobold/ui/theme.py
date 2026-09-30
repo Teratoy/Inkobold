@@ -63,12 +63,15 @@ def _rgba(r: int, g: int, b: int, a: float) -> str:
 
 
 def shades_from_rgb(r: int, g: int, b: int) -> dict[str, str]:
-    """Derive a DaemonDomain-style glass palette from a seed accent color."""
-    h, s, _l = rgb_to_hsl(r, g, b)
-    achromatic = s < 0.08 or (r + g + b) / 3 > 230
+    """Derive a DaemonDomain-style glass palette from a seed accent color.
 
-    if achromatic:
-        # Match DaemonDomain: pure black stage, white chrome, soft white glow.
+    Any RGB can be used. Near-white keeps the classic black/white look; every
+    other seed (including greys, pastels, and neons) becomes the chrome accent.
+    """
+    h, s, l = rgb_to_hsl(r, g, b)
+
+    # Only near-white keeps the stock DaemonDomain chrome.
+    if s < 0.05 and l > 0.92:
         return {
             "window": "#000000",
             "panel": "#0a0f14",
@@ -94,28 +97,32 @@ def shades_from_rgb(r: int, g: int, b: int) -> dict[str, str]:
             "ok": "#9dffb0",
         }
 
-    # Keep chroma readable without neon chrome
-    s = max(0.18, min(0.55, s))
+    # Accent is the color the user picked. Lift near-black slightly so borders
+    # and glow stay visible on the dark stage without changing the hue.
+    ar, ag, ab = r, g, b
+    if l < 0.18:
+        ar, ag, ab = hsl_to_rgb(h, s, 0.28)
+
+    # Chrome surfaces stay dark; tint strength follows seed chroma.
+    chrome_s = 0.0 if s < 0.05 else max(0.12, min(0.65, s))
 
     def shade(sat: float, light: float) -> tuple[int, int, int]:
         return hsl_to_rgb(h, sat, light)
 
-    accent = shade(min(0.65, s + 0.1), max(0.42, min(0.62, _l if _l > 0.25 else 0.52)))
-    ar, ag, ab = accent
     return {
-        "window": _hex(shade(s * 0.35, 0.04)),
-        "panel": _hex(shade(s * 0.45, 0.10)),
-        "sidebar": _hex(shade(s * 0.4, 0.08)),
-        "status": _hex(shade(s * 0.35, 0.05)),
+        "window": _hex(shade(chrome_s * 0.35, 0.04)),
+        "panel": _hex(shade(chrome_s * 0.45, 0.10)),
+        "sidebar": _hex(shade(chrome_s * 0.4, 0.08)),
+        "status": _hex(shade(chrome_s * 0.35, 0.05)),
         "text": "#ffffff",
-        "muted": _hex(shade(s * 0.15, 0.72)),
-        "dim": _hex(shade(s * 0.2, 0.48)),
-        "accent": _hex(accent),
+        "muted": _hex(shade(chrome_s * 0.15, 0.72)),
+        "dim": _hex(shade(chrome_s * 0.2, 0.48)),
+        "accent": _hex((ar, ag, ab)),
         "accent_glow": _rgba(ar, ag, ab, 0.40),
-        "separator": _hex(shade(s * 0.4, 0.26)),
-        "button": _hex(shade(s * 0.4, 0.14)),
-        "button_hover": _hex(shade(s * 0.45, 0.20)),
-        "entry": _hex(shade(s * 0.35, 0.06)),
+        "separator": _hex(shade(chrome_s * 0.4, 0.26)),
+        "button": _hex(shade(chrome_s * 0.4, 0.14)),
+        "button_hover": _hex(shade(chrome_s * 0.45, 0.20)),
+        "entry": _hex(shade(chrome_s * 0.35, 0.06)),
         "border": _rgba(ar, ag, ab, 0.32),
         "border_soft": _rgba(ar, ag, ab, 0.18),
         "border_strong": _rgba(ar, ag, ab, 0.55),

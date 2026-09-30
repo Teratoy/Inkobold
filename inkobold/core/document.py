@@ -107,6 +107,8 @@ class Document:
     fps: float = DEFAULT_FPS
     onion_skin: bool = True
     onion_opacity: float = DEFAULT_ONION_OPACITY
+    # Document-scoped UI / tool options restored on open (see File Format).
+    workspace: dict = field(default_factory=dict)
 
     @classmethod
     def blank(
@@ -600,7 +602,7 @@ class Document:
             )
         ]
         meta = {
-            "version": 3,
+            "version": 4,
             "width": self.width,
             "height": self.height,
             "dpi": int(self.dpi),
@@ -614,6 +616,8 @@ class Document:
             # Legacy single-frame mirror (current frame) for older readers
             "layers": [],
         }
+        if self.workspace:
+            meta["workspace"] = self.workspace
         with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for fi, fr in enumerate(frames):
                 frame_meta = {
@@ -737,6 +741,9 @@ class Document:
 
             idx = int(meta.get("current_frame_index", 0))
             doc._adopt_frame(idx)
+            ws = meta.get("workspace")
+            if isinstance(ws, dict):
+                doc.workspace = ws
             doc.path = path
             doc.dirty = False
             return doc

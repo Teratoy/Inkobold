@@ -395,6 +395,336 @@ def stroke_circle(
 
 
 _tip_scale_cache: dict[tuple[int, int, int, int], np.ndarray] = {}
+_pattern_stamp_cache: dict[tuple[int, int, int, int, int], np.ndarray] = {}
+
+
+def _scaled_pattern_element(pattern: np.ndarray, size: int, angle_deg: float) -> np.ndarray:
+    """Scale pattern so its longest side equals *size*, then rotate by *angle_deg* (PIL CCW)."""
+    d = max(1, int(size))
+    # Quantize angle so the cache stays useful during live drag previews.
+    ang_q = int(round(float(angle_deg) * 10.0))
+    pat = np.asarray(pattern, dtype=np.uint8)
+    ph, pw = pat.shape[:2]
+    key = (id(pattern), ph, pw, d, ang_q)
+    cached = _pattern_stamp_cache.get(key)
+    if cached is not None:
+        return cached
+    scale = d / float(max(ph, pw, 1))
+    nh = max(1, int(round(ph * scale)))
+    nw = max(1, int(round(pw * scale)))
+    img = Image.fromarray(pat, mode="RGBA")
+    if nh != ph or nw != pw:
+        img = img.resize((nw, nh), Image.Resampling.LANCZOS)
+    if ang_q % 3600 != 0:
+        img = img.rotate(ang_q / 10.0, expand=True, resample=Image.Resampling.BICUBIC)
+    out = np.asarray(img, dtype=np.uint8)
+    if len(_pattern_stamp_cache) > 96:
+        _pattern_stamp_cache.clear()
+    _pattern_stamp_cache[key] = out
+    return out
+
+
+def stamp_pattern_element(
+    pixels: np.ndarray,
+    x: float,
+    y: float,
+    pattern: np.ndarray,
+    size: float,
+    angle: float = 0.0,
+    mask: np.ndarray | None = None,
+    opacity: float = 1.0,
+    wrap: bool = False,
+) -> None:
+    """Alpha-composite an RGBA pattern element centered at (x, y).
+
+    *size* is the longest side in pixels. *angle* is the path tangent in
+    radians (image space, +y down); the pattern's +x is aligned to that
+    direction.
+    """
+    if pattern is None or pattern.size == 0 or pattern.ndim != 3 or pattern.shape[2] < 4:
+        return
+    sz = max(1.0, float(size))
+    op = min(1.0, max(0.0, float(opacity)))
+    if op <= 0.0:
+        return
+    h, w = pixels.shape[:2]
+    # PIL rotates CCW in a y-up sense; negate for image y-down tangents.
+    angle_deg = -math.degrees(float(angle))
+    if wrap:
+        half = sz * 0.75 + 2.0
+        for px, py in stamp_centers(x, y, half, w, h, True):
+            stamp_pattern_element(
+                pixels, px, py, pattern, size, angle=angle,
+                mask=mask, opacity=opacity, wrap=False,
+            )
+        return
+    scaled = _scaled_pattern_element(pattern, max(1, int(round(sz))), angle_deg)
+    th, tw = scaled.shape[:2]
+    x0 = int(math.floor(x - tw * 0.5))
+    y0 = int(math.floor(y - th * 0.5))
+    x1 = x0 + tw
+    y1 = y0 + th
+    cx0 = max(0, x0)
+    cy0 = max(0, y0)
+    cx1 = min(w, x1)
+    cy1 = min(h, y1)
+    if cx0 >= cx1 or cy0 >= cy1:
+        return
+    tx0 = cx0 - x0
+    ty0 = cy0 - y0
+    tx1 = tx0 + (cx1 - cx0)
+    ty1 = ty0 + (cy1 - cy0)
+    src = scaled[ty0:ty1, tx0:tx1].astype(np.float32)
+    max_v = _max_v(pixels)
+    if max_v > 255.0 and float(np.max(src)) <= 255.0:
+        src = src * (max_v / 255.0)
+    src_a = (src[..., 3:4] / max_v) * op
+    if mask is not None:
+        src_a = src_a * (mask[cy0:cy1, cx0:cx1] > 0).astype(np.float32)[..., None]
+    if not np.any(src_a > 0.0):
+        return
+    region = pixels[cy0:cy1, cx0:cx1]
+    dst = region.astype(np.float32)
+    out = dst.copy()
+    out[..., :3] = src[..., :3] * src_a + dst[..., :3] * (1.0 - src_a)
+    out[..., 3:4] = src[..., 3:4] * op + dst[..., 3:4] * (1.0 - src_a)
+    region[...] = _clip(out, 0, max_v).astype(pixels.dtype)
+
+
+def _resample_polyline(
+    points: list[tuple[float, float]],
+    spacing: float,
+) -> list[tuple[float, float, float]]:
+    """Place stamps along a polyline at roughly *spacing* pixels (with tangents)."""
+    if not points:
+        return []
+    space = max(1.0, float(spacing))
+    if len(points) == 1:
+        return [(points[0][0], points[0][1], 0.0)]
+
+    # Flatten to cumulative arc-length samples.
+    xs = [float(points[0][0])]
+    ys = [float(points[0][1])]
+    lens = [0.0]
+    for i in range(1, len(points)):
+        x1, y1 = float(points[i][0]), float(points[i][1])
+        dist = math.hypot(x1 - xs[-1], y1 - ys[-1])
+        if dist < 1e-9:
+            continue
+        xs.append(x1)
+        ys.append(y1)
+        lens.append(lens[-1] + dist)
+    total = lens[-1]
+    if total < 1e-9:
+        return [(xs[0], ys[0], 0.0)]
+
+    def _at(s: float) -> tuple[float, float, float]:
+        s = max(0.0, min(total, s))
+        # Find segment containing arc length s.
+        j = 1
+        while j < len(lens) and lens[j] < s - 1e-9:
+            j += 1
+        j = min(j, len(lens) - 1)
+        seg = lens[j] - lens[j - 1]
+        t = 0.0 if seg < 1e-9 else (s - lens[j - 1]) / seg
+        dx = xs[j] - xs[j - 1]
+        dy = ys[j] - ys[j - 1]
+        return (
+            xs[j - 1] + dx * t,
+            ys[j - 1] + dy * t,
+            math.atan2(dy, dx),
+        )
+
+    out: list[tuple[float, float, float]] = []
+    s = 0.0
+    while s <= total + 1e-6:
+        out.append(_at(min(s, total)))
+        s += space
+        if len(out) > 10000:
+            break
+    return out
+
+
+def lay_pattern_along_segment(
+    pixels: np.ndarray,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    pattern: np.ndarray,
+    size: float,
+    spacing: float,
+    mask: np.ndarray | None = None,
+    opacity: float = 1.0,
+    wrap: bool = False,
+) -> None:
+    samples = _resample_polyline([(x0, y0), (x1, y1)], spacing)
+    for sx, sy, ang in samples:
+        stamp_pattern_element(
+            pixels, sx, sy, pattern, size, angle=ang,
+            mask=mask, opacity=opacity, wrap=wrap,
+        )
+
+
+def lay_pattern_along_quadratic(
+    pixels: np.ndarray,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    pattern: np.ndarray,
+    size: float,
+    spacing: float,
+    mask: np.ndarray | None = None,
+    opacity: float = 1.0,
+    wrap: bool = False,
+) -> None:
+    est = math.hypot(x1 - x0, y1 - y0) + math.hypot(x2 - x1, y2 - y1)
+    steps = max(8, int(est / max(1.0, float(spacing) * 0.25)))
+    pts: list[tuple[float, float]] = []
+    for i in range(steps + 1):
+        t = i / steps
+        u = 1.0 - t
+        pts.append(
+            (
+                u * u * x0 + 2.0 * u * t * x1 + t * t * x2,
+                u * u * y0 + 2.0 * u * t * y1 + t * t * y2,
+            )
+        )
+    for sx, sy, ang in _resample_polyline(pts, spacing):
+        stamp_pattern_element(
+            pixels, sx, sy, pattern, size, angle=ang,
+            mask=mask, opacity=opacity, wrap=wrap,
+        )
+
+
+def lay_pattern_along_circular_arc(
+    pixels: np.ndarray,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    degrees: float,
+    pattern: np.ndarray,
+    size: float,
+    spacing: float,
+    mask: np.ndarray | None = None,
+    opacity: float = 1.0,
+    flip: bool = False,
+    wrap: bool = False,
+) -> None:
+    """Lay pattern elements along the same circular arc as ``stroke_circular_arc``."""
+    dx = x1 - x0
+    dy = y1 - y0
+    chord = math.hypot(dx, dy)
+    if chord < 1e-6:
+        stamp_pattern_element(
+            pixels, x0, y0, pattern, size, angle=0.0,
+            mask=mask, opacity=opacity, wrap=wrap,
+        )
+        return
+
+    deg = abs(float(degrees))
+    if deg < 1e-3:
+        lay_pattern_along_segment(
+            pixels, x0, y0, x1, y1, pattern, size, spacing,
+            mask=mask, opacity=opacity, wrap=wrap,
+        )
+        return
+    deg = min(deg, 359.0)
+    theta = math.radians(deg)
+    half = theta * 0.5
+    sin_h = math.sin(half)
+    if abs(sin_h) < 1e-8:
+        lay_pattern_along_segment(
+            pixels, x0, y0, x1, y1, pattern, size, spacing,
+            mask=mask, opacity=opacity, wrap=wrap,
+        )
+        return
+
+    r_circ = chord / (2.0 * sin_h)
+    nx = -dy / chord
+    ny = dx / chord
+    if flip:
+        nx, ny = -nx, -ny
+    mid_x = (x0 + x1) * 0.5
+    mid_y = (y0 + y1) * 0.5
+    cx = mid_x - nx * r_circ * math.cos(half)
+    cy = mid_y - ny * r_circ * math.cos(half)
+
+    a0 = math.atan2(y0 - cy, x0 - cx)
+    best_sweep = theta
+    best_side = -1.0
+    for sign in (1.0, -1.0):
+        sweep = sign * theta
+        am = a0 + sweep * 0.5
+        mx = cx + r_circ * math.cos(am)
+        my = cy + r_circ * math.sin(am)
+        side = (mx - mid_x) * nx + (my - mid_y) * ny
+        if side > best_side:
+            best_side = side
+            best_sweep = sweep
+
+    arc_len = abs(best_sweep) * r_circ
+    space = max(1.0, float(spacing))
+    steps = max(1, int(math.ceil(arc_len / space)))
+    for i in range(steps + 1):
+        t = i / steps if steps else 0.0
+        ang = a0 + best_sweep * t
+        # Tangent follows sweep direction.
+        tang = ang + (math.pi * 0.5 if best_sweep >= 0.0 else -math.pi * 0.5)
+        stamp_pattern_element(
+            pixels,
+            cx + r_circ * math.cos(ang),
+            cy + r_circ * math.sin(ang),
+            pattern,
+            size,
+            angle=tang,
+            mask=mask,
+            opacity=opacity,
+            wrap=wrap,
+        )
+
+
+def lay_pattern_along_circle(
+    pixels: np.ndarray,
+    cx: float,
+    cy: float,
+    circle_radius: float,
+    pattern: np.ndarray,
+    size: float,
+    spacing: float,
+    mask: np.ndarray | None = None,
+    opacity: float = 1.0,
+    wrap: bool = False,
+) -> None:
+    r_circ = max(0.0, float(circle_radius))
+    if r_circ < 1e-6:
+        stamp_pattern_element(
+            pixels, cx, cy, pattern, size, angle=0.0,
+            mask=mask, opacity=opacity, wrap=wrap,
+        )
+        return
+    circ = 2.0 * math.pi * r_circ
+    space = max(1.0, float(spacing))
+    # Evenly space around the full circle without duplicating the start point.
+    n = max(1, int(round(circ / space)))
+    for i in range(n):
+        ang = (2.0 * math.pi * i) / n
+        tang = ang + math.pi * 0.5
+        stamp_pattern_element(
+            pixels,
+            cx + r_circ * math.cos(ang),
+            cy + r_circ * math.sin(ang),
+            pattern,
+            size,
+            angle=tang,
+            mask=mask,
+            opacity=opacity,
+            wrap=wrap,
+        )
 
 
 def _scaled_brush_tip(tip: np.ndarray, diameter: int) -> np.ndarray:
@@ -2581,6 +2911,89 @@ def shade_region_3d(
     rgb = rgb + (max_v - rgb) * ((0.22 + 0.78 * high_n) * spec[..., None])
     # Soft contact shadow on the dark rim so fills read as raised
     shadow = (1.0 - ndotl) * (0.12 + 0.28 * depth_n) * np.clip(1.0 - height * 0.65, 0.0, 1.0)
+    rgb = rgb * (1.0 - shadow[..., None])
+    rgb = np.clip(rgb, 0, max_v)
+
+    alpha = float(color[3])
+    dest = pixels[y0:y1, x0:x1].astype(np.float32)
+    m = sub
+    a = alpha / max_v
+    if a >= 0.999:
+        dest[..., 0][m] = rgb[..., 0][m]
+        dest[..., 1][m] = rgb[..., 1][m]
+        dest[..., 2][m] = rgb[..., 2][m]
+        dest[..., 3][m] = alpha
+    elif a > 0.0:
+        dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
+        dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
+        dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
+        dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
+    pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+
+
+def shade_region_depression(
+    pixels: np.ndarray,
+    region: np.ndarray,
+    color: tuple[int, int, int, int],
+    depth: float = 70.0,
+    highlight: float = 55.0,
+    bevel: float = 40.0,
+    light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
+) -> None:
+    """Carve a filled region inward: inverted height so the fill reads as a depression."""
+    from PIL import Image, ImageFilter
+
+    if not region.any():
+        return
+    h, w = region.shape
+    ys, xs = np.where(region)
+    y0, y1 = max(0, int(ys.min()) - 2), min(h, int(ys.max()) + 3)
+    x0, x1 = max(0, int(xs.min()) - 2), min(w, int(xs.max()) + 3)
+    sub = region[y0:y1, x0:x1]
+    sh, sw = sub.shape
+    mask_f = sub.astype(np.float32)
+
+    bevel_n = max(0.0, min(100.0, bevel)) / 100.0
+    depth_n = max(0.0, min(100.0, depth)) / 100.0
+    high_n = max(0.0, min(100.0, highlight)) / 100.0
+
+    # Same soft edge as classic, then invert so the interior sinks and the lip rises.
+    blur_r = max(1, int((0.015 + 0.08 * bevel_n) * max(sh, sw)))
+    img = Image.fromarray((sub.astype(np.uint8) * 255), mode="L")
+    raised = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=blur_r)), dtype=np.float32) / 255.0
+    height = (1.0 - raised) * mask_f
+
+    gx = np.zeros_like(height)
+    gy = np.zeros_like(height)
+    gx[:, 1:-1] = height[:, 2:] - height[:, :-2]
+    gy[1:-1, :] = height[2:, :] - height[:-2, :]
+    nx = -gx
+    ny = -gy
+    nz = np.full_like(height, 0.35 + 0.45 * bevel_n)
+    inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
+    nx, ny, nz = nx * inv, ny * inv, nz * inv
+
+    lx, ly, lz = normalize_light(*light_dir)
+    ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
+
+    hx, hy, hz = lx, ly, lz + 1.0
+    invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
+    spec_pow = 10.0 + 28.0 * (1.0 - bevel_n)
+    spec = np.clip(nx * hx * invh + ny * hy * invh + nz * hz * invh, 0.0, 1.0) ** spec_pow
+    # Catch light on the raised lip; leave the basin darker.
+    lip = np.clip(height, 0.0, 1.0) * ndotl
+
+    ambient = 1.0 - 0.88 * depth_n
+    diffuse = 0.88 * depth_n
+    # Slightly lower ambient so the well reads recessed.
+    shade = (ambient * 0.92) + diffuse * ndotl + (0.14 + 0.36 * depth_n) * lip
+    max_v = _max_v(pixels)
+    base = np.array(color[:3], dtype=np.float32)
+    rgb = base * shade[..., None]
+    rgb = rgb + (max_v - rgb) * ((0.18 + 0.72 * high_n) * spec[..., None])
+    # Soft occluding shadow in the basin (low height), stronger on the dark wall.
+    basin = np.clip(1.0 - height, 0.0, 1.0)
+    shadow = (0.10 + 0.34 * depth_n) * basin * (0.45 + 0.55 * (1.0 - ndotl))
     rgb = rgb * (1.0 - shadow[..., None])
     rgb = np.clip(rgb, 0, max_v)
 

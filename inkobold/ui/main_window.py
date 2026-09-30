@@ -99,6 +99,7 @@ TOOL_ORDER = [
     ("line", "Line"),
     ("rectangle", "Rectangle"),
     ("curve", "Curve"),
+    ("lay", "Lay"),
     ("brush", "Brush"),
     ("weld_brush", "Weld Brush"),
     ("fill", "Fill"),
@@ -240,6 +241,8 @@ class MainWindow(Gtk.ApplicationWindow):
             "duplicate_layer": self.action_duplicate_layer,
             "delete_layer": self.action_delete_layer,
             "rename_layer": self.action_rename_layer,
+            "move_layer_to_top": self.action_move_layer_to_top,
+            "move_layer_to_bottom": self.action_move_layer_to_bottom,
             "merge_layer_down": self.action_merge_layer_down,
             "merge_all_layers": self.action_merge_all_layers,
             "add_frame": self.action_add_frame,
@@ -363,6 +366,131 @@ class MainWindow(Gtk.ApplicationWindow):
             self._load_active_tool_settings()
         self._set_status()
 
+    def _capture_workspace(self) -> dict:
+        """Snapshot tool options and document UI for .inkobold persistence."""
+        self._stash_active_view()
+        tools: dict = {}
+        for tid, tool in self.tools.items():
+            to_dict = getattr(tool, "to_settings_dict", None)
+            if callable(to_dict):
+                tools[tid] = to_dict()
+        workspace: dict = {
+            "tool_id": self.tool_id,
+            "tools": tools,
+            "mirror": {
+                "enabled": bool(self.mirror.enabled),
+                "orientation": str(self.mirror.orientation),
+                "axes": int(self.mirror.axes),
+            },
+            "grid": {
+                "enabled": bool(self.grid.enabled),
+                "rows": int(self.grid.rows),
+                "columns": int(self.grid.columns),
+            },
+            "tile_wrap": bool(self.tile_wrap),
+        }
+        if 0 <= self._active_tab < len(self._tabs):
+            tab = self._tabs[self._active_tab]
+            workspace["view"] = {
+                "zoom": float(tab.zoom),
+                "pan_x": float(tab.pan_x),
+                "pan_y": float(tab.pan_y),
+            }
+        return workspace
+
+    def _apply_workspace(self, workspace: Optional[dict], *, restore_view: bool = True) -> None:
+        """Restore tool options / UI previously saved into a document workspace."""
+        if not isinstance(workspace, dict):
+            return
+
+        tools_data = workspace.get("tools")
+        if isinstance(tools_data, dict):
+            for tid, data in tools_data.items():
+                tool = self.tools.get(str(tid))
+                apply = getattr(tool, "apply_settings_dict", None) if tool is not None else None
+                if callable(apply) and isinstance(data, dict):
+                    apply(data)
+
+        mirror = workspace.get("mirror")
+        if isinstance(mirror, dict):
+            self.mirror.enabled = bool(mirror.get("enabled", False))
+            orient = str(mirror.get("orientation", "horizontal"))
+            if orient in {k for k, _ in ORIENTATIONS}:
+                self.mirror.orientation = orient
+            try:
+                self.mirror.axes = int(mirror.get("axes", 1))
+            except (TypeError, ValueError):
+                pass
+            self.mirror.clamp()
+            if hasattr(self, "mirror_toggle"):
+                self.mirror_toggle.set_active(self.mirror.enabled)
+            if hasattr(self, "mirror_opts"):
+                self.mirror_opts.set_visible(self.mirror.enabled)
+            if hasattr(self, "mirror_orient_dropdown"):
+                idx = next(
+                    (i for i, (k, _) in enumerate(ORIENTATIONS) if k == self.mirror.orientation),
+                    0,
+                )
+                self.mirror_orient_dropdown.set_selected(idx)
+            if hasattr(self, "mirror_axes_spin"):
+                self.mirror_axes_spin.set_value(self.mirror.axes)
+
+        grid = workspace.get("grid")
+        if isinstance(grid, dict):
+            self.grid.enabled = bool(grid.get("enabled", False))
+            try:
+                self.grid.rows = int(grid.get("rows", self.grid.rows))
+                self.grid.columns = int(grid.get("columns", self.grid.columns))
+            except (TypeError, ValueError):
+                pass
+            self.grid.clamp()
+            action = self.lookup_action("show_grid")
+            if action is not None:
+                action.change_state(GLib.Variant.new_boolean(self.grid.enabled))
+
+        if "tile_wrap" in workspace:
+            enabled = bool(workspace.get("tile_wrap"))
+            self.tile_wrap = enabled
+            action = self.lookup_action("tile_wrap")
+            if action is not None:
+                action.change_state(GLib.Variant.new_boolean(enabled))
+            elif hasattr(self, "tile_wrap_toggle"):
+                self.tile_wrap_toggle.set_active(enabled)
+
+        tid = workspace.get("tool_id")
+        if isinstance(tid, str) and tid in self.tools:
+            self.select_tool(tid)
+        if self.app_settings.color_follows_tools:
+            c = self._active_tool().color
+            self._shared_color = (int(c[0]), int(c[1]), int(c[2]), int(c[3]))
+        self._load_active_tool_settings()
+
+        if restore_view:
+            view = workspace.get("view")
+            if isinstance(view, dict) and 0 <= self._active_tab < len(self._tabs):
+                tab = self._tabs[self._active_tab]
+                try:
+                    tab.zoom = float(view.get("zoom", tab.zoom))
+                    tab.pan_x = float(view.get("pan_x", tab.pan_x))
+                    tab.pan_y = float(view.get("pan_y", tab.pan_y))
+                except (TypeError, ValueError):
+                    pass
+                r = self.canvas.renderer
+                r.zoom = tab.zoom
+                r.pan_x = tab.pan_x
+                r.pan_y = tab.pan_y
+
+        if hasattr(self, "canvas"):
+            self.canvas.refresh_guides()
+            self.canvas.queue_render()
+
+    def _save_document(self, path: Path | None = None) -> Path:
+        """Persist the active document including the current workspace snapshot."""
+        if not self.document:
+            raise RuntimeError("No document to save")
+        self.document.workspace = self._capture_workspace()
+        return self.document.save(path)
+
     def _active_tool(self):
         return self.tools[self.tool_id]
 
@@ -421,7 +549,7 @@ class MainWindow(Gtk.ApplicationWindow):
             if show_fill3d_type:
                 ftype = getattr(tool, "fill3d_type", "classic")
                 self.fill3d_type_dropdown.set_selected(
-                    {"classic": 0, "addiction": 1, "wavy": 2, "drift": 3}.get(ftype, 0)
+                    {"classic": 0, "addiction": 1, "wavy": 2, "drift": 3, "depression": 4}.get(ftype, 0)
                 )
             show_freq = bool(getattr(tool, "uses_frequency", False))
             self.frequency_row.set_visible(show_freq)
@@ -441,8 +569,21 @@ class MainWindow(Gtk.ApplicationWindow):
                 corridor_rgba.red, corridor_rgba.green = cr / 255.0, cg / 255.0
                 corridor_rgba.blue, corridor_rgba.alpha = cb / 255.0, ca / 255.0
                 self.corridor_color_btn.set_rgba(corridor_rgba)
+            show_lay = bool(getattr(tool, "uses_lay_options", False))
+            self.lay_opts_row.set_visible(show_lay)
+            if show_lay:
+                lmode = getattr(tool, "lay_mode", "line")
+                self.lay_mode_dropdown.set_selected(
+                    {"line": 0, "freehand": 1, "arc": 2, "circle": 3}.get(lmode, 0)
+                )
+                self.lay_spacing_spin.set_value(float(getattr(tool, "lay_spacing", 40.0)))
+                self.arc_degrees_spin.set_value(float(getattr(tool, "arc_degrees", 180)))
+            if show_fill or show_lay:
                 self._refresh_pattern_dropdown(select_path=getattr(tool, "pattern_path", None))
             self._update_fill_mode_visibility()
+            self._update_lay_mode_visibility()
+            if show_lay:
+                self.size_label.set_label("Element Size")
             show_brush_opts = bool(getattr(tool, "uses_brush_options", False))
             self.brush_opts_row.set_visible(show_brush_opts)
             if show_brush_opts:
@@ -504,7 +645,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 src = getattr(tool, "font_source", "system")
                 self.font_source_dropdown.set_selected(1 if src == "library" else 0)
                 self._refresh_font_dropdown(select_path=getattr(tool, "font_path", None))
-            else:
+            elif not bool(getattr(tool, "uses_lay_options", False)):
                 self.size_label.set_label("Size")
         finally:
             self._syncing_tool_ui = False
@@ -514,18 +655,34 @@ class MainWindow(Gtk.ApplicationWindow):
         show_arc = (
             bool(getattr(tool, "uses_curve_modes", False))
             and getattr(tool, "curve_mode", "freehand") == "arc"
+        ) or (
+            bool(getattr(tool, "uses_lay_options", False))
+            and getattr(tool, "lay_mode", "line") == "arc"
         )
         self.arc_degrees_row.set_visible(show_arc)
+
+    def _update_lay_mode_visibility(self) -> None:
+        self._update_curve_mode_visibility()
+
+    def _tool_uses_pattern_picker(self, tool=None) -> bool:
+        tool = tool if tool is not None else self._active_tool()
+        if getattr(tool, "uses_lay_options", False):
+            return True
+        return (
+            bool(getattr(tool, "uses_fill_options", False))
+            and getattr(tool, "fill_mode", "color") == "pattern"
+        )
 
     def _update_fill_mode_visibility(self) -> None:
         tool = self._active_tool()
         uses_fill = bool(getattr(tool, "uses_fill_options", False))
+        uses_lay = bool(getattr(tool, "uses_lay_options", False))
         mode = getattr(tool, "fill_mode", "color") if uses_fill else "color"
         pattern_mode = mode == "pattern"
         maze_mode = mode == "maze"
         puzzle_mode = mode == "puzzle"
         procedural = maze_mode or puzzle_mode
-        show_color = bool(getattr(tool, "uses_color", True)) and not pattern_mode
+        show_color = bool(getattr(tool, "uses_color", True)) and not pattern_mode and not uses_lay
         self.color_label.set_visible(show_color)
         self.color_btn.set_visible(show_color)
         if maze_mode:
@@ -546,10 +703,11 @@ class MainWindow(Gtk.ApplicationWindow):
             self.color_label.set_label("Start Color")
         else:
             self.color_label.set_label("Color")
-        self.pattern_row.set_visible(pattern_mode)
-        self.tile_scale_row.set_visible(pattern_mode)
-        self.maze_cell_row.set_visible(procedural)
-        self.corridor_color_row.set_visible(procedural)
+        self.pattern_row.set_visible(self._tool_uses_pattern_picker(tool))
+        self.tile_scale_row.set_visible(uses_fill and pattern_mode)
+        self.maze_cell_row.set_visible(uses_fill and procedural)
+        self.corridor_color_row.set_visible(uses_fill and procedural)
+        self.lay_spacing_row.set_visible(uses_lay)
 
     def _update_brush_mode_visibility(self) -> None:
         tool = self._active_tool()
@@ -589,7 +747,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not paths:
             self._set_pattern_preview(None)
             tool = self._active_tool()
-            if getattr(tool, "uses_fill_options", False):
+            if self._tool_uses_pattern_picker(tool):
                 tool.set_pattern_path(None)
             empty = Gtk.Label(label="(no patterns)", xalign=0.5)
             empty.add_css_class("dim-label")
@@ -628,7 +786,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._syncing_tool_ui = prev_sync
         self._set_pattern_preview(paths[idx])
         tool = self._active_tool()
-        if getattr(tool, "uses_fill_options", False):
+        if self._tool_uses_pattern_picker(tool):
             tool.set_pattern_path(paths[idx])
 
     def _set_brush_preview(self, path: Optional[Path]) -> None:
@@ -752,7 +910,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if self._syncing_tool_ui or not btn.get_active():
             return
         tool = self._active_tool()
-        if not getattr(tool, "uses_fill_options", False):
+        if not self._tool_uses_pattern_picker(tool):
             return
         paths = getattr(self, "_pattern_paths", [])
         if 0 <= idx < len(paths):
@@ -1034,8 +1192,26 @@ class MainWindow(Gtk.ApplicationWindow):
         if self._syncing_tool_ui:
             return
         tool = self._active_tool()
-        if getattr(tool, "uses_curve_modes", False):
+        if getattr(tool, "uses_curve_modes", False) or getattr(tool, "uses_lay_options", False):
             tool.arc_degrees = float(spin.get_value())
+
+    def _on_lay_mode_changed(self, dropdown: Gtk.DropDown, *_a) -> None:
+        if self._syncing_tool_ui:
+            return
+        tool = self._active_tool()
+        if not getattr(tool, "uses_lay_options", False):
+            return
+        tool.lay_mode = ("line", "freehand", "arc", "circle")[
+            min(int(dropdown.get_selected()), 3)
+        ]
+        self._update_lay_mode_visibility()
+
+    def _on_lay_spacing_changed(self, spin: Gtk.SpinButton) -> None:
+        if self._syncing_tool_ui:
+            return
+        tool = self._active_tool()
+        if getattr(tool, "uses_lay_options", False):
+            tool.lay_spacing = float(spin.get_value())
 
     def _on_brush_changed(self, spin: Gtk.SpinButton) -> None:
         if self._syncing_tool_ui:
@@ -1066,7 +1242,9 @@ class MainWindow(Gtk.ApplicationWindow):
         tool = self._active_tool()
         if not getattr(tool, "uses_fill3d_types", False):
             return
-        tool.fill3d_type = ("classic", "addiction", "wavy", "drift")[min(dropdown.get_selected(), 3)]
+        tool.fill3d_type = ("classic", "addiction", "wavy", "drift", "depression")[
+            min(dropdown.get_selected(), 4)
+        ]
 
     def _on_frequency_changed(self, spin: Gtk.SpinButton) -> None:
         if self._syncing_tool_ui:
@@ -1678,19 +1856,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.eraser_mode_dropdown.connect("notify::selected", self._on_eraser_mode_changed)
         self.eraser_mode_row.append(self.eraser_mode_dropdown)
 
-        self.arc_degrees_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
-        opts.append(self.arc_degrees_row)
-        self.arc_degrees_row.append(Gtk.Label(label="Degrees", xalign=0))
-        self.arc_degrees_spin = Gtk.SpinButton.new_with_range(1, 359, 1)
-        self.arc_degrees_spin.set_value(180)
-        self.arc_degrees_spin.set_hexpand(True)
-        self.arc_degrees_spin.set_tooltip_text(
-            "Central angle of the arc. 180° draws a semicircle using the drag as the diameter. "
-            "Alt flips which side the arc bulges toward."
-        )
-        self.arc_degrees_spin.connect("value-changed", self._on_arc_degrees_changed)
-        self.arc_degrees_row.append(self.arc_degrees_spin)
-
         self.replace_action_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         opts.append(self.replace_action_row)
         self.replace_action_row.append(Gtk.Label(label="Action", xalign=0))
@@ -1730,8 +1895,39 @@ class MainWindow(Gtk.ApplicationWindow):
         self.fill_mode_dropdown.connect("notify::selected", self._on_fill_mode_changed)
         self.fill_opts_row.append(self.fill_mode_dropdown)
 
-        self.pattern_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
-        self.fill_opts_row.append(self.pattern_row)
+        self.lay_opts_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
+        opts.append(self.lay_opts_row)
+        self.lay_opts_row.append(Gtk.Label(label="Shape", xalign=0))
+        lay_modes = Gtk.StringList.new(["Line", "Freehand", "Arc", "Circle"])
+        self.lay_mode_dropdown = Gtk.DropDown(model=lay_modes)
+        self.lay_mode_dropdown.set_hexpand(True)
+        self.lay_mode_dropdown.set_tooltip_text(
+            "Line: straight path (Shift snaps to 45°). "
+            "Freehand: fit a curve to your drag. "
+            "Arc: circular arc; set Degrees for the central angle. "
+            "Circle: press center, drag radius (Alt = drag as diameter)."
+        )
+        self.lay_mode_dropdown.connect("notify::selected", self._on_lay_mode_changed)
+        self.lay_opts_row.append(self.lay_mode_dropdown)
+
+        # After Curve Mode / Lay Shape so Degrees sits next to the active shape control.
+        self.arc_degrees_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
+        opts.append(self.arc_degrees_row)
+        self.arc_degrees_row.append(Gtk.Label(label="Degrees", xalign=0))
+        self.arc_degrees_spin = Gtk.SpinButton.new_with_range(1, 359, 1)
+        self.arc_degrees_spin.set_value(180)
+        self.arc_degrees_spin.set_hexpand(True)
+        self.arc_degrees_spin.set_tooltip_text(
+            "Central angle of the arc. 180° draws a semicircle using the drag as the diameter. "
+            "Alt flips which side the arc bulges toward."
+        )
+        self.arc_degrees_spin.connect("value-changed", self._on_arc_degrees_changed)
+        self.arc_degrees_row.append(self.arc_degrees_spin)
+
+        # Shared by Fill (pattern mode) and Lay — keep as a top-level opts child
+        # so it stays visible when fill_opts_row is hidden.
+        self.pattern_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
+        opts.append(self.pattern_row)
         pat_head = Gtk.Box(spacing=4)
         pat_head.append(Gtk.Label(label="Pattern", xalign=0, hexpand=True))
         refresh_pat = Gtk.Button(label="↻")
@@ -1752,7 +1948,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.pattern_menu_btn.set_hexpand(True)
         self.pattern_menu_btn.set_always_show_arrow(True)
         self.pattern_menu_btn.set_child(self.pattern_preview)
-        self.pattern_menu_btn.set_tooltip_text("Choose a pattern tile")
+        self.pattern_menu_btn.set_tooltip_text("Choose a pattern from Libraries → Patterns")
         pattern_popover = Gtk.Popover()
         pattern_scroll = Gtk.ScrolledWindow()
         pattern_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -1772,8 +1968,21 @@ class MainWindow(Gtk.ApplicationWindow):
         self.pattern_menu_btn.set_popover(pattern_popover)
         self.pattern_row.append(self.pattern_menu_btn)
 
+        self.lay_spacing_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
+        opts.append(self.lay_spacing_row)
+        self.lay_spacing_row.append(Gtk.Label(label="Distance", xalign=0))
+        self.lay_spacing_spin = Gtk.SpinButton.new_with_range(1.0, 512.0, 1.0)
+        self.lay_spacing_spin.set_digits(0)
+        self.lay_spacing_spin.set_value(40.0)
+        self.lay_spacing_spin.set_hexpand(True)
+        self.lay_spacing_spin.set_tooltip_text(
+            "Spacing between laid pattern elements along the path (pixels)"
+        )
+        self.lay_spacing_spin.connect("value-changed", self._on_lay_spacing_changed)
+        self.lay_spacing_row.append(self.lay_spacing_spin)
+
         self.tile_scale_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
-        self.fill_opts_row.append(self.tile_scale_row)
+        opts.append(self.tile_scale_row)
         self.tile_scale_row.append(Gtk.Label(label="Tile Scale", xalign=0))
         self.tile_scale_spin = Gtk.SpinButton.new_with_range(0.1, 16.0, 0.1)
         self.tile_scale_spin.set_digits(2)
@@ -1784,7 +1993,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.tile_scale_row.append(self.tile_scale_spin)
 
         self.maze_cell_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
-        self.fill_opts_row.append(self.maze_cell_row)
+        opts.append(self.maze_cell_row)
         self.maze_cell_label = Gtk.Label(label="Cell Size", xalign=0)
         self.maze_cell_row.append(self.maze_cell_label)
         self.maze_cell_spin = Gtk.SpinButton.new_with_range(3.0, 128.0, 1.0)
@@ -1796,7 +2005,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.maze_cell_row.append(self.maze_cell_spin)
 
         self.corridor_color_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
-        self.fill_opts_row.append(self.corridor_color_row)
+        opts.append(self.corridor_color_row)
         self.corridor_color_label = Gtk.Label(label="Corridor Color", xalign=0)
         self.corridor_color_row.append(self.corridor_color_label)
         self.corridor_color_btn = ColorSelectButton(use_alpha=True)
@@ -1910,13 +2119,16 @@ class MainWindow(Gtk.ApplicationWindow):
         self.fill3d_type_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.shade3d_row.append(self.fill3d_type_row)
         self.fill3d_type_row.append(Gtk.Label(label="Fill Type", xalign=0))
-        fill3d_types = Gtk.StringList.new(["Classic", "Addiction", "Wavy", "Drift"])
+        fill3d_types = Gtk.StringList.new(
+            ["Classic", "Addiction", "Wavy", "Drift", "Depression"]
+        )
         self.fill3d_type_dropdown = Gtk.DropDown(model=fill3d_types)
         self.fill3d_type_dropdown.set_hexpand(True)
         self.fill3d_type_dropdown.set_tooltip_text(
             "Classic: soft emboss. Addiction: deeper multi-scale sculpting with lobed ridges and dual highlights. "
             "Wavy: corner-distance ripples with light from top corners and shadow from bottom. "
-            "Drift: Addiction lighting with silhouette bands and directional ridges (no center pinch)."
+            "Drift: Addiction lighting with silhouette bands and directional ridges (no center pinch). "
+            "Depression: inverted classic — carved inward with a dark basin and lit lip."
         )
         self.fill3d_type_dropdown.connect("notify::selected", self._on_fill3d_type_changed)
         self.fill3d_type_row.append(self.fill3d_type_dropdown)
@@ -2297,7 +2509,7 @@ class MainWindow(Gtk.ApplicationWindow):
         # Libraries tab index 1 — refresh pattern/font lists when visiting Tools again
         if page_num == 0:
             tool = self._active_tool()
-            if getattr(tool, "uses_fill_options", False):
+            if self._tool_uses_pattern_picker(tool):
                 self._refresh_pattern_dropdown(select_path=getattr(tool, "pattern_path", None))
             if getattr(tool, "uses_brush_options", False):
                 self._refresh_brush_dropdown(select_path=getattr(tool, "brush_path", None))
@@ -3267,7 +3479,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 ".inkobold",
                 ".scribbler",
             }:
-                self.document.save()
+                self._save_document()
                 self._set_status()
                 self._close_tab(index)
                 return
@@ -3285,7 +3497,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not file or not self.document:
             self._closing_tab_index = None
             return
-        self.document.save(Path(file.get_path()))
+        self._save_document(Path(file.get_path()))
         self._set_status()
         self._closing_tab_index = None
         if index is not None:
@@ -3368,6 +3580,7 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib.idle_add(self._pack_sidebar_headers_top)
 
     def _rebuild_frames(self) -> None:
+        self._dismiss_frame_context_menu()
         self._syncing_frames = True
         try:
             while (child := self.frame_list.get_row_at_index(0)) is not None:
@@ -3389,11 +3602,55 @@ class MainWindow(Gtk.ApplicationWindow):
                 row.set_child(top)
                 row._frame_index = i  # type: ignore[attr-defined]
                 self._attach_frame_drag(top, i)
+                self._attach_frame_context_menu(row)
                 self.frame_list.append(row)
                 if i == self.document.current_frame_index:
                     self.frame_list.select_row(row)
         finally:
             self._syncing_frames = False
+
+    def _frame_context_menu_model(self) -> Gio.Menu:
+        menu = getattr(self, "_frame_context_menu", None)
+        if menu is None:
+            menu = Gio.Menu()
+            menu.append("Duplicate Frame", "win.duplicate_frame")
+            menu.append("Delete Frame", "win.delete_frame")
+            self._frame_context_menu = menu
+        return menu
+
+    def _dismiss_frame_context_menu(self) -> None:
+        popover = getattr(self, "_frame_context_popover", None)
+        if popover is None:
+            return
+        popover.popdown()
+        popover.unparent()
+        self._frame_context_popover = None
+
+    def _attach_frame_context_menu(self, row: Gtk.ListBoxRow) -> None:
+        click = Gtk.GestureClick.new()
+        click.set_button(Gdk.BUTTON_SECONDARY)
+        click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+
+        def _pressed(gesture: Gtk.GestureClick, n_press: int, x: float, y: float, r=row) -> None:
+            if n_press != 1:
+                return
+            self.frame_list.select_row(r)
+            self._dismiss_frame_context_menu()
+            popover = Gtk.PopoverMenu.new_from_model(self._frame_context_menu_model())
+            popover.set_parent(r)
+            popover.set_has_arrow(False)
+            rect = Gdk.Rectangle()
+            rect.x = int(x)
+            rect.y = int(y)
+            rect.width = 1
+            rect.height = 1
+            popover.set_pointing_to(rect)
+            self._frame_context_popover = popover
+            popover.popup()
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+
+        click.connect("pressed", _pressed)
+        row.add_controller(click)
 
     def _attach_frame_drag(self, widget: Gtk.Widget, frame_index: int) -> None:
         source = Gtk.DragSource.new()
@@ -3673,6 +3930,9 @@ class MainWindow(Gtk.ApplicationWindow):
             menu = Gio.Menu()
             menu.append("Duplicate Layer", "win.duplicate_layer")
             menu.append("Rename Layer…", "win.rename_layer")
+            menu.append("Move to Top", "win.move_layer_to_top")
+            menu.append("Move to Bottom", "win.move_layer_to_bottom")
+            menu.append("Delete Layer", "win.delete_layer")
             menu.append("Merge with Layer Below", "win.merge_layer_down")
             menu.append("Merge All", "win.merge_all_layers")
             self._layer_context_menu = menu
@@ -4203,13 +4463,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.action_stop_animation()
         doc = Document.open(path)
         hist = History(max_steps=self.app_settings.history_steps)
-        self._add_tab(doc, hist, fit=True)
+        has_view = isinstance((doc.workspace or {}).get("view"), dict)
+        self._add_tab(doc, hist, fit=not has_view)
+        self._apply_workspace(doc.workspace, restore_view=has_view)
 
     def action_save(self, *_a) -> None:
         if not self.document:
             return
         if self.document.path and self.document.path.suffix.lower() in {".inkobold", ".scribbler"}:
-            self.document.save()
+            self._save_document()
             self._set_status()
             return
         self.action_save_as()
@@ -4228,7 +4490,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not file or not self.document:
             self._quit_after_save = False
             return
-        self.document.save(Path(file.get_path()))
+        self._save_document(Path(file.get_path()))
         self._set_status()
         if self._quit_after_save:
             self._quit_after_save = False
@@ -4286,7 +4548,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._do_quit()
             return
         if self.document.path and self.document.path.suffix.lower() in {".inkobold", ".scribbler"}:
-            self.document.save()
+            self._save_document()
             self._set_status()
             # More unsaved tabs?
             nxt = self._first_unsaved_tab_index()
@@ -4521,6 +4783,33 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self._push_history()
         self.document.delete_layer(self.document.active_layer_index)
+        self.canvas.renderer.invalidate()
+        self._rebuild_layers()
+        self.canvas.queue_render()
+        self._set_status()
+
+    def action_move_layer_to_top(self, *_a) -> None:
+        if not self.document:
+            return
+        from_idx = self.document.active_layer_index
+        to_idx = len(self.document.layers) - 1
+        if from_idx >= to_idx:
+            return
+        self._push_history()
+        self.document.move_layer(from_idx, to_idx)
+        self.canvas.renderer.invalidate()
+        self._rebuild_layers()
+        self.canvas.queue_render()
+        self._set_status()
+
+    def action_move_layer_to_bottom(self, *_a) -> None:
+        if not self.document:
+            return
+        from_idx = self.document.active_layer_index
+        if from_idx <= 0:
+            return
+        self._push_history()
+        self.document.move_layer(from_idx, 0)
         self.canvas.renderer.invalidate()
         self._rebuild_layers()
         self.canvas.queue_render()

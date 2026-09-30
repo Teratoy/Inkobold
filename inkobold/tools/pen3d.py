@@ -7,6 +7,7 @@ from inkobold.tools.paint import (
     flood_fill_region,
     shade_region_3d,
     shade_region_addiction,
+    shade_region_depression,
     shade_region_drift,
     shade_region_wavy,
     stroke_segment_3d,
@@ -17,6 +18,7 @@ _FILL3D_SHADERS = {
     "addiction": shade_region_addiction,
     "wavy": shade_region_wavy,
     "drift": shade_region_drift,
+    "depression": shade_region_depression,
 }
 
 

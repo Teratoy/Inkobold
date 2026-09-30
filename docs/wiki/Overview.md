@@ -8,9 +8,10 @@ Inkobold is a **GPU-composited** painting app: you draw into CPU layer buffers; 
 
 ## What it is good at
 
-- Multilayer documents with undo history
+- Multilayer documents with undo history (tool options and view saved per document)
 - Frame-based animation and onion skin
 - Pressure-aware brushes (when the input path reports pressure)
+- Pattern laying along paths ([[Lay]])
 - Lit 3D strokes / fills driven by a movable **Sun**
 - Procedural / stylize effects (including Flora)
 - Seamless tile painting (Tile Preview + Wrap Moves)

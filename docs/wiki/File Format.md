@@ -4,7 +4,7 @@ tags: [inkobold, wiki]
 
 # File Format
 
-`.inkobold` is a ZIP. Current schema **version: 3**.
+`.inkobold` is a ZIP. Current schema **version: 4**.
 
 ## Layout
 
@@ -20,7 +20,7 @@ Save aliases also accept `.scribbler` and `.zip`.
 
 ```json
 {
-  "version": 3,
+  "version": 4,
   "width": 0,
   "height": 0,
   "dpi": 72,
@@ -48,14 +48,24 @@ Save aliases also accept `.scribbler` and `.zip`.
       ]
     }
   ],
-  "layers": []
+  "layers": [],
+  "workspace": {
+    "tool_id": "pen",
+    "tools": {},
+    "mirror": { "enabled": false, "orientation": "horizontal", "axes": 1 },
+    "grid": { "enabled": false, "rows": 8, "columns": 8 },
+    "tile_wrap": false,
+    "view": { "zoom": 1.0, "pan_x": 40.0, "pan_y": 40.0 }
+  }
 }
 ```
 
 `layers` duplicates the current frame for older readers.
 
+`workspace` (v4) stores document-scoped tool options and view UI. Older files without it open normally; app-wide prefs (theme, shortcuts, sun, …) stay in [[Paths and Settings]].
+
 ## Also opens
 
 `.png` `.jpg` `.jpeg` `.webp` `.bmp` `.gif` (multi-frame GIF → [[Animation]]).
 
-Related: [[Layers]] · [[Architecture]]
+Related: [[Layers]] · [[Architecture]] · [[Tools]]

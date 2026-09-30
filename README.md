@@ -9,7 +9,7 @@ Version **0.1.0** · Python **≥3.11** · App id `trinkets.inkobold`
 - **File** — Multi-document tabs; New File (pixel size), Open, Save (`.inkobold` multilayer ZIP), Export, Export Separated Layers, Import Image as Layer
 - **Layers** — RGBA layers (8 or 16 bpc), visibility, opacity, offsets, GPU composite; add / duplicate / rename / delete / merge down / merge all
 - **Animation** — Frames with FPS playback; onion-skin of the previous frame; export GIF or PNG sequence
-- **Tools** — Pen, Line, Rectangle, Curve (freehand / arc / circle), Brush (round / custom tip / bubbles), Weld Brush, Fill, Gradient, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
+- **Tools** — Pen, Line, Rectangle, Curve (freehand / arc / circle), Lay (pattern stamps along a path), Brush (round / custom tip / bubbles), Weld Brush, Fill, Gradient, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
 - **Effects** — Blur & Sharpen, Stylize (Pixelate, Drop Shadow, Dither, Posterize, **Flora**), Color, Distort, Edge & Depth, Materials (Metal Relief, Milk); apply to active layer or all layers
 - **Libraries** — User brushes, patterns, and fonts under the platform data dir (see Paths below)
 - **Input** — GDK drawing path; on Linux, optional libinput poll + libwacom tablet identification
@@ -58,7 +58,7 @@ Shortcuts are rebindable under **Settings → Shortcuts**. Defaults are listed i
 
 ## File format
 
-`.inkobold` is a ZIP (`document.json` **version 3**) with per-frame layers:
+`.inkobold` is a ZIP (`document.json` **version 4**) with per-frame layers. Optional `workspace` stores per-document tool options and view (mirror, grid, zoom/pan). Older files without it open normally.
 
 ```
 document.json
@@ -66,7 +66,7 @@ frames/FFF/layers/LLL.png   # or .npy for 16 bpc
 layers/LLL.png              # legacy mirror of the current frame
 ```
 
-Also opens PNG / JPEG / WebP / BMP / GIF (multi-frame GIF → animation).
+Also opens PNG / JPEG / WebP / BMP / GIF (multi-frame GIF → animation). Details: [File Format](https://github.com/Teratoy/Inkobold/wiki/File-Format).
 
 ## Author
 
