@@ -62,11 +62,24 @@ def _rgba(r: int, g: int, b: int, a: float) -> str:
     return f"rgba({int(r)},{int(g)},{int(b)},{a:.3f})"
 
 
+def _complement_rgb(r: int, g: int, b: int) -> tuple[int, int, int]:
+    """Opposite hue of ``(r, g, b)``, with the same near-black lift as accents."""
+    h, s, l = rgb_to_hsl(r, g, b)
+    if s < 0.05:
+        return r, g, b
+    ch = (h + 0.5) % 1.0
+    if l < 0.18:
+        return hsl_to_rgb(ch, s, 0.28)
+    return hsl_to_rgb(ch, s, l)
+
+
 def shades_from_rgb(r: int, g: int, b: int) -> dict[str, str]:
     """Derive a DaemonDomain-style glass palette from a seed accent color.
 
     Any RGB can be used. Near-white keeps the classic black/white look; every
     other seed (including greys, pastels, and neons) becomes the chrome accent.
+    Native GTK selection chrome (scales, focus rings, tab indicators) uses the
+    complementary hue so it stays distinct from the accent.
     """
     h, s, l = rgb_to_hsl(r, g, b)
 
@@ -82,6 +95,8 @@ def shades_from_rgb(r: int, g: int, b: int) -> dict[str, str]:
             "dim": "#737373",
             "accent": "#ffffff",
             "accent_glow": "rgba(255,255,255,0.35)",
+            "complement": "#ffffff",
+            "complement_glow": "rgba(255,255,255,0.35)",
             "separator": "#3a3a3a",
             "button": "#12161c",
             "button_hover": "#1c222b",
@@ -102,6 +117,7 @@ def shades_from_rgb(r: int, g: int, b: int) -> dict[str, str]:
     ar, ag, ab = r, g, b
     if l < 0.18:
         ar, ag, ab = hsl_to_rgb(h, s, 0.28)
+    cr, cg, cb = _complement_rgb(r, g, b)
 
     # Chrome surfaces stay dark; tint strength follows seed chroma.
     chrome_s = 0.0 if s < 0.05 else max(0.12, min(0.65, s))
@@ -119,6 +135,8 @@ def shades_from_rgb(r: int, g: int, b: int) -> dict[str, str]:
         "dim": _hex(shade(chrome_s * 0.2, 0.48)),
         "accent": _hex((ar, ag, ab)),
         "accent_glow": _rgba(ar, ag, ab, 0.40),
+        "complement": _hex((cr, cg, cb)),
+        "complement_glow": _rgba(cr, cg, cb, 0.40),
         "separator": _hex(shade(chrome_s * 0.4, 0.26)),
         "button": _hex(shade(chrome_s * 0.4, 0.14)),
         "button_hover": _hex(shade(chrome_s * 0.45, 0.20)),
@@ -138,6 +156,15 @@ def shades_from_rgb(r: int, g: int, b: int) -> dict[str, str]:
 def _glass_css(p: dict[str, str]) -> str:
     """Shared DaemonDomain glass rules parameterized by palette."""
     return f"""
+/* Retarget native GTK/Breeze selection chrome to the theme complement. */
+@define-color accent_color {p["complement"]};
+@define-color accent_bg_color {p["complement"]};
+@define-color theme_selected_bg_color {p["complement"]};
+@define-color theme_selected_bg_color_breeze {p["complement"]};
+@define-color theme_button_decoration_hover_breeze {p["complement"]};
+@define-color theme_button_decoration_focus_breeze {p["complement"]};
+@define-color theme_view_active_decoration_color_breeze {p["complement"]};
+
 * {{
     font-family: "Tomorrow", sans-serif;
     letter-spacing: 0.4px;
@@ -365,6 +392,15 @@ notebook > header tabs tab:checked {{
     color: {p["text"]};
     background: transparent;
     border-bottom-color: {p["accent"]};
+    box-shadow: inset 0 -2px 0 {p["complement"]};
+}}
+
+notebook > header.top > tabs > tab:checked,
+notebook > header.bottom > tabs > tab:checked {{
+    border-top-color: transparent;
+    border-bottom-color: {p["accent"]};
+    background: transparent;
+    box-shadow: inset 0 -2px 0 {p["complement"]};
 }}
 
 button {{
@@ -433,9 +469,9 @@ entry, spinbutton {{
     box-shadow: none;
 }}
 
-entry:focus, spinbutton:focus-within {{
-    border-color: {p["border_strong"]};
-    box-shadow: 0 0 0 3px rgba(255,255,255,0.08);
+entry:focus, spinbutton:focus, spinbutton:focus-within, spinbutton text:focus {{
+    border-color: {p["complement"]};
+    box-shadow: 0 0 10px {p["complement_glow"]};
 }}
 
 list {{
@@ -540,6 +576,33 @@ scrolledwindow slider {{
 
 scrolledwindow slider:hover {{
     background: linear-gradient(180deg, {p["accent"]}, #555555);
+}}
+
+scale trough {{
+    background: rgba(0,0,0,0.35);
+    border: 1px solid {p["border_soft"]};
+    border-radius: 6px;
+    min-height: 6px;
+}}
+
+scale highlight {{
+    background: {p["complement"]};
+    border: 1px solid {p["complement"]};
+    border-radius: 6px;
+}}
+
+scale slider {{
+    background: linear-gradient(180deg, #555555, #333333);
+    border: 1px solid {p["border"]};
+    border-radius: 8px;
+    min-width: 14px;
+    min-height: 22px;
+    box-shadow: 0 0 8px {p["accent_glow"]};
+}}
+
+scale:focus-within slider {{
+    border-color: {p["complement"]};
+    box-shadow: 0 0 10px {p["complement_glow"]};
 }}
 
 headerbar {{

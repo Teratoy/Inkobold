@@ -125,5 +125,6 @@ class Fill3DTool(BaseTool):
             highlight=ctx.highlight,
             bevel=ctx.bevel,
             light_dir=ctx.light_dir,
+            wrap=ctx.tile_wrap,
         )
         ctx.document.mark_dirty()

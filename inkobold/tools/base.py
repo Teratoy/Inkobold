@@ -243,7 +243,7 @@ class BaseTool:
         return sel.mask if sel.active else None
 
     def _radius(self, ctx: ToolContext) -> float:
-        return max(0.5, ctx.brush_size * (0.35 + 0.65 * ctx.pressure))
+        return max(0.1, ctx.brush_size * (0.35 + 0.65 * ctx.pressure))
 
     def _opacity_factor(self, ctx: ToolContext) -> float:
         return max(0.0, min(100.0, float(ctx.opacity))) / 100.0

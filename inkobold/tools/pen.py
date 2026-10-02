@@ -20,7 +20,7 @@ class PenTool(BaseTool):
         self._ly = 0.0
 
     def _radius(self, ctx: ToolContext) -> float:
-        return max(0.5, float(ctx.brush_size))
+        return max(0.1, float(ctx.brush_size))
 
     def on_press(self, ctx: ToolContext, x: float, y: float, shift: bool = False, alt: bool = False) -> None:
         self._drawing = True

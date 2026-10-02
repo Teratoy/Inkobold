@@ -28,12 +28,13 @@ def fill_light_from_key(
 class SunLight:
     """Document-space sun guide that drives directional shading.
 
-    When *enabled*, a sun glyph is drawn on the canvas and its position
-    (relative to the document center) sets the key-light azimuth. Elevation
-    controls how frontal vs. raking the light is. When disabled, shaders fall
-    back to :data:`DEFAULT_LIGHT_DIR`.
+    When *active*, position (relative to the document center) sets the
+    key-light azimuth and elevation controls how frontal vs. raking the
+    light is. When inactive, shaders use the classic pre-sun defaults.
+    *enabled* only controls whether the sun glyph is drawn and draggable.
     """
 
+    active: bool = True
     enabled: bool = False
     # Normalized document position (0–1). Default upper-left ≈ classic key.
     x_norm: float = 0.18
@@ -42,6 +43,7 @@ class SunLight:
     elevation: float = 0.70
 
     def clamp(self) -> None:
+        self.active = bool(self.active)
         self.enabled = bool(self.enabled)
         self.x_norm = max(0.0, min(1.0, float(self.x_norm)))
         self.y_norm = max(0.0, min(1.0, float(self.y_norm)))
@@ -65,7 +67,7 @@ class SunLight:
         fallback: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
     ) -> tuple[float, float, float]:
         """Unit vector toward the light in image space (y increases downward)."""
-        if not self.enabled:
+        if not self.active:
             return normalize_light(*fallback)
         w = max(1.0, float(width))
         h = max(1.0, float(height))

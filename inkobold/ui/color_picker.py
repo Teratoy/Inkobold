@@ -10,6 +10,8 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GObject, Gtk  # noqa: E402
 
+from inkobold.ui.popup_keys import attach_popup_keys
+
 MAX_RECENT_COLORS = 8
 RgbaTuple = tuple[int, int, int, int]
 
@@ -79,6 +81,11 @@ class ColorPickerDialog(Gtk.Window):
         title: str = "Color",
     ) -> None:
         super().__init__(title=title, transient_for=parent, modal=True)
+        if parent is not None:
+            watch = getattr(parent, "_watch_focus_for_shortcuts", None)
+            if callable(watch):
+                watch(self)
+        attach_popup_keys(self)
         self.set_default_size(360, 420)
         self.set_resizable(True)
         self._callback: Optional[Callable] = None

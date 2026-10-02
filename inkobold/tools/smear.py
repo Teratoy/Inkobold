@@ -28,7 +28,7 @@ class SmearTool(BaseTool):
     def _radius(self, ctx: ToolContext) -> float:
         # Mild pressure on size so light strokes smear a smaller area
         p = max(0.0, min(1.0, float(ctx.pressure)))
-        return max(0.5, ctx.brush_size * (0.55 + 0.45 * p))
+        return max(0.1, ctx.brush_size * (0.55 + 0.45 * p))
 
     def _strength(self, ctx: ToolContext) -> float:
         # Intensity 0–100 → base strength; pressure scales it mildly (mouse ≈ full)
@@ -52,7 +52,7 @@ class SmearTool(BaseTool):
             self._lx, self._ly = x, y
             return
         dist = float(np.hypot(x - self._lx, y - self._ly))
-        steps = max(1, int(dist / max(0.5, r * 0.35)))
+        steps = max(1, int(dist / max(0.1, r * 0.35)))
         pixels = ctx.document.active_layer.pixels
         mask = self._mask(ctx)
         wrap = ctx.tile_wrap

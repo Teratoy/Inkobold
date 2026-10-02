@@ -9,7 +9,7 @@ tags: [inkobold, wiki]
 | Package | Role |
 |---------|------|
 | `inkobold/app.py`, `__main__.py` | GTK `Application`; `python -m inkobold` |
-| `inkobold/ui/` | `MainWindow`, `Canvas` (GLArea), dialogs, theme, color picker |
+| `inkobold/ui/` | `MainWindow`, `Canvas` (GLArea), dialogs, theme, color picker, `popup_keys` |
 | `inkobold/tools/` | Drawing tools (`default_tools()`), shared ops in `paint.py` |
 | `inkobold/gpu/` | `GpuRenderer` (composite, pan/zoom, checker, tile); `flora.py` |
 | `inkobold/core/` | Document, layers, animation, effects, settings, paths, libraries, history, grid, sun, mirror |

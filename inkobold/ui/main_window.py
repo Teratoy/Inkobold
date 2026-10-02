@@ -90,7 +90,9 @@ from inkobold.ui.dialogs import (
     StartupDialog,
     ThemeColorDialog,
     VisibleToolsDialog,
+    configure_numeric_spin,
 )
+from inkobold.ui.popup_keys import attach_tab_among_editables
 from inkobold.ui.theme import DEFAULT_CSS, build_theme_css
 
 
@@ -168,7 +170,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mirror = MirrorModifier()
         self.grid = GridOverlay()
         self.sun = SunLight(
-            enabled=bool(self.app_settings.sun_enabled),
+            active=bool(self.app_settings.sun_active),
+            enabled=bool(self.app_settings.sun_visible),
             x_norm=float(self.app_settings.sun_x_norm),
             y_norm=float(self.app_settings.sun_y_norm),
             elevation=float(self.app_settings.sun_elevation),
@@ -187,6 +190,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._build_ui()
         self._install_shortcuts()
         self._watch_focus_for_shortcuts(self)
+        attach_tab_among_editables(self)
         self._open_at_startup = False
         GLib.idle_add(self._prompt_startup)
 
@@ -200,6 +204,7 @@ class MainWindow(Gtk.ApplicationWindow):
             "save_as": self.action_save_as,
             "import_image": self.action_import_image,
             "export": self.action_export,
+            "export_layer": self.action_export_layer,
             "export_layers": self.action_export_layers,
             "export_anim_gif": self.action_export_anim_gif,
             "export_anim_png": self.action_export_anim_png,
@@ -244,6 +249,7 @@ class MainWindow(Gtk.ApplicationWindow):
             "move_layer_to_top": self.action_move_layer_to_top,
             "move_layer_to_bottom": self.action_move_layer_to_bottom,
             "merge_layer_down": self.action_merge_layer_down,
+            "merge_visible_layers": self.action_merge_visible_layers,
             "merge_all_layers": self.action_merge_all_layers,
             "add_frame": self.action_add_frame,
             "duplicate_frame": self.action_duplicate_frame,
@@ -281,6 +287,18 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         show_sun.connect("change-state", self._on_show_sun_change)
         self.add_action(show_sun)
+
+        use_sun = Gio.SimpleAction.new_stateful(
+            "use_sun",
+            None,
+            GLib.Variant.new_boolean(bool(self.sun.active)),
+        )
+        use_sun.connect("change-state", self._on_use_sun_change)
+        self.add_action(use_sun)
+
+        deactivate_sun = Gio.SimpleAction.new("deactivate_sun", None)
+        deactivate_sun.connect("activate", self.action_deactivate_sun)
+        self.add_action(deactivate_sun)
 
         tile_preview = Gio.SimpleAction.new_stateful(
             "tile_preview", None, GLib.Variant.new_boolean(False)
@@ -1283,7 +1301,40 @@ class MainWindow(Gtk.ApplicationWindow):
         enabled = bool(value.get_boolean())
         action.set_state(value)
         self.sun.enabled = enabled
-        self.app_settings.sun_enabled = enabled
+        self.app_settings.sun_visible = enabled
+        if enabled and not self.sun.active:
+            self._set_sun_active(True)
+        else:
+            self._persist_settings()
+            if hasattr(self, "canvas"):
+                self.canvas.refresh_guides()
+
+    def _on_use_sun_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
+        self._set_sun_active(bool(value.get_boolean()), action=action, value=value)
+
+    def action_deactivate_sun(self, *_a) -> None:
+        self._set_sun_active(False)
+
+    def _set_sun_active(
+        self,
+        active: bool,
+        *,
+        action: Gio.SimpleAction | None = None,
+        value: GLib.Variant | None = None,
+    ) -> None:
+        active = bool(active)
+        self.sun.active = active
+        self.app_settings.sun_active = active
+        if not active and self.sun.enabled:
+            show = self.lookup_action("show_sun")
+            if show is not None:
+                show.change_state(GLib.Variant.new_boolean(False))
+            else:
+                self.sun.enabled = False
+                self.app_settings.sun_visible = False
+        use = action or self.lookup_action("use_sun")
+        if use is not None:
+            use.set_state(value if value is not None else GLib.Variant.new_boolean(active))
         self._persist_settings()
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()
@@ -1292,7 +1343,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.app_settings.sun_x_norm = float(self.sun.x_norm)
         self.app_settings.sun_y_norm = float(self.sun.y_norm)
         self.app_settings.sun_elevation = float(self.sun.elevation)
-        self._persist_settings()
+        if not self.sun.active:
+            self._set_sun_active(True)
+        else:
+            self._persist_settings()
 
     def _sun_light_dir(self) -> tuple[float, float, float]:
         doc = self.document
@@ -1437,22 +1491,23 @@ class MainWindow(Gtk.ApplicationWindow):
         dlg.present()
 
     def _on_sun_settings_response(self, dlg: SunSettingsDialog, response: int) -> None:
+        if response == Gtk.ResponseType.REJECT:
+            self._set_sun_active(False)
+            return
         if response != Gtk.ResponseType.OK:
             return
         self.sun.elevation = dlg.elevation()
         self.sun.clamp()
         self.app_settings.sun_elevation = float(self.sun.elevation)
-        self._persist_settings()
-        # Enabling sun from the dialog makes the control immediately usable.
-        if not self.sun.enabled:
-            action = self.lookup_action("show_sun")
-            if action is not None:
-                action.change_state(GLib.Variant.new_boolean(True))
-        elif hasattr(self, "canvas"):
-            self.canvas.refresh_guides()
+        if not self.sun.active:
+            self._set_sun_active(True)
+        else:
+            self._persist_settings()
+            if hasattr(self, "canvas"):
+                self.canvas.refresh_guides()
 
     def action_brush_smaller(self, *_a) -> None:
-        self.brush_spin.set_value(max(1, self.brush_spin.get_value() - 1))
+        self.brush_spin.set_value(max(0.1, self.brush_spin.get_value() - 1))
 
     def action_brush_larger(self, *_a) -> None:
         self.brush_spin.set_value(min(256, self.brush_spin.get_value() + 1))
@@ -1506,6 +1561,7 @@ class MainWindow(Gtk.ApplicationWindow):
         file_menu.append("Save File", "win.save")
         file_menu.append("Save As…", "win.save_as")
         file_menu.append("Export…", "win.export")
+        file_menu.append("Export Selected Layer…", "win.export_layer")
         file_menu.append("Export Separated Layers…", "win.export_layers")
         export_anim_menu = Gio.Menu()
         export_anim_menu.append("As GIF…", "win.export_anim_gif")
@@ -1585,7 +1641,9 @@ class MainWindow(Gtk.ApplicationWindow):
         view_menu.append("Fit Canvas", "win.fit")
         view_menu.append("Show Grid", "win.show_grid")
         view_menu.append("Grid…", "win.grid_settings")
+        view_menu.append("Use Sun Light", "win.use_sun")
         view_menu.append("Show Sun", "win.show_sun")
+        view_menu.append("Deactivate Sun", "win.deactivate_sun")
         view_menu.append("Sun…", "win.sun_settings")
         view_menu.append("Tile Preview", "win.tile_preview")
         view_menu.append("Wrap Moves", "win.tile_wrap")
@@ -1603,7 +1661,9 @@ class MainWindow(Gtk.ApplicationWindow):
         layer_menu.append("Delete Layer", "win.delete_layer")
         layer_menu.append("Rename Layer…", "win.rename_layer")
         layer_menu.append("Merge with Layer Below", "win.merge_layer_down")
+        layer_menu.append("Merge Visible", "win.merge_visible_layers")
         layer_menu.append("Merge All", "win.merge_all_layers")
+        layer_menu.append("Export Selected Layer…", "win.export_layer")
         layer_menu.append("Export Separated Layers…", "win.export_layers")
         layer_btn.set_menu_model(layer_menu)
         menubar.append(layer_btn)
@@ -1688,7 +1748,8 @@ class MainWindow(Gtk.ApplicationWindow):
         menubar.append(exit_btn)
 
         # Shared default width for Tools and Layers columns
-        self._side_panel_w = 180
+        # (~2 tool buttons: min-width + padding + flow spacing + toolbox chrome)
+        self._side_panel_w = 260
         self._panes_sized = False
         self._sidebar_sized = False
 
@@ -1743,7 +1804,8 @@ class MainWindow(Gtk.ApplicationWindow):
         opts.append(self.size_row)
         self.size_label = Gtk.Label(label="Size", xalign=0)
         self.size_row.append(self.size_label)
-        self.brush_spin = Gtk.SpinButton.new_with_range(1, 256, 1)
+        self.brush_spin = Gtk.SpinButton.new_with_range(0.1, 256, 1)
+        configure_numeric_spin(self.brush_spin)
         self.brush_spin.set_hexpand(True)
         self.brush_spin.connect("value-changed", self._on_brush_changed)
         self.size_row.append(self.brush_spin)
@@ -1752,6 +1814,7 @@ class MainWindow(Gtk.ApplicationWindow):
         opts.append(self.opacity_row)
         self.opacity_row.append(Gtk.Label(label="Opacity", xalign=0))
         self.opacity_spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+        configure_numeric_spin(self.opacity_spin)
         self.opacity_spin.set_value(100)
         self.opacity_spin.set_hexpand(True)
         self.opacity_spin.set_tooltip_text(
@@ -1819,6 +1882,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.brush_opts_row.append(self.brush_density_row)
         self.brush_density_row.append(Gtk.Label(label="Density", xalign=0))
         self.brush_density_spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+        configure_numeric_spin(self.brush_density_spin)
         self.brush_density_spin.set_value(10)
         self.brush_density_spin.set_hexpand(True)
         self.brush_density_spin.set_tooltip_text(
@@ -1915,6 +1979,7 @@ class MainWindow(Gtk.ApplicationWindow):
         opts.append(self.arc_degrees_row)
         self.arc_degrees_row.append(Gtk.Label(label="Degrees", xalign=0))
         self.arc_degrees_spin = Gtk.SpinButton.new_with_range(1, 359, 1)
+        configure_numeric_spin(self.arc_degrees_spin)
         self.arc_degrees_spin.set_value(180)
         self.arc_degrees_spin.set_hexpand(True)
         self.arc_degrees_spin.set_tooltip_text(
@@ -1972,7 +2037,7 @@ class MainWindow(Gtk.ApplicationWindow):
         opts.append(self.lay_spacing_row)
         self.lay_spacing_row.append(Gtk.Label(label="Distance", xalign=0))
         self.lay_spacing_spin = Gtk.SpinButton.new_with_range(1.0, 512.0, 1.0)
-        self.lay_spacing_spin.set_digits(0)
+        configure_numeric_spin(self.lay_spacing_spin)
         self.lay_spacing_spin.set_value(40.0)
         self.lay_spacing_spin.set_hexpand(True)
         self.lay_spacing_spin.set_tooltip_text(
@@ -1985,7 +2050,7 @@ class MainWindow(Gtk.ApplicationWindow):
         opts.append(self.tile_scale_row)
         self.tile_scale_row.append(Gtk.Label(label="Tile Scale", xalign=0))
         self.tile_scale_spin = Gtk.SpinButton.new_with_range(0.1, 16.0, 0.1)
-        self.tile_scale_spin.set_digits(2)
+        configure_numeric_spin(self.tile_scale_spin)
         self.tile_scale_spin.set_value(1.0)
         self.tile_scale_spin.set_hexpand(True)
         self.tile_scale_spin.set_tooltip_text("Pattern tile size multiplier (1 = native image size)")
@@ -1997,7 +2062,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.maze_cell_label = Gtk.Label(label="Cell Size", xalign=0)
         self.maze_cell_row.append(self.maze_cell_label)
         self.maze_cell_spin = Gtk.SpinButton.new_with_range(3.0, 128.0, 1.0)
-        self.maze_cell_spin.set_digits(0)
+        configure_numeric_spin(self.maze_cell_spin)
         self.maze_cell_spin.set_value(8.0)
         self.maze_cell_spin.set_hexpand(True)
         self.maze_cell_spin.set_tooltip_text("Maze cell size in pixels (walls + corridor)")
@@ -2078,6 +2143,7 @@ class MainWindow(Gtk.ApplicationWindow):
         opts.append(self.threshold_row)
         self.threshold_row.append(Gtk.Label(label="Threshold", xalign=0))
         self.threshold_spin = Gtk.SpinButton.new_with_range(0, 255, 1)
+        configure_numeric_spin(self.threshold_spin)
         self.threshold_spin.set_hexpand(True)
         self.threshold_spin.set_tooltip_text(
             "Color match tolerance (variance allowed). "
@@ -2092,6 +2158,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.intensity_label = Gtk.Label(label="Intensity", xalign=0)
         self.intensity_row.append(self.intensity_label)
         self.intensity_spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+        configure_numeric_spin(self.intensity_spin)
         self.intensity_spin.set_hexpand(True)
         self.intensity_spin.set_tooltip_text(
             "Smear / liquify strength, or weld-brush fillet amount. "
@@ -2136,6 +2203,7 @@ class MainWindow(Gtk.ApplicationWindow):
         def _add_3d_spin(label: str, tooltip: str) -> Gtk.SpinButton:
             self.shade3d_row.append(Gtk.Label(label=label, xalign=0))
             spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+            configure_numeric_spin(spin)
             spin.set_hexpand(True)
             spin.set_tooltip_text(tooltip)
             spin.connect("value-changed", self._on_3d_setting_changed)
@@ -2153,6 +2221,7 @@ class MainWindow(Gtk.ApplicationWindow):
         opts.append(self.frequency_row)
         self.frequency_row.append(Gtk.Label(label="Frequency", xalign=0))
         self.frequency_spin = Gtk.SpinButton.new_with_range(0, 100, 1)
+        configure_numeric_spin(self.frequency_spin)
         self.frequency_spin.set_hexpand(True)
         self.frequency_spin.set_tooltip_text(
             "Stamp density along the stroke. Low = spaced beads, high = continuous tube."
@@ -2278,9 +2347,11 @@ class MainWindow(Gtk.ApplicationWindow):
         right_split.set_end_child(side)
 
         # Frames | Layers share height so section footers (+/−, FPS, …) stay on-screen.
+        # Default both-collapsed: keep the start (Frames) size fixed so Layers sits
+        # directly under it instead of mid-column after later layout passes.
         self._sidebar_split = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, hexpand=True, vexpand=True)
         self._sidebar_split.set_wide_handle(True)
-        self._sidebar_split.set_resize_start_child(True)
+        self._sidebar_split.set_resize_start_child(False)
         self._sidebar_split.set_resize_end_child(True)
         self._sidebar_split.set_shrink_start_child(True)
         self._sidebar_split.set_shrink_end_child(True)
@@ -2290,6 +2361,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.frames_expander = Gtk.Expander(label="Frames", expanded=False)
         self.frames_expander.set_hexpand(True)
         self.frames_expander.set_vexpand(False)
+        # Collapsed: sit at the top of the paned slot. Expanded: fill so the list can grow.
+        self.frames_expander.set_valign(Gtk.Align.START)
         frames_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.frames_expander.set_child(frames_body)
         self._sidebar_split.set_start_child(self.frames_expander)
@@ -2303,7 +2376,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.frame_list.add_controller(frame_drop)
         self.frame_scroll = Gtk.ScrolledWindow(vexpand=False, hexpand=True)
         self.frame_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.frame_scroll.set_min_content_height(48)
+        self.frame_scroll.set_min_content_height(96)
         self.frame_scroll.set_child(self.frame_list)
         frames_body.append(self.frame_scroll)
 
@@ -2332,6 +2405,7 @@ class MainWindow(Gtk.ApplicationWindow):
         fps_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         fps_row.append(Gtk.Label(label="FPS", xalign=0))
         self.fps_spin = Gtk.SpinButton.new_with_range(1, 60, 1)
+        configure_numeric_spin(self.fps_spin)
         self.fps_spin.set_value(12)
         self.fps_spin.set_hexpand(True)
         self.fps_spin.set_tooltip_text("Playback speed in frames per second")
@@ -2357,6 +2431,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.layers_expander = Gtk.Expander(label="Layers", expanded=False)
         self.layers_expander.set_hexpand(True)
         self.layers_expander.set_vexpand(False)
+        self.layers_expander.set_valign(Gtk.Align.START)
         layers_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.layers_expander.set_child(layers_body)
         self._sidebar_split.set_end_child(self.layers_expander)
@@ -2371,7 +2446,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.layer_list.add_controller(drop)
         self.layer_scroll = Gtk.ScrolledWindow(vexpand=False, hexpand=True)
         self.layer_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.layer_scroll.set_min_content_height(48)
+        # Tall enough for one full opacity row; vexpand grows further when open.
+        self.layer_scroll.set_min_content_height(96)
         self.layer_scroll.set_child(self.layer_list)
         layers_body.append(self.layer_scroll)
         side_btns = Gtk.Box(spacing=6)
@@ -2428,6 +2504,14 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_sidebar_height_notify(self, *_a) -> None:
         if not self._sidebar_sized:
             self._apply_default_sidebar_split()
+            return
+        # Later layout (e.g. horizontal pane sizing) can redistribute a vertical
+        # paned with resize_start_child=True — keep collapsed headers pinned.
+        if (
+            not self.frames_expander.get_expanded()
+            and not self.layers_expander.get_expanded()
+        ):
+            self._pack_sidebar_headers_top()
 
     def _apply_default_sidebar_split(self) -> bool:
         """Give Frames a smaller share so Layers (and +/−) stay usable."""
@@ -2439,10 +2523,18 @@ class MainWindow(Gtk.ApplicationWindow):
             return False
         if not self.frames_expander.get_expanded() and not self.layers_expander.get_expanded():
             # Both collapsed — stack headers at the top instead of mid-column.
-            self._pack_sidebar_headers_top()
-            self._sidebar_sized = True
+            _min_h, nat_h, *_ = self.frames_expander.measure(Gtk.Orientation.VERTICAL, -1)
+            if nat_h <= 0:
+                return False
+            split.set_resize_start_child(False)
+            split.set_resize_end_child(True)
+            split.set_position(nat_h)
+            if abs(split.get_position() - nat_h) <= 2:
+                self._sidebar_sized = True
             return False
         # ~38% frames / 62% layers — layers need room for opacity rows + buttons
+        split.set_resize_start_child(True)
+        split.set_resize_end_child(True)
         split.set_position(max(120, int(h * 0.38)))
         self._sidebar_sized = True
         return False
@@ -2451,8 +2543,12 @@ class MainWindow(Gtk.ApplicationWindow):
         """Place both Frames and Layers headers at the top of the sidebar column."""
         split = self._sidebar_split
         _min_h, nat_h, *_ = self.frames_expander.measure(Gtk.Orientation.VERTICAL, -1)
-        if nat_h > 0:
-            split.set_position(nat_h)
+        if nat_h <= 0:
+            return True  # not measured yet — retry next idle
+        # Freeze start size so window/pane resizes don't push Layers mid-column.
+        split.set_resize_start_child(False)
+        split.set_resize_end_child(True)
+        split.set_position(nat_h)
         return False
 
     def _sidebar_give_space_to_frames(self) -> bool:
@@ -2462,8 +2558,12 @@ class MainWindow(Gtk.ApplicationWindow):
         if h <= 0:
             return False
         _min_h, nat_h, *_ = self.layers_expander.measure(Gtk.Orientation.VERTICAL, -1)
+        if nat_h <= 0:
+            return True
         handle = 8
-        split.set_position(max(0, h - max(nat_h, 1) - handle))
+        split.set_resize_start_child(True)
+        split.set_resize_end_child(False)
+        split.set_position(max(0, h - nat_h - handle))
         return False
 
     def _on_tool_toggled(self, btn: Gtk.ToggleButton, tid: str) -> None:
@@ -2603,7 +2703,7 @@ class MainWindow(Gtk.ApplicationWindow):
             title="Pixelate",
             blurb="Average the active layer into square color blocks.",
             options=[
-                EffectOption("block_size", "Block size", "spin", 8, minimum=2, maximum=128, step=1),
+                EffectOption("block_size", "Block size", "spin", 8, minimum=2, maximum=128, step=1, digits=0),
             ],
             effect_fn=lambda src, p: pixelate(src, int(p["block_size"])),
             debounce_ms=40,
@@ -2614,7 +2714,7 @@ class MainWindow(Gtk.ApplicationWindow):
             title="Kuwahara",
             blurb="Edge-preserving paint-like blur on the active layer.",
             options=[
-                EffectOption("radius", "Radius", "spin", 3, minimum=1, maximum=12, step=1),
+                EffectOption("radius", "Radius", "spin", 3, minimum=1, maximum=12, step=1, digits=0),
             ],
             effect_fn=lambda src, p: kuwahara(src, int(p["radius"])),
             debounce_ms=80,
@@ -2626,7 +2726,7 @@ class MainWindow(Gtk.ApplicationWindow):
             title="Gaussian Blur",
             blurb="Soft Gaussian blur on the active layer (all channels).",
             options=[
-                EffectOption("radius", "Radius", "spin", 3, minimum=1, maximum=64, step=1),
+                EffectOption("radius", "Radius", "spin", 3, minimum=1, maximum=64, step=1, digits=0),
             ],
             effect_fn=lambda src, p: gaussian_blur(src, int(p["radius"])),
             debounce_ms=80,
@@ -2642,7 +2742,7 @@ class MainWindow(Gtk.ApplicationWindow):
             ),
             options=[
                 EffectOption("amount", "Amount", "spin", 100, minimum=0, maximum=500, step=1),
-                EffectOption("radius", "Radius", "spin", 1, minimum=1, maximum=32, step=1),
+                EffectOption("radius", "Radius", "spin", 1, minimum=1, maximum=32, step=1, digits=0),
                 EffectOption(
                     "threshold", "Threshold", "spin", 0, minimum=0, maximum=100, step=1
                 ),
@@ -2665,12 +2765,12 @@ class MainWindow(Gtk.ApplicationWindow):
                 "Direction: 0° = right, 90° = down. Color alpha sets opacity."
             ),
             options=[
-                EffectOption("distance", "Distance", "spin", 8, minimum=0, maximum=256, step=1),
+                EffectOption("distance", "Distance", "spin", 8, minimum=0, maximum=256, step=1, digits=0),
                 EffectOption(
                     "direction", "Direction °", "spin", 135, minimum=0, maximum=360, step=1
                 ),
-                EffectOption("blur", "Blur", "spin", 4, minimum=0, maximum=64, step=1),
-                EffectOption("spread", "Spread", "spin", 0, minimum=0, maximum=64, step=1),
+                EffectOption("blur", "Blur", "spin", 4, minimum=0, maximum=64, step=1, digits=0),
+                EffectOption("spread", "Spread", "spin", 0, minimum=0, maximum=64, step=1, digits=0),
                 EffectOption(
                     "color",
                     "Color",
@@ -2703,7 +2803,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     "Floyd–Steinberg",
                     choices=DITHER_MODES,
                 ),
-                EffectOption("levels", "Levels", "spin", 2, minimum=2, maximum=16, step=1),
+                EffectOption("levels", "Levels", "spin", 2, minimum=2, maximum=16, step=1, digits=0),
             ],
             effect_fn=lambda src, p: dither(src, mode=str(p["mode"]), levels=int(p["levels"])),
             debounce_ms=60,
@@ -2714,7 +2814,7 @@ class MainWindow(Gtk.ApplicationWindow):
             title="Posterize",
             blurb="Clamp each RGB channel to a fixed number of tonal steps.",
             options=[
-                EffectOption("levels", "Levels", "spin", 4, minimum=2, maximum=32, step=1),
+                EffectOption("levels", "Levels", "spin", 4, minimum=2, maximum=32, step=1, digits=0),
             ],
             effect_fn=lambda src, p: posterize(src, int(p["levels"])),
             debounce_ms=40,
@@ -2734,11 +2834,11 @@ class MainWindow(Gtk.ApplicationWindow):
             options=[
                 EffectOption("clarity", "Clarity", "spin", 75, minimum=0, maximum=150, step=1),
                 EffectOption(
-                    "clarity_radius", "Clarity radius", "spin", 28, minimum=4, maximum=96, step=1
+                    "clarity_radius", "Clarity radius", "spin", 28, minimum=4, maximum=96, step=1, digits=0
                 ),
                 EffectOption("bloom", "Bloom", "spin", 28, minimum=0, maximum=100, step=1),
                 EffectOption(
-                    "bloom_radius", "Bloom radius", "spin", 14, minimum=2, maximum=64, step=1
+                    "bloom_radius", "Bloom radius", "spin", 14, minimum=2, maximum=64, step=1, digits=0
                 ),
                 EffectOption("grit", "Grit", "spin", 45, minimum=0, maximum=100, step=1),
                 EffectOption("neon", "Neon accents", "spin", 70, minimum=0, maximum=150, step=1),
@@ -2866,7 +2966,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     choices=LIQUIFY_MODES,
                 ),
                 EffectOption("strength", "Strength", "spin", 50, minimum=0, maximum=100, step=1),
-                EffectOption("grid", "Origins grid", "spin", 3, minimum=1, maximum=8, step=1),
+                EffectOption("grid", "Origins grid", "spin", 3, minimum=1, maximum=8, step=1, digits=0),
                 EffectOption("radius_pct", "Radius %", "spin", 100, minimum=20, maximum=150, step=5),
             ],
             effect_fn=lambda src, p: liquify(
@@ -2894,7 +2994,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 ),
                 EffectOption("strength", "Strength", "spin", 100, minimum=0, maximum=200, step=1),
                 EffectOption("threshold", "Threshold", "spin", 0, minimum=0, maximum=100, step=1),
-                EffectOption("radius", "Pre-blur", "spin", 0, minimum=0, maximum=16, step=1),
+                EffectOption("radius", "Pre-blur", "spin", 0, minimum=0, maximum=16, step=1, digits=0),
             ],
             effect_fn=lambda src, p: edge_detect(
                 src,
@@ -2925,8 +3025,8 @@ class MainWindow(Gtk.ApplicationWindow):
                     step=1,
                 ),
                 EffectOption("depth", "Depth", "spin", 100, minimum=0, maximum=200, step=1),
-                EffectOption("height", "Height", "spin", 2, minimum=1, maximum=64, step=1),
-                EffectOption("radius", "Smooth", "spin", 0, minimum=0, maximum=16, step=1),
+                EffectOption("height", "Height", "spin", 2, minimum=1, maximum=64, step=1, digits=0),
+                EffectOption("radius", "Smooth", "spin", 0, minimum=0, maximum=16, step=1, digits=0),
             ],
             effect_fn=lambda src, p: emboss(
                 src,
@@ -2952,7 +3052,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     choices=NORMAL_MAP_Y,
                 ),
                 EffectOption("strength", "Strength", "spin", 100, minimum=1, maximum=500, step=1),
-                EffectOption("radius", "Smooth", "spin", 0, minimum=0, maximum=16, step=1),
+                EffectOption("radius", "Smooth", "spin", 0, minimum=0, maximum=16, step=1, digits=0),
             ],
             effect_fn=lambda src, p: normal_map(
                 src,
@@ -3019,7 +3119,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     maximum=180,
                     step=1,
                 ),
-                EffectOption("radius", "Smooth", "spin", 1, minimum=0, maximum=16, step=1),
+                EffectOption("radius", "Smooth", "spin", 1, minimum=0, maximum=16, step=1, digits=0),
             ],
             effect_fn=lambda src, p: metal_relief(
                 src,
@@ -3070,7 +3170,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     maximum=200,
                     step=1,
                 ),
-                EffectOption("radius", "Smooth", "spin", 8, minimum=0, maximum=32, step=1),
+                EffectOption("radius", "Smooth", "spin", 8, minimum=0, maximum=32, step=1, digits=0),
                 EffectOption(
                     "bubbles", "Bubbles", "spin", 45, minimum=0, maximum=100, step=1
                 ),
@@ -3556,6 +3656,9 @@ class MainWindow(Gtk.ApplicationWindow):
         """Collapse frees vertical space in the Frames|Layers paned."""
         expanded = bool(expander.get_expanded())
         expander.set_vexpand(expanded)
+        # FILL when open so the expander uses the paned allocation (list can grow).
+        # START when collapsed so the header stays at the top of a tall slot.
+        expander.set_valign(Gtk.Align.FILL if expanded else Gtk.Align.START)
         scroll.set_vexpand(expanded)
         # Let the other section claim the freed space.
         other = self.layers_expander if expander is self.frames_expander else self.frames_expander
@@ -3571,6 +3674,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 GLib.idle_add(self._pack_sidebar_headers_top)
         elif not expanded and other.get_expanded():
             other.set_vexpand(True)
+            other.set_valign(Gtk.Align.FILL)
             if other is self.frames_expander:
                 GLib.idle_add(self._sidebar_give_space_to_frames)
             else:
@@ -3894,14 +3998,14 @@ class MainWindow(Gtk.ApplicationWindow):
 
                 opac = Gtk.Box(spacing=4)
                 opac.append(Gtk.Label(label="Opacity", xalign=0))
-                scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
+                scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 0.01)
                 scale.set_value(max(0, min(100, ly.opacity * 100.0)))
                 scale.set_draw_value(True)
                 scale.set_value_pos(Gtk.PositionType.RIGHT)
                 scale.set_hexpand(True)
                 scale.set_vexpand(False)
                 scale.set_valign(Gtk.Align.CENTER)
-                scale.set_digits(0)
+                scale.set_digits(2)
                 scale.set_tooltip_text("Layer transparency")
                 scale.connect("value-changed", self._on_layer_opacity, idx)
                 # Arm history once per slider interaction (mouse or keyboard)
@@ -3934,7 +4038,9 @@ class MainWindow(Gtk.ApplicationWindow):
             menu.append("Move to Bottom", "win.move_layer_to_bottom")
             menu.append("Delete Layer", "win.delete_layer")
             menu.append("Merge with Layer Below", "win.merge_layer_down")
+            menu.append("Merge Visible", "win.merge_visible_layers")
             menu.append("Merge All", "win.merge_all_layers")
+            menu.append("Export Selected Layer…", "win.export_layer")
             self._layer_context_menu = menu
         return menu
 
@@ -4693,6 +4799,41 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self._set_status()
 
+    def action_export_layer(self, *_a) -> None:
+        if not self.document or not self.document.layers:
+            return
+        dialog = Gtk.FileDialog(title="Export Selected Layer")
+        filt = Gtk.FileFilter()
+        filt.set_name("PNG image")
+        filt.add_pattern("*.png")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(filt)
+        dialog.set_filters(filters)
+        dialog.set_default_filter(filt)
+        stem = self.document._sanitize_layer_filename(self.document.active_layer.name)
+        dialog.set_initial_name(f"{stem}.png")
+        dialog.save(self, None, self._on_export_layer_done)
+
+    def _on_export_layer_done(self, dialog: Gtk.FileDialog, result) -> None:
+        try:
+            file = dialog.save_finish(result)
+        except GLib.Error:
+            return
+        if not file or not self.document:
+            return
+        path = Path(file.get_path())
+        if path.suffix.lower() != ".png":
+            path = path.with_suffix(".png")
+        try:
+            self.document.export_layer_png(path)
+        except Exception as exc:
+            err = Gtk.AlertDialog()
+            err.set_message("Layer export failed")
+            err.set_detail(str(exc))
+            err.show(self)
+            return
+        self._set_status()
+
     def action_export_layers(self, *_a) -> None:
         if not self.document:
             return
@@ -4820,6 +4961,20 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self._push_history()
         if not self.document.merge_down():
+            return
+        self.canvas.renderer.invalidate()
+        self._rebuild_layers()
+        self.canvas.queue_render()
+        self._set_status()
+
+    def action_merge_visible_layers(self, *_a) -> None:
+        if not self.document:
+            return
+        visible = sum(1 for ly in self.document.layers if ly.visible)
+        if visible < 2:
+            return
+        self._push_history()
+        if not self.document.merge_visible():
             return
         self.canvas.renderer.invalidate()
         self._rebuild_layers()

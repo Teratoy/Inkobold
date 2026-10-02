@@ -6,14 +6,14 @@ Version **0.1.0** · Python **≥3.11** · App id `trinkets.inkobold`
 
 ## Features
 
-- **File** — Multi-document tabs; New File (pixel size), Open, Save (`.inkobold` multilayer ZIP), Export, Export Separated Layers, Import Image as Layer
-- **Layers** — RGBA layers (8 or 16 bpc), visibility, opacity, offsets, GPU composite; add / duplicate / rename / delete / merge down / merge all
+- **File** — Multi-document tabs; New File (pixel size), Open, Save (`.inkobold` multilayer ZIP), Export, Export Selected Layer, Export Separated Layers, Import Image as Layer
+- **Layers** — RGBA layers (8 or 16 bpc), visibility, opacity, offsets, GPU composite; add / duplicate / rename / delete / merge down / merge visible / merge all
 - **Animation** — Frames with FPS playback; onion-skin of the previous frame; export GIF or PNG sequence
 - **Tools** — Pen, Line, Rectangle, Curve (freehand / arc / circle), Lay (pattern stamps along a path), Brush (round / custom tip / bubbles), Weld Brush, Fill, Gradient, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
 - **Effects** — Blur & Sharpen, Stylize (Pixelate, Drop Shadow, Dither, Posterize, **Flora**), Color, Distort, Edge & Depth, Materials (Metal Relief, Milk); apply to active layer or all layers
 - **Libraries** — User brushes, patterns, and fonts under the platform data dir (see Paths below)
 - **Input** — GDK drawing path; on Linux, optional libinput poll + libwacom tablet identification
-- **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid, Show Sun (draggable light for 3D / Metal / Milk), Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
+- **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid, Use / Show / Deactivate Sun (draggable light for 3D / Metal / Milk; deactivate restores classic lighting), Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
 - **Edit** — Undo / Redo; stroke Mirror (1–16 axes, H / V / diagonal); Flip / Rotate layer; Crop Canvas (live size; optional selection bounds)
 - **Settings** — Theme, Memory (undo steps), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (rebind), Debug Mode
 

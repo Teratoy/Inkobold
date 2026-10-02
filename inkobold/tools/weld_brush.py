@@ -33,7 +33,7 @@ class WeldBrushTool(BaseTool):
     def _pressure_radius(self, ctx: ToolContext) -> float:
         p = max(0.0, min(1.0, float(ctx.pressure)))
         shaped = p**0.75
-        return max(0.5, ctx.brush_size * (0.06 + 0.94 * shaped))
+        return max(0.1, ctx.brush_size * (0.06 + 0.94 * shaped))
 
     def _weld_factor(self, ctx: ToolContext) -> float:
         return max(0.0, min(300.0, float(ctx.intensity))) / 100.0

@@ -23,8 +23,11 @@ tags: [inkobold, wiki]
 | Duplicate | `Ctrl+J` |
 | Delete | `Ctrl+Shift+Delete` |
 | Merge down | `Ctrl+Shift+E` |
+| Merge visible | menu only |
 | Merge all | menu only |
 | Rename / reorder | UI |
+| Export selected layer | menu (PNG, document-sized) |
+| Export separated layers | menu |
 | Flip H / V | Edit menu |
 | Rotate 90 / 180 / CCW | Edit menu |
 | Crop canvas | Settings / Image (optional selection bounds) |

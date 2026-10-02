@@ -158,7 +158,7 @@ class BrushTool(BaseTool):
         p = max(0.0, min(1.0, float(ctx.pressure)))
         # Mild power curve feels more natural on tablets than pure linear.
         shaped = p**0.75
-        return max(0.5, ctx.brush_size * (0.06 + 0.94 * shaped))
+        return max(0.1, ctx.brush_size * (0.06 + 0.94 * shaped))
 
     def _stamp_kwargs(self, ctx: ToolContext) -> dict:
         mode = getattr(self, "brush_mode", "round")

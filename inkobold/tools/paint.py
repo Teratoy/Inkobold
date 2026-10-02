@@ -97,7 +97,7 @@ def stamp_disk(
     wrap: bool = False,
 ) -> None:
     h, w = pixels.shape[:2]
-    r = max(0.5, radius)
+    r = max(0.1, radius)
     if wrap:
         for px, py in stamp_centers(x, y, r + 1.5, w, h, True):
             stamp_disk(
@@ -187,7 +187,7 @@ def stroke_segment(
     wrap: bool = False,
 ) -> None:
     dist = float(np.hypot(x1 - x0, y1 - y0))
-    steps = max(1, int(dist / max(0.5, radius * 0.35)))
+    steps = max(1, int(dist / max(0.1, radius * 0.35)))
     for i in range(steps + 1):
         t = i / steps
         stamp_disk(
@@ -230,7 +230,7 @@ def stroke_quadratic(
         np.hypot(x1 - x0, y1 - y0)
         + np.hypot(x2 - x1, y2 - y1)
     )
-    steps = max(1, int(est / max(0.5, radius * 0.35)))
+    steps = max(1, int(est / max(0.1, radius * 0.35)))
     for i in range(steps + 1):
         t = i / steps
         u = 1.0 - t
@@ -330,7 +330,7 @@ def stroke_circular_arc(
             best_sweep = sweep
 
     arc_len = abs(best_sweep) * r_circ
-    steps = max(1, int(arc_len / max(0.5, radius * 0.35)))
+    steps = max(1, int(arc_len / max(0.1, radius * 0.35)))
     for i in range(steps + 1):
         t = i / steps
         ang = a0 + best_sweep * t
@@ -375,7 +375,7 @@ def stroke_circle(
         )
         return
     circ = 2.0 * math.pi * r_circ
-    steps = max(1, int(circ / max(0.5, radius * 0.35)))
+    steps = max(1, int(circ / max(0.1, radius * 0.35)))
     for i in range(steps + 1):
         ang = (2.0 * math.pi * i) / steps
         stamp_disk(
@@ -764,7 +764,7 @@ def stamp_brush_tip(
     """Stamp an RGBA brush tip tinted with *color* (tip alpha = coverage)."""
     if tip is None or tip.size == 0 or tip.ndim != 3 or tip.shape[2] < 4:
         return
-    r = max(0.5, float(radius))
+    r = max(0.1, float(radius))
     op = min(1.0, max(0.0, float(opacity)))
     if op <= 0.0:
         return
@@ -822,10 +822,10 @@ def stroke_segment_tapered(
     wrap: bool = False,
 ) -> None:
     """Stamp a segment while linearly interpolating stamp radius (pressure taper)."""
-    r0 = max(0.5, float(radius0))
-    r1 = max(0.5, float(radius1))
+    r0 = max(0.1, float(radius0))
+    r1 = max(0.1, float(radius1))
     dist = float(np.hypot(x1 - x0, y1 - y0))
-    step = max(0.5, min(r0, r1) * 0.35)
+    step = max(0.1, min(r0, r1) * 0.35)
     steps = max(1, int(dist / step))
     use_tip = tip is not None
     for i in range(steps + 1):
@@ -1288,8 +1288,8 @@ def stroke_segment_weld(
     bounding box or hardening its anti-aliased edges.
     """
     h, w = pixels.shape[:2]
-    r0 = max(0.5, float(radius0))
-    r1 = max(0.5, float(radius1))
+    r0 = max(0.1, float(radius0))
+    r1 = max(0.1, float(radius1))
     rmax = max(r0, r1)
     weld_r = min(WELD_MAX_R, int(round(rmax * max(0.0, float(weld)))))
     if wrap and w > 0 and h > 0:
@@ -1323,7 +1323,7 @@ def stroke_segment_weld(
             windows.append((wx0, wy0, wx1, wy1, sx0, sy0, sx1, sy1, snapshot))
 
     dist = float(np.hypot(x1 - x0, y1 - y0))
-    step = max(0.5, min(r0, r1) * 0.35)
+    step = max(0.1, min(r0, r1) * 0.35)
     steps = max(1, int(dist / step))
     for i in range(steps + 1):
         t = i / steps
@@ -2834,7 +2834,7 @@ def stroke_segment_3d(
     freq_n = max(0.0, min(100.0, frequency)) / 100.0
     # Spacing as a fraction of radius (1.5 → sparse, 0.06 → dense)
     spacing_frac = 0.06 + 1.44 * (1.0 - freq_n) ** 2
-    steps = max(1, int(dist / max(0.5, radius * spacing_frac)))
+    steps = max(1, int(dist / max(0.1, radius * spacing_frac)))
     for i in range(steps + 1):
         t = i / steps
         stamp_disk_3d(
@@ -2852,6 +2852,122 @@ def stroke_segment_3d(
         )
 
 
+def _region_touches_edge(region: np.ndarray) -> bool:
+    """True if any mask pixel lies on the canvas border."""
+    if region.size == 0:
+        return False
+    return bool(
+        region[0].any()
+        or region[-1].any()
+        or region[:, 0].any()
+        or region[:, -1].any()
+    )
+
+
+def _roll_shift_unwrap_1d(occupied: np.ndarray) -> int:
+    """Roll amount that splits a wrapping 1D occupancy at its largest empty gap.
+
+    When both ends are occupied, the mask wraps; rolling so the longest False
+    run starts at index 0 makes the True run a single contiguous block.
+    """
+    n = int(occupied.size)
+    if n <= 1 or not occupied.any() or bool(occupied.all()):
+        return 0
+    if not (bool(occupied[0]) and bool(occupied[-1])):
+        return 0
+    empty = np.logical_not(occupied)
+    best_len = 0
+    best_start = 0
+    run_len = 0
+    run_start = 0
+    for i in range(n * 2):
+        j = i % n
+        if empty[j]:
+            if run_len == 0:
+                run_start = j
+            run_len += 1
+            if run_len > best_len:
+                best_len = run_len
+                best_start = run_start
+        else:
+            run_len = 0
+        if i >= n and best_len >= n:
+            break
+    return int(best_start)
+
+
+def _roll_region_contiguous(region: np.ndarray) -> tuple[np.ndarray, int, int]:
+    """Roll a possibly wrap-straddling region into one AABB-friendly blob.
+
+    Returns ``(rolled_region, roll_y, roll_x)`` — apply the same rolls to
+    ``pixels`` before shading and the inverse after.
+    """
+    dy = _roll_shift_unwrap_1d(region.any(axis=1))
+    dx = _roll_shift_unwrap_1d(region.any(axis=0))
+    if dy == 0 and dx == 0:
+        return region, 0, 0
+    ry, rx = -dy, -dx
+    return np.roll(np.roll(region, ry, axis=0), rx, axis=1), ry, rx
+
+
+def _shade_begin_wrap(
+    pixels: np.ndarray,
+    region: np.ndarray,
+    wrap: bool,
+) -> tuple[np.ndarray, bool, int, int]:
+    """Prepare region/pixels for wrap-aware emboss.
+
+    Returns ``(work_region, edge_wrap, roll_y, roll_x)``. When the flood
+    straddles opposite edges, both region and pixels are rolled so the shape
+    is contiguous; ``edge_wrap`` asks blur/gradients to sample toroidally.
+    """
+    if not wrap:
+        return region, False, 0, 0
+    work, ry, rx = _roll_region_contiguous(region)
+    if ry or rx:
+        pixels[:] = np.roll(np.roll(pixels, ry, axis=0), rx, axis=1)
+    return work, _region_touches_edge(work), ry, rx
+
+
+def _shade_end_wrap(pixels: np.ndarray, ry: int, rx: int) -> None:
+    if ry or rx:
+        pixels[:] = np.roll(np.roll(pixels, -ry, axis=0), -rx, axis=1)
+
+
+def _blur_gray01(field: np.ndarray, radius: int, *, wrap: bool = False) -> np.ndarray:
+    """Gaussian-blur an HxW bool/float field to float32 in ``[0, 1]``."""
+    r = max(1, int(radius))
+    src = np.clip(field.astype(np.float32), 0.0, 1.0)
+    u8 = (src * 255.0 + 0.5).astype(np.uint8)
+    if wrap:
+        h, w = u8.shape
+        pad = max(r * 3, 1)
+        # 3×3 tile, blur the center tile with margin, crop back.
+        tiled = np.tile(u8, (3, 3))
+        cy, cx = h, w
+        padded = tiled[cy - pad : cy + h + pad, cx - pad : cx + w + pad]
+        img = Image.fromarray(padded, mode="L")
+        blurred = np.asarray(
+            img.filter(ImageFilter.GaussianBlur(radius=r)), dtype=np.float32
+        ) / 255.0
+        return blurred[pad : pad + h, pad : pad + w]
+    img = Image.fromarray(u8, mode="L")
+    return np.asarray(img.filter(ImageFilter.GaussianBlur(radius=r)), dtype=np.float32) / 255.0
+
+
+def _central_diff(field: np.ndarray, *, wrap: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    """Central differences ``(gx, gy)``; toroidal when ``wrap``."""
+    if wrap:
+        gx = np.roll(field, -1, axis=1) - np.roll(field, 1, axis=1)
+        gy = np.roll(field, -1, axis=0) - np.roll(field, 1, axis=0)
+        return gx, gy
+    gx = np.zeros_like(field)
+    gy = np.zeros_like(field)
+    gx[:, 1:-1] = field[:, 2:] - field[:, :-2]
+    gy[1:-1, :] = field[2:, :] - field[:-2, :]
+    return gx, gy
+
+
 def shade_region_3d(
     pixels: np.ndarray,
     region: np.ndarray,
@@ -2860,75 +2976,75 @@ def shade_region_3d(
     highlight: float = 55.0,
     bevel: float = 40.0,
     light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
+    wrap: bool = False,
 ) -> None:
     """Emboss a filled region: soft height from blur, directional light + highlight."""
-    from PIL import Image, ImageFilter
-
     if not region.any():
         return
-    h, w = region.shape
-    ys, xs = np.where(region)
-    y0, y1 = max(0, int(ys.min()) - 2), min(h, int(ys.max()) + 3)
-    x0, x1 = max(0, int(xs.min()) - 2), min(w, int(xs.max()) + 3)
-    sub = region[y0:y1, x0:x1]
-    sh, sw = sub.shape
+    region, edge_wrap, ry, rx = _shade_begin_wrap(pixels, region, wrap)
+    try:
+        h, w = region.shape
+        ys, xs = np.where(region)
+        y0, y1 = max(0, int(ys.min()) - 2), min(h, int(ys.max()) + 3)
+        x0, x1 = max(0, int(xs.min()) - 2), min(w, int(xs.max()) + 3)
+        if edge_wrap:
+            y0, y1, x0, x1 = 0, h, 0, w
+        sub = region[y0:y1, x0:x1]
+        sh, sw = sub.shape
 
-    bevel_n = max(0.0, min(100.0, bevel)) / 100.0
-    depth_n = max(0.0, min(100.0, depth)) / 100.0
-    high_n = max(0.0, min(100.0, highlight)) / 100.0
+        bevel_n = max(0.0, min(100.0, bevel)) / 100.0
+        depth_n = max(0.0, min(100.0, depth)) / 100.0
+        high_n = max(0.0, min(100.0, highlight)) / 100.0
 
-    # Bevel controls emboss softness (blur of height field)
-    blur_r = max(1, int((0.015 + 0.08 * bevel_n) * max(sh, sw)))
-    img = Image.fromarray((sub.astype(np.uint8) * 255), mode="L")
-    height = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=blur_r)), dtype=np.float32) / 255.0
-    height = height * sub.astype(np.float32)
+        # Bevel controls emboss softness (blur of height field)
+        blur_r = max(1, int((0.015 + 0.08 * bevel_n) * max(sh, sw)))
+        height = _blur_gray01(sub, blur_r, wrap=edge_wrap) * sub.astype(np.float32)
 
-    gx = np.zeros_like(height)
-    gy = np.zeros_like(height)
-    gx[:, 1:-1] = height[:, 2:] - height[:, :-2]
-    gy[1:-1, :] = height[2:, :] - height[:-2, :]
-    nx = -gx
-    ny = -gy
-    nz = np.full_like(height, 0.35 + 0.45 * bevel_n)
-    inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
-    nx, ny, nz = nx * inv, ny * inv, nz * inv
+        gx, gy = _central_diff(height, wrap=edge_wrap)
+        nx = -gx
+        ny = -gy
+        nz = np.full_like(height, 0.35 + 0.45 * bevel_n)
+        inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
+        nx, ny, nz = nx * inv, ny * inv, nz * inv
 
-    lx, ly, lz = normalize_light(*light_dir)
-    ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
+        lx, ly, lz = normalize_light(*light_dir)
+        ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
-    hx, hy, hz = lx, ly, lz + 1.0
-    invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
-    spec_pow = 10.0 + 28.0 * (1.0 - bevel_n)
-    spec = np.clip(nx * hx * invh + ny * hy * invh + nz * hz * invh, 0.0, 1.0) ** spec_pow
-    rim = np.clip(1.0 - height, 0.0, 1.0) * ndotl
+        hx, hy, hz = lx, ly, lz + 1.0
+        invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
+        spec_pow = 10.0 + 28.0 * (1.0 - bevel_n)
+        spec = np.clip(nx * hx * invh + ny * hy * invh + nz * hz * invh, 0.0, 1.0) ** spec_pow
+        rim = np.clip(1.0 - height, 0.0, 1.0) * ndotl
 
-    ambient = 1.0 - 0.88 * depth_n
-    diffuse = 0.88 * depth_n
-    shade = ambient + diffuse * ndotl + (0.12 + 0.32 * depth_n) * rim
-    max_v = _max_v(pixels)
-    base = np.array(color[:3], dtype=np.float32)
-    rgb = base * shade[..., None]
-    rgb = rgb + (max_v - rgb) * ((0.22 + 0.78 * high_n) * spec[..., None])
-    # Soft contact shadow on the dark rim so fills read as raised
-    shadow = (1.0 - ndotl) * (0.12 + 0.28 * depth_n) * np.clip(1.0 - height * 0.65, 0.0, 1.0)
-    rgb = rgb * (1.0 - shadow[..., None])
-    rgb = np.clip(rgb, 0, max_v)
+        ambient = 1.0 - 0.88 * depth_n
+        diffuse = 0.88 * depth_n
+        shade = ambient + diffuse * ndotl + (0.12 + 0.32 * depth_n) * rim
+        max_v = _max_v(pixels)
+        base = np.array(color[:3], dtype=np.float32)
+        rgb = base * shade[..., None]
+        rgb = rgb + (max_v - rgb) * ((0.22 + 0.78 * high_n) * spec[..., None])
+        # Soft contact shadow on the dark rim so fills read as raised
+        shadow = (1.0 - ndotl) * (0.12 + 0.28 * depth_n) * np.clip(1.0 - height * 0.65, 0.0, 1.0)
+        rgb = rgb * (1.0 - shadow[..., None])
+        rgb = np.clip(rgb, 0, max_v)
 
-    alpha = float(color[3])
-    dest = pixels[y0:y1, x0:x1].astype(np.float32)
-    m = sub
-    a = alpha / max_v
-    if a >= 0.999:
-        dest[..., 0][m] = rgb[..., 0][m]
-        dest[..., 1][m] = rgb[..., 1][m]
-        dest[..., 2][m] = rgb[..., 2][m]
-        dest[..., 3][m] = alpha
-    elif a > 0.0:
-        dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
-        dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
-        dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
-        dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
-    pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+        alpha = float(color[3])
+        dest = pixels[y0:y1, x0:x1].astype(np.float32)
+        m = sub
+        a = alpha / max_v
+        if a >= 0.999:
+            dest[..., 0][m] = rgb[..., 0][m]
+            dest[..., 1][m] = rgb[..., 1][m]
+            dest[..., 2][m] = rgb[..., 2][m]
+            dest[..., 3][m] = alpha
+        elif a > 0.0:
+            dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
+            dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
+            dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
+            dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
+        pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+    finally:
+        _shade_end_wrap(pixels, ry, rx)
 
 
 def shade_region_depression(
@@ -2939,79 +3055,80 @@ def shade_region_depression(
     highlight: float = 55.0,
     bevel: float = 40.0,
     light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
+    wrap: bool = False,
 ) -> None:
     """Carve a filled region inward: inverted height so the fill reads as a depression."""
-    from PIL import Image, ImageFilter
-
     if not region.any():
         return
-    h, w = region.shape
-    ys, xs = np.where(region)
-    y0, y1 = max(0, int(ys.min()) - 2), min(h, int(ys.max()) + 3)
-    x0, x1 = max(0, int(xs.min()) - 2), min(w, int(xs.max()) + 3)
-    sub = region[y0:y1, x0:x1]
-    sh, sw = sub.shape
-    mask_f = sub.astype(np.float32)
+    region, edge_wrap, ry, rx = _shade_begin_wrap(pixels, region, wrap)
+    try:
+        h, w = region.shape
+        ys, xs = np.where(region)
+        y0, y1 = max(0, int(ys.min()) - 2), min(h, int(ys.max()) + 3)
+        x0, x1 = max(0, int(xs.min()) - 2), min(w, int(xs.max()) + 3)
+        if edge_wrap:
+            y0, y1, x0, x1 = 0, h, 0, w
+        sub = region[y0:y1, x0:x1]
+        sh, sw = sub.shape
+        mask_f = sub.astype(np.float32)
 
-    bevel_n = max(0.0, min(100.0, bevel)) / 100.0
-    depth_n = max(0.0, min(100.0, depth)) / 100.0
-    high_n = max(0.0, min(100.0, highlight)) / 100.0
+        bevel_n = max(0.0, min(100.0, bevel)) / 100.0
+        depth_n = max(0.0, min(100.0, depth)) / 100.0
+        high_n = max(0.0, min(100.0, highlight)) / 100.0
 
-    # Same soft edge as classic, then invert so the interior sinks and the lip rises.
-    blur_r = max(1, int((0.015 + 0.08 * bevel_n) * max(sh, sw)))
-    img = Image.fromarray((sub.astype(np.uint8) * 255), mode="L")
-    raised = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=blur_r)), dtype=np.float32) / 255.0
-    height = (1.0 - raised) * mask_f
+        # Same soft edge as classic, then invert so the interior sinks and the lip rises.
+        blur_r = max(1, int((0.015 + 0.08 * bevel_n) * max(sh, sw)))
+        raised = _blur_gray01(sub, blur_r, wrap=edge_wrap)
+        height = (1.0 - raised) * mask_f
 
-    gx = np.zeros_like(height)
-    gy = np.zeros_like(height)
-    gx[:, 1:-1] = height[:, 2:] - height[:, :-2]
-    gy[1:-1, :] = height[2:, :] - height[:-2, :]
-    nx = -gx
-    ny = -gy
-    nz = np.full_like(height, 0.35 + 0.45 * bevel_n)
-    inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
-    nx, ny, nz = nx * inv, ny * inv, nz * inv
+        gx, gy = _central_diff(height, wrap=edge_wrap)
+        nx = -gx
+        ny = -gy
+        nz = np.full_like(height, 0.35 + 0.45 * bevel_n)
+        inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
+        nx, ny, nz = nx * inv, ny * inv, nz * inv
 
-    lx, ly, lz = normalize_light(*light_dir)
-    ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
+        lx, ly, lz = normalize_light(*light_dir)
+        ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
-    hx, hy, hz = lx, ly, lz + 1.0
-    invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
-    spec_pow = 10.0 + 28.0 * (1.0 - bevel_n)
-    spec = np.clip(nx * hx * invh + ny * hy * invh + nz * hz * invh, 0.0, 1.0) ** spec_pow
-    # Catch light on the raised lip; leave the basin darker.
-    lip = np.clip(height, 0.0, 1.0) * ndotl
+        hx, hy, hz = lx, ly, lz + 1.0
+        invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
+        spec_pow = 10.0 + 28.0 * (1.0 - bevel_n)
+        spec = np.clip(nx * hx * invh + ny * hy * invh + nz * hz * invh, 0.0, 1.0) ** spec_pow
+        # Catch light on the raised lip; leave the basin darker.
+        lip = np.clip(height, 0.0, 1.0) * ndotl
 
-    ambient = 1.0 - 0.88 * depth_n
-    diffuse = 0.88 * depth_n
-    # Slightly lower ambient so the well reads recessed.
-    shade = (ambient * 0.92) + diffuse * ndotl + (0.14 + 0.36 * depth_n) * lip
-    max_v = _max_v(pixels)
-    base = np.array(color[:3], dtype=np.float32)
-    rgb = base * shade[..., None]
-    rgb = rgb + (max_v - rgb) * ((0.18 + 0.72 * high_n) * spec[..., None])
-    # Soft occluding shadow in the basin (low height), stronger on the dark wall.
-    basin = np.clip(1.0 - height, 0.0, 1.0)
-    shadow = (0.10 + 0.34 * depth_n) * basin * (0.45 + 0.55 * (1.0 - ndotl))
-    rgb = rgb * (1.0 - shadow[..., None])
-    rgb = np.clip(rgb, 0, max_v)
+        ambient = 1.0 - 0.88 * depth_n
+        diffuse = 0.88 * depth_n
+        # Slightly lower ambient so the well reads recessed.
+        shade = (ambient * 0.92) + diffuse * ndotl + (0.14 + 0.36 * depth_n) * lip
+        max_v = _max_v(pixels)
+        base = np.array(color[:3], dtype=np.float32)
+        rgb = base * shade[..., None]
+        rgb = rgb + (max_v - rgb) * ((0.18 + 0.72 * high_n) * spec[..., None])
+        # Soft occluding shadow in the basin (low height), stronger on the dark wall.
+        basin = np.clip(1.0 - height, 0.0, 1.0)
+        shadow = (0.10 + 0.34 * depth_n) * basin * (0.45 + 0.55 * (1.0 - ndotl))
+        rgb = rgb * (1.0 - shadow[..., None])
+        rgb = np.clip(rgb, 0, max_v)
 
-    alpha = float(color[3])
-    dest = pixels[y0:y1, x0:x1].astype(np.float32)
-    m = sub
-    a = alpha / max_v
-    if a >= 0.999:
-        dest[..., 0][m] = rgb[..., 0][m]
-        dest[..., 1][m] = rgb[..., 1][m]
-        dest[..., 2][m] = rgb[..., 2][m]
-        dest[..., 3][m] = alpha
-    elif a > 0.0:
-        dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
-        dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
-        dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
-        dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
-    pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+        alpha = float(color[3])
+        dest = pixels[y0:y1, x0:x1].astype(np.float32)
+        m = sub
+        a = alpha / max_v
+        if a >= 0.999:
+            dest[..., 0][m] = rgb[..., 0][m]
+            dest[..., 1][m] = rgb[..., 1][m]
+            dest[..., 2][m] = rgb[..., 2][m]
+            dest[..., 3][m] = alpha
+        elif a > 0.0:
+            dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
+            dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
+            dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
+            dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
+        pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+    finally:
+        _shade_end_wrap(pixels, ry, rx)
 
 
 def shade_region_addiction(
@@ -3022,130 +3139,127 @@ def shade_region_addiction(
     highlight: float = 55.0,
     bevel: float = 40.0,
     light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
+    wrap: bool = False,
 ) -> None:
     """Deep emboss with multi-scale height, lobed ridges, and dual specular."""
-    from PIL import Image, ImageFilter
-
     if not region.any():
         return
-    h, w = region.shape
-    ys, xs = np.where(region)
-    pad = 4
-    y0, y1 = max(0, int(ys.min()) - pad), min(h, int(ys.max()) + pad + 1)
-    x0, x1 = max(0, int(xs.min()) - pad), min(w, int(xs.max()) + pad + 1)
-    sub = region[y0:y1, x0:x1]
-    sh, sw = sub.shape
-    mask_f = sub.astype(np.float32)
+    region, edge_wrap, ry, rx = _shade_begin_wrap(pixels, region, wrap)
+    try:
+        h, w = region.shape
+        ys, xs = np.where(region)
+        pad = 4
+        y0, y1 = max(0, int(ys.min()) - pad), min(h, int(ys.max()) + pad + 1)
+        x0, x1 = max(0, int(xs.min()) - pad), min(w, int(xs.max()) + pad + 1)
+        if edge_wrap:
+            y0, y1, x0, x1 = 0, h, 0, w
+        sub = region[y0:y1, x0:x1]
+        sh, sw = sub.shape
+        mask_f = sub.astype(np.float32)
 
-    bevel_n = max(0.0, min(100.0, bevel)) / 100.0
-    # Addiction pushes depth/highlight harder than classic for the same dial
-    depth_n = min(1.0, (max(0.0, min(100.0, depth)) / 100.0) * 1.18)
-    high_n = min(1.0, (max(0.0, min(100.0, highlight)) / 100.0) * 1.22)
+        bevel_n = max(0.0, min(100.0, bevel)) / 100.0
+        # Addiction pushes depth/highlight harder than classic for the same dial
+        depth_n = min(1.0, (max(0.0, min(100.0, depth)) / 100.0) * 1.18)
+        high_n = min(1.0, (max(0.0, min(100.0, highlight)) / 100.0) * 1.22)
 
-    extent = max(sh, sw)
-    blur_coarse = max(2, int((0.05 + 0.14 * bevel_n) * extent))
-    blur_mid = max(1, int((0.02 + 0.07 * bevel_n) * extent))
-    blur_fine = max(1, int((0.008 + 0.03 * bevel_n) * extent))
+        extent = max(sh, sw)
+        blur_coarse = max(2, int((0.05 + 0.14 * bevel_n) * extent))
+        blur_mid = max(1, int((0.02 + 0.07 * bevel_n) * extent))
+        blur_fine = max(1, int((0.008 + 0.03 * bevel_n) * extent))
 
-    img = Image.fromarray((sub.astype(np.uint8) * 255), mode="L")
-    coarse = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=blur_coarse)), dtype=np.float32) / 255.0
-    mid = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=blur_mid)), dtype=np.float32) / 255.0
-    fine = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=blur_fine)), dtype=np.float32) / 255.0
+        coarse = _blur_gray01(sub, blur_coarse, wrap=edge_wrap)
+        mid = _blur_gray01(sub, blur_mid, wrap=edge_wrap)
+        fine = _blur_gray01(sub, blur_fine, wrap=edge_wrap)
 
-    # Soft inward distance from exterior blur (no scipy)
-    inv = Image.fromarray(((~sub).astype(np.uint8) * 255), mode="L")
-    exterior = np.asarray(inv.filter(ImageFilter.GaussianBlur(radius=blur_mid)), dtype=np.float32) / 255.0
-    soft_dist = np.clip(1.0 - exterior, 0.0, 1.0) * mask_f
+        # Soft inward distance from exterior blur (no scipy)
+        exterior = _blur_gray01(~sub, blur_mid, wrap=edge_wrap)
+        soft_dist = np.clip(1.0 - exterior, 0.0, 1.0) * mask_f
 
-    # Complex interior: multi-lobe ridges around the region centroid
-    cy = float(np.mean(ys - y0))
-    cx = float(np.mean(xs - x0))
-    yy, xx = np.mgrid[0:sh, 0:sw].astype(np.float32)
-    dx = xx - cx
-    dy = yy - cy
-    rad = np.sqrt(dx * dx + dy * dy) + 1e-5
-    ang = np.arctan2(dy, dx)
-    rad_n = rad / max(8.0, 0.45 * extent)
-    lobes = (
-        0.55
-        + 0.28 * np.cos(3.0 * ang + 0.4)
-        + 0.18 * np.cos(5.0 * ang - 1.1)
-        + 0.12 * np.sin(2.0 * ang + rad_n * 2.4)
-    )
-    ring = np.sin(np.pi * np.clip(rad_n * (1.15 + 0.55 * bevel_n), 0.0, 1.0)) ** 2
-    detail = soft_dist * lobes * (0.35 + 0.65 * ring)
-    # Secondary micro-bumps for richer surface
-    micro = soft_dist * (0.5 + 0.5 * np.sin(xx * 0.31 + yy * 0.27) * np.cos(xx * 0.19 - yy * 0.23))
+        # Complex interior: multi-lobe ridges around the region centroid
+        cy = float(np.mean(ys - y0))
+        cx = float(np.mean(xs - x0))
+        yy, xx = np.mgrid[0:sh, 0:sw].astype(np.float32)
+        dx = xx - cx
+        dy = yy - cy
+        rad = np.sqrt(dx * dx + dy * dy) + 1e-5
+        ang = np.arctan2(dy, dx)
+        rad_n = rad / max(8.0, 0.45 * extent)
+        lobes = (
+            0.55
+            + 0.28 * np.cos(3.0 * ang + 0.4)
+            + 0.18 * np.cos(5.0 * ang - 1.1)
+            + 0.12 * np.sin(2.0 * ang + rad_n * 2.4)
+        )
+        ring = np.sin(np.pi * np.clip(rad_n * (1.15 + 0.55 * bevel_n), 0.0, 1.0)) ** 2
+        detail = soft_dist * lobes * (0.35 + 0.65 * ring)
+        # Secondary micro-bumps for richer surface
+        micro = soft_dist * (0.5 + 0.5 * np.sin(xx * 0.31 + yy * 0.27) * np.cos(xx * 0.19 - yy * 0.23))
 
-    height = (
-        0.42 * coarse
-        + 0.28 * mid
-        + 0.12 * fine
-        + 0.22 * detail
-        + 0.08 * micro
-    ) * mask_f
-    # Sharpen the plateau so deep fills read more sculpted
-    height = np.clip(height * (0.85 + 0.55 * depth_n), 0.0, 1.0) * mask_f
+        height = (
+            0.42 * coarse
+            + 0.28 * mid
+            + 0.12 * fine
+            + 0.22 * detail
+            + 0.08 * micro
+        ) * mask_f
+        # Sharpen the plateau so deep fills read more sculpted
+        height = np.clip(height * (0.85 + 0.55 * depth_n), 0.0, 1.0) * mask_f
 
-    gx = np.zeros_like(height)
-    gy = np.zeros_like(height)
-    gx[:, 1:-1] = height[:, 2:] - height[:, :-2]
-    gy[1:-1, :] = height[2:, :] - height[:-2, :]
-    # Extra mid-frequency normals from detail alone for complex facets
-    dgx = np.zeros_like(height)
-    dgy = np.zeros_like(height)
-    dgx[:, 1:-1] = detail[:, 2:] - detail[:, :-2]
-    dgy[1:-1, :] = detail[2:, :] - detail[:-2, :]
-    nx = -(gx + 0.55 * dgx)
-    ny = -(gy + 0.55 * dgy)
-    nz = np.full_like(height, 0.22 + 0.38 * bevel_n)
-    invn = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
-    nx, ny, nz = nx * invn, ny * invn, nz * invn
+        gx, gy = _central_diff(height, wrap=edge_wrap)
+        # Extra mid-frequency normals from detail alone for complex facets
+        dgx, dgy = _central_diff(detail, wrap=edge_wrap)
+        nx = -(gx + 0.55 * dgx)
+        ny = -(gy + 0.55 * dgy)
+        nz = np.full_like(height, 0.22 + 0.38 * bevel_n)
+        invn = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
+        nx, ny, nz = nx * invn, ny * invn, nz * invn
 
-    # Key light + cooler fill light for more dimensional shading
-    lx, ly, lz = normalize_light(*light_dir)
-    ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
+        # Key light + cooler fill light for more dimensional shading
+        lx, ly, lz = normalize_light(*light_dir)
+        ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
-    fx, fy, fz = fill_light_from_key(lx, ly, lz)
-    fill_l = np.clip(nx * fx + ny * fy + nz * fz, 0.0, 1.0)
+        fx, fy, fz = fill_light_from_key(lx, ly, lz)
+        fill_l = np.clip(nx * fx + ny * fy + nz * fz, 0.0, 1.0)
 
-    hx, hy, hz = lx, ly, lz + 1.0
-    invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
-    hx, hy, hz = hx * invh, hy * invh, hz * invh
-    half = np.clip(nx * hx + ny * hy + nz * hz, 0.0, 1.0)
-    spec_broad = half ** (6.0 + 10.0 * (1.0 - bevel_n))
-    spec_hot = half ** (22.0 + 40.0 * (1.0 - bevel_n))
-    rim = np.clip(1.0 - height, 0.0, 1.0) * ndotl
+        hx, hy, hz = lx, ly, lz + 1.0
+        invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
+        hx, hy, hz = hx * invh, hy * invh, hz * invh
+        half = np.clip(nx * hx + ny * hy + nz * hz, 0.0, 1.0)
+        spec_broad = half ** (6.0 + 10.0 * (1.0 - bevel_n))
+        spec_hot = half ** (22.0 + 40.0 * (1.0 - bevel_n))
+        rim = np.clip(1.0 - height, 0.0, 1.0) * ndotl
 
-    ambient = 1.0 - 0.94 * depth_n
-    diffuse = 0.72 * depth_n * ndotl + 0.28 * depth_n * fill_l
-    shade = ambient + diffuse + (0.16 + 0.38 * depth_n) * rim
-    max_v = _max_v(pixels)
-    base = np.array(color[:3], dtype=np.float32)
-    rgb = base * shade[..., None]
-    spec_amt = (0.18 + 0.55 * high_n) * spec_broad + (0.20 + 0.72 * high_n) * spec_hot
-    rgb = rgb + (max_v - rgb) * spec_amt[..., None]
-    # Deep contact shadow in valleys / dark rims
-    valley = np.clip(1.0 - height * 0.55, 0.0, 1.0)
-    shadow = (1.0 - ndotl) * (0.18 + 0.42 * depth_n) * valley
-    rgb = rgb * (1.0 - shadow[..., None])
-    rgb = np.clip(rgb, 0, max_v)
+        ambient = 1.0 - 0.94 * depth_n
+        diffuse = 0.72 * depth_n * ndotl + 0.28 * depth_n * fill_l
+        shade = ambient + diffuse + (0.16 + 0.38 * depth_n) * rim
+        max_v = _max_v(pixels)
+        base = np.array(color[:3], dtype=np.float32)
+        rgb = base * shade[..., None]
+        spec_amt = (0.18 + 0.55 * high_n) * spec_broad + (0.20 + 0.72 * high_n) * spec_hot
+        rgb = rgb + (max_v - rgb) * spec_amt[..., None]
+        # Deep contact shadow in valleys / dark rims
+        valley = np.clip(1.0 - height * 0.55, 0.0, 1.0)
+        shadow = (1.0 - ndotl) * (0.18 + 0.42 * depth_n) * valley
+        rgb = rgb * (1.0 - shadow[..., None])
+        rgb = np.clip(rgb, 0, max_v)
 
-    alpha = float(color[3])
-    dest = pixels[y0:y1, x0:x1].astype(np.float32)
-    m = sub
-    a = alpha / max_v
-    if a >= 0.999:
-        dest[..., 0][m] = rgb[..., 0][m]
-        dest[..., 1][m] = rgb[..., 1][m]
-        dest[..., 2][m] = rgb[..., 2][m]
-        dest[..., 3][m] = alpha
-    elif a > 0.0:
-        dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
-        dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
-        dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
-        dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
-    pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+        alpha = float(color[3])
+        dest = pixels[y0:y1, x0:x1].astype(np.float32)
+        m = sub
+        a = alpha / max_v
+        if a >= 0.999:
+            dest[..., 0][m] = rgb[..., 0][m]
+            dest[..., 1][m] = rgb[..., 1][m]
+            dest[..., 2][m] = rgb[..., 2][m]
+            dest[..., 3][m] = alpha
+        elif a > 0.0:
+            dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
+            dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
+            dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
+            dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
+        pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+    finally:
+        _shade_end_wrap(pixels, ry, rx)
 
 
 def shade_region_drift(
@@ -3156,119 +3270,116 @@ def shade_region_drift(
     highlight: float = 55.0,
     bevel: float = 40.0,
     light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
+    wrap: bool = False,
 ) -> None:
     """Addiction-style emboss with silhouette contours and directional ridges (no center pinch)."""
-    from PIL import Image, ImageFilter
-
     if not region.any():
         return
-    h, w = region.shape
-    ys, xs = np.where(region)
-    pad = 4
-    y0, y1 = max(0, int(ys.min()) - pad), min(h, int(ys.max()) + pad + 1)
-    x0, x1 = max(0, int(xs.min()) - pad), min(w, int(xs.max()) + pad + 1)
-    sub = region[y0:y1, x0:x1]
-    sh, sw = sub.shape
-    mask_f = sub.astype(np.float32)
+    region, edge_wrap, ry, rx = _shade_begin_wrap(pixels, region, wrap)
+    try:
+        h, w = region.shape
+        ys, xs = np.where(region)
+        pad = 4
+        y0, y1 = max(0, int(ys.min()) - pad), min(h, int(ys.max()) + pad + 1)
+        x0, x1 = max(0, int(xs.min()) - pad), min(w, int(xs.max()) + pad + 1)
+        if edge_wrap:
+            y0, y1, x0, x1 = 0, h, 0, w
+        sub = region[y0:y1, x0:x1]
+        sh, sw = sub.shape
+        mask_f = sub.astype(np.float32)
 
-    bevel_n = max(0.0, min(100.0, bevel)) / 100.0
-    depth_n = min(1.0, (max(0.0, min(100.0, depth)) / 100.0) * 1.18)
-    high_n = min(1.0, (max(0.0, min(100.0, highlight)) / 100.0) * 1.22)
+        bevel_n = max(0.0, min(100.0, bevel)) / 100.0
+        depth_n = min(1.0, (max(0.0, min(100.0, depth)) / 100.0) * 1.18)
+        high_n = min(1.0, (max(0.0, min(100.0, highlight)) / 100.0) * 1.22)
 
-    extent = max(sh, sw)
-    blur_coarse = max(2, int((0.05 + 0.14 * bevel_n) * extent))
-    blur_mid = max(1, int((0.02 + 0.07 * bevel_n) * extent))
-    blur_fine = max(1, int((0.008 + 0.03 * bevel_n) * extent))
+        extent = max(sh, sw)
+        blur_coarse = max(2, int((0.05 + 0.14 * bevel_n) * extent))
+        blur_mid = max(1, int((0.02 + 0.07 * bevel_n) * extent))
+        blur_fine = max(1, int((0.008 + 0.03 * bevel_n) * extent))
 
-    img = Image.fromarray((sub.astype(np.uint8) * 255), mode="L")
-    coarse = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=blur_coarse)), dtype=np.float32) / 255.0
-    mid = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=blur_mid)), dtype=np.float32) / 255.0
-    fine = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=blur_fine)), dtype=np.float32) / 255.0
+        coarse = _blur_gray01(sub, blur_coarse, wrap=edge_wrap)
+        mid = _blur_gray01(sub, blur_mid, wrap=edge_wrap)
+        fine = _blur_gray01(sub, blur_fine, wrap=edge_wrap)
 
-    inv = Image.fromarray(((~sub).astype(np.uint8) * 255), mode="L")
-    exterior = np.asarray(inv.filter(ImageFilter.GaussianBlur(radius=blur_mid)), dtype=np.float32) / 255.0
-    soft_dist = np.clip(1.0 - exterior, 0.0, 1.0) * mask_f
+        exterior = _blur_gray01(~sub, blur_mid, wrap=edge_wrap)
+        soft_dist = np.clip(1.0 - exterior, 0.0, 1.0) * mask_f
 
-    # Interior detail without polar math: silhouette-parallel bands + crossed planar waves.
-    # Contours follow soft_dist (never meet at a point); flow is directional across the crop.
-    yy, xx = np.mgrid[0:sh, 0:sw].astype(np.float32)
-    xn = xx / max(8.0, float(sw))
-    yn = yy / max(8.0, float(sh))
-    contour = np.sin(np.pi * soft_dist * (1.8 + 2.8 * bevel_n)) ** 2
-    flow = (
-        0.55
-        + 0.28 * np.sin((xn * 3.2 + yn * 2.1) * (2.0 + 3.5 * bevel_n) * np.pi + 0.3)
-        + 0.18 * np.sin((xn * -1.7 + yn * 3.8) * (1.6 + 2.8 * bevel_n) * np.pi - 0.8)
-        + 0.12 * np.cos((xn * 4.5 - yn * 1.2) * (1.2 + 2.0 * bevel_n) * np.pi)
-    )
-    detail = soft_dist * flow * (0.40 + 0.60 * contour)
-    micro = soft_dist * (0.5 + 0.5 * np.sin(xx * 0.31 + yy * 0.27) * np.cos(xx * 0.19 - yy * 0.23))
+        # Interior detail without polar math: silhouette-parallel bands + crossed planar waves.
+        # Contours follow soft_dist (never meet at a point); flow is directional across the crop.
+        yy, xx = np.mgrid[0:sh, 0:sw].astype(np.float32)
+        xn = xx / max(8.0, float(sw))
+        yn = yy / max(8.0, float(sh))
+        contour = np.sin(np.pi * soft_dist * (1.8 + 2.8 * bevel_n)) ** 2
+        flow = (
+            0.55
+            + 0.28 * np.sin((xn * 3.2 + yn * 2.1) * (2.0 + 3.5 * bevel_n) * np.pi + 0.3)
+            + 0.18 * np.sin((xn * -1.7 + yn * 3.8) * (1.6 + 2.8 * bevel_n) * np.pi - 0.8)
+            + 0.12 * np.cos((xn * 4.5 - yn * 1.2) * (1.2 + 2.0 * bevel_n) * np.pi)
+        )
+        detail = soft_dist * flow * (0.40 + 0.60 * contour)
+        micro = soft_dist * (0.5 + 0.5 * np.sin(xx * 0.31 + yy * 0.27) * np.cos(xx * 0.19 - yy * 0.23))
 
-    height = (
-        0.42 * coarse
-        + 0.28 * mid
-        + 0.12 * fine
-        + 0.22 * detail
-        + 0.08 * micro
-    ) * mask_f
-    height = np.clip(height * (0.85 + 0.55 * depth_n), 0.0, 1.0) * mask_f
+        height = (
+            0.42 * coarse
+            + 0.28 * mid
+            + 0.12 * fine
+            + 0.22 * detail
+            + 0.08 * micro
+        ) * mask_f
+        height = np.clip(height * (0.85 + 0.55 * depth_n), 0.0, 1.0) * mask_f
 
-    gx = np.zeros_like(height)
-    gy = np.zeros_like(height)
-    gx[:, 1:-1] = height[:, 2:] - height[:, :-2]
-    gy[1:-1, :] = height[2:, :] - height[:-2, :]
-    dgx = np.zeros_like(height)
-    dgy = np.zeros_like(height)
-    dgx[:, 1:-1] = detail[:, 2:] - detail[:, :-2]
-    dgy[1:-1, :] = detail[2:, :] - detail[:-2, :]
-    nx = -(gx + 0.55 * dgx)
-    ny = -(gy + 0.55 * dgy)
-    nz = np.full_like(height, 0.22 + 0.38 * bevel_n)
-    invn = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
-    nx, ny, nz = nx * invn, ny * invn, nz * invn
+        gx, gy = _central_diff(height, wrap=edge_wrap)
+        dgx, dgy = _central_diff(detail, wrap=edge_wrap)
+        nx = -(gx + 0.55 * dgx)
+        ny = -(gy + 0.55 * dgy)
+        nz = np.full_like(height, 0.22 + 0.38 * bevel_n)
+        invn = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
+        nx, ny, nz = nx * invn, ny * invn, nz * invn
 
-    lx, ly, lz = normalize_light(*light_dir)
-    ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
+        lx, ly, lz = normalize_light(*light_dir)
+        ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
-    fx, fy, fz = fill_light_from_key(lx, ly, lz)
-    fill_l = np.clip(nx * fx + ny * fy + nz * fz, 0.0, 1.0)
+        fx, fy, fz = fill_light_from_key(lx, ly, lz)
+        fill_l = np.clip(nx * fx + ny * fy + nz * fz, 0.0, 1.0)
 
-    hx, hy, hz = lx, ly, lz + 1.0
-    invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
-    hx, hy, hz = hx * invh, hy * invh, hz * invh
-    half = np.clip(nx * hx + ny * hy + nz * hz, 0.0, 1.0)
-    spec_broad = half ** (6.0 + 10.0 * (1.0 - bevel_n))
-    spec_hot = half ** (22.0 + 40.0 * (1.0 - bevel_n))
-    rim = np.clip(1.0 - height, 0.0, 1.0) * ndotl
+        hx, hy, hz = lx, ly, lz + 1.0
+        invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
+        hx, hy, hz = hx * invh, hy * invh, hz * invh
+        half = np.clip(nx * hx + ny * hy + nz * hz, 0.0, 1.0)
+        spec_broad = half ** (6.0 + 10.0 * (1.0 - bevel_n))
+        spec_hot = half ** (22.0 + 40.0 * (1.0 - bevel_n))
+        rim = np.clip(1.0 - height, 0.0, 1.0) * ndotl
 
-    ambient = 1.0 - 0.94 * depth_n
-    diffuse = 0.72 * depth_n * ndotl + 0.28 * depth_n * fill_l
-    shade = ambient + diffuse + (0.16 + 0.38 * depth_n) * rim
-    max_v = _max_v(pixels)
-    base = np.array(color[:3], dtype=np.float32)
-    rgb = base * shade[..., None]
-    spec_amt = (0.18 + 0.55 * high_n) * spec_broad + (0.20 + 0.72 * high_n) * spec_hot
-    rgb = rgb + (max_v - rgb) * spec_amt[..., None]
-    valley = np.clip(1.0 - height * 0.55, 0.0, 1.0)
-    shadow = (1.0 - ndotl) * (0.18 + 0.42 * depth_n) * valley
-    rgb = rgb * (1.0 - shadow[..., None])
-    rgb = np.clip(rgb, 0, max_v)
+        ambient = 1.0 - 0.94 * depth_n
+        diffuse = 0.72 * depth_n * ndotl + 0.28 * depth_n * fill_l
+        shade = ambient + diffuse + (0.16 + 0.38 * depth_n) * rim
+        max_v = _max_v(pixels)
+        base = np.array(color[:3], dtype=np.float32)
+        rgb = base * shade[..., None]
+        spec_amt = (0.18 + 0.55 * high_n) * spec_broad + (0.20 + 0.72 * high_n) * spec_hot
+        rgb = rgb + (max_v - rgb) * spec_amt[..., None]
+        valley = np.clip(1.0 - height * 0.55, 0.0, 1.0)
+        shadow = (1.0 - ndotl) * (0.18 + 0.42 * depth_n) * valley
+        rgb = rgb * (1.0 - shadow[..., None])
+        rgb = np.clip(rgb, 0, max_v)
 
-    alpha = float(color[3])
-    dest = pixels[y0:y1, x0:x1].astype(np.float32)
-    m = sub
-    a = alpha / max_v
-    if a >= 0.999:
-        dest[..., 0][m] = rgb[..., 0][m]
-        dest[..., 1][m] = rgb[..., 1][m]
-        dest[..., 2][m] = rgb[..., 2][m]
-        dest[..., 3][m] = alpha
-    elif a > 0.0:
-        dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
-        dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
-        dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
-        dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
-    pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+        alpha = float(color[3])
+        dest = pixels[y0:y1, x0:x1].astype(np.float32)
+        m = sub
+        a = alpha / max_v
+        if a >= 0.999:
+            dest[..., 0][m] = rgb[..., 0][m]
+            dest[..., 1][m] = rgb[..., 1][m]
+            dest[..., 2][m] = rgb[..., 2][m]
+            dest[..., 3][m] = alpha
+        elif a > 0.0:
+            dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
+            dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
+            dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
+            dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
+        pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+    finally:
+        _shade_end_wrap(pixels, ry, rx)
 
 
 def shade_region_wavy(
@@ -3279,118 +3390,118 @@ def shade_region_wavy(
     highlight: float = 55.0,
     bevel: float = 40.0,
     light_dir: tuple[float, float, float] = DEFAULT_LIGHT_DIR,
+    wrap: bool = False,
 ) -> None:
     """Emboss with corner-distance waves: highlights and shadows radiate from bbox corners."""
-    from PIL import Image, ImageFilter
-
     if not region.any():
         return
-    h, w = region.shape
-    ys, xs = np.where(region)
-    pad = 3
-    y0, y1 = max(0, int(ys.min()) - pad), min(h, int(ys.max()) + pad + 1)
-    x0, x1 = max(0, int(xs.min()) - pad), min(w, int(xs.max()) + pad + 1)
-    sub = region[y0:y1, x0:x1]
-    sh, sw = sub.shape
-    mask_f = sub.astype(np.float32)
+    region, edge_wrap, ry, rx = _shade_begin_wrap(pixels, region, wrap)
+    try:
+        h, w = region.shape
+        ys, xs = np.where(region)
+        pad = 3
+        y0, y1 = max(0, int(ys.min()) - pad), min(h, int(ys.max()) + pad + 1)
+        x0, x1 = max(0, int(xs.min()) - pad), min(w, int(xs.max()) + pad + 1)
+        if edge_wrap:
+            y0, y1, x0, x1 = 0, h, 0, w
+        sub = region[y0:y1, x0:x1]
+        sh, sw = sub.shape
+        mask_f = sub.astype(np.float32)
 
-    bevel_n = max(0.0, min(100.0, bevel)) / 100.0
-    depth_n = max(0.0, min(100.0, depth)) / 100.0
-    high_n = max(0.0, min(100.0, highlight)) / 100.0
+        bevel_n = max(0.0, min(100.0, bevel)) / 100.0
+        depth_n = max(0.0, min(100.0, depth)) / 100.0
+        high_n = max(0.0, min(100.0, highlight)) / 100.0
 
-    # Soft edge height so the fill still reads raised at the silhouette.
-    blur_r = max(1, int((0.012 + 0.07 * bevel_n) * max(sh, sw)))
-    img = Image.fromarray((sub.astype(np.uint8) * 255), mode="L")
-    edge = np.asarray(img.filter(ImageFilter.GaussianBlur(radius=blur_r)), dtype=np.float32) / 255.0
-    edge = edge * mask_f
+        # Soft edge height so the fill still reads raised at the silhouette.
+        blur_r = max(1, int((0.012 + 0.07 * bevel_n) * max(sh, sw)))
+        edge = _blur_gray01(sub, blur_r, wrap=edge_wrap) * mask_f
 
-    # Distances from the four region-bbox corners (in crop-local coords).
-    yy, xx = np.mgrid[0:sh, 0:sw].astype(np.float32)
-    # Use the filled region's own extremes so irregular shapes still get clear corners.
-    ry0, ry1 = float(ys.min() - y0), float(ys.max() - y0)
-    rx0, rx1 = float(xs.min() - x0), float(xs.max() - x0)
-    d_tl = np.sqrt((xx - rx0) ** 2 + (yy - ry0) ** 2)
-    d_tr = np.sqrt((xx - rx1) ** 2 + (yy - ry0) ** 2)
-    d_bl = np.sqrt((xx - rx0) ** 2 + (yy - ry1) ** 2)
-    d_br = np.sqrt((xx - rx1) ** 2 + (yy - ry1) ** 2)
-    diag = max(8.0, float(np.hypot(rx1 - rx0, ry1 - ry0)))
-    n_tl, n_tr = d_tl / diag, d_tr / diag
-    n_bl, n_br = d_bl / diag, d_br / diag
+        # Distances from the four region-bbox corners (in crop-local coords).
+        yy, xx = np.mgrid[0:sh, 0:sw].astype(np.float32)
+        # Use the filled region's own extremes so irregular shapes still get clear corners.
+        ry0, ry1 = float(ys.min() - y0), float(ys.max() - y0)
+        rx0, rx1 = float(xs.min() - x0), float(xs.max() - x0)
+        d_tl = np.sqrt((xx - rx0) ** 2 + (yy - ry0) ** 2)
+        d_tr = np.sqrt((xx - rx1) ** 2 + (yy - ry0) ** 2)
+        d_bl = np.sqrt((xx - rx0) ** 2 + (yy - ry1) ** 2)
+        d_br = np.sqrt((xx - rx1) ** 2 + (yy - ry1) ** 2)
+        diag = max(8.0, float(np.hypot(rx1 - rx0, ry1 - ry0)))
+        n_tl, n_tr = d_tl / diag, d_tr / diag
+        n_bl, n_br = d_bl / diag, d_br / diag
 
-    # Wave frequency: higher bevel → tighter ripples from each corner.
-    freq = (2.2 + 5.5 * bevel_n) * np.pi
-    wave = (
-        np.sin(freq * n_tl)
-        + 0.85 * np.sin(freq * n_tr + 0.9)
-        + 0.75 * np.sin(freq * n_bl + 1.7)
-        + 0.95 * np.sin(freq * n_br + 2.6)
-    ) * 0.25
-    # Soft falloff so waves settle toward the interior center.
-    fall = np.clip(1.0 - 0.55 * np.minimum(np.minimum(n_tl, n_tr), np.minimum(n_bl, n_br)), 0.0, 1.0)
-    wave = wave * fall * mask_f
+        # Wave frequency: higher bevel → tighter ripples from each corner.
+        freq = (2.2 + 5.5 * bevel_n) * np.pi
+        wave = (
+            np.sin(freq * n_tl)
+            + 0.85 * np.sin(freq * n_tr + 0.9)
+            + 0.75 * np.sin(freq * n_bl + 1.7)
+            + 0.95 * np.sin(freq * n_br + 2.6)
+        ) * 0.25
+        # Soft falloff so waves settle toward the interior center.
+        fall = np.clip(1.0 - 0.55 * np.minimum(np.minimum(n_tl, n_tr), np.minimum(n_bl, n_br)), 0.0, 1.0)
+        wave = wave * fall * mask_f
 
-    # Inverse-distance corner weights: TL/TR = light, BL/BR = shadow.
-    eps = 1.5
-    w_tl = 1.0 / (d_tl + eps)
-    w_tr = 1.0 / (d_tr + eps)
-    w_bl = 1.0 / (d_bl + eps)
-    w_br = 1.0 / (d_br + eps)
-    w_sum = w_tl + w_tr + w_bl + w_br
-    light_c = (w_tl + 0.7 * w_tr) / w_sum
-    dark_c = (w_br + 0.7 * w_bl) / w_sum
-    corner_shade = (light_c - dark_c) * mask_f
+        # Inverse-distance corner weights: TL/TR = light, BL/BR = shadow.
+        eps = 1.5
+        w_tl = 1.0 / (d_tl + eps)
+        w_tr = 1.0 / (d_tr + eps)
+        w_bl = 1.0 / (d_bl + eps)
+        w_br = 1.0 / (d_br + eps)
+        w_sum = w_tl + w_tr + w_bl + w_br
+        light_c = (w_tl + 0.7 * w_tr) / w_sum
+        dark_c = (w_br + 0.7 * w_bl) / w_sum
+        corner_shade = (light_c - dark_c) * mask_f
 
-    height = np.clip(0.55 * edge + 0.45 * (0.5 + 0.5 * wave) + 0.25 * corner_shade, 0.0, 1.0) * mask_f
+        height = np.clip(0.55 * edge + 0.45 * (0.5 + 0.5 * wave) + 0.25 * corner_shade, 0.0, 1.0) * mask_f
 
-    gx = np.zeros_like(height)
-    gy = np.zeros_like(height)
-    gx[:, 1:-1] = height[:, 2:] - height[:, :-2]
-    gy[1:-1, :] = height[2:, :] - height[:-2, :]
-    # Bias normals with corner-distance gradients so light tracks the wave sources.
-    nx = -(gx + 0.40 * (w_tr - w_tl) / max(w_sum.max(), 1e-5))
-    ny = -(gy + 0.40 * (w_bl - w_tl) / max(w_sum.max(), 1e-5))
-    nz = np.full_like(height, 0.30 + 0.40 * bevel_n)
-    invn = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
-    nx, ny, nz = nx * invn, ny * invn, nz * invn
+        gx, gy = _central_diff(height, wrap=edge_wrap)
+        # Bias normals with corner-distance gradients so light tracks the wave sources.
+        nx = -(gx + 0.40 * (w_tr - w_tl) / max(w_sum.max(), 1e-5))
+        ny = -(gy + 0.40 * (w_bl - w_tl) / max(w_sum.max(), 1e-5))
+        nz = np.full_like(height, 0.30 + 0.40 * bevel_n)
+        invn = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
+        nx, ny, nz = nx * invn, ny * invn, nz * invn
 
-    lx, ly, lz = normalize_light(*light_dir)
-    ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
+        lx, ly, lz = normalize_light(*light_dir)
+        ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
-    hx, hy, hz = lx, ly, lz + 1.0
-    invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
-    hx, hy, hz = hx * invh, hy * invh, hz * invh
-    half = np.clip(nx * hx + ny * hy + nz * hz, 0.0, 1.0)
-    spec_pow = 9.0 + 24.0 * (1.0 - bevel_n)
-    # Specular pools near light corners and on wave crests.
-    crest = np.clip(0.5 + 0.5 * wave, 0.0, 1.0)
-    spec = (half ** spec_pow) * (0.35 + 0.65 * light_c) * (0.45 + 0.55 * crest)
+        hx, hy, hz = lx, ly, lz + 1.0
+        invh = 1.0 / np.sqrt(hx * hx + hy * hy + hz * hz)
+        hx, hy, hz = hx * invh, hy * invh, hz * invh
+        half = np.clip(nx * hx + ny * hy + nz * hz, 0.0, 1.0)
+        spec_pow = 9.0 + 24.0 * (1.0 - bevel_n)
+        # Specular pools near light corners and on wave crests.
+        crest = np.clip(0.5 + 0.5 * wave, 0.0, 1.0)
+        spec = (half ** spec_pow) * (0.35 + 0.65 * light_c) * (0.45 + 0.55 * crest)
 
-    ambient = 1.0 - 0.86 * depth_n
-    diffuse = 0.70 * depth_n * ndotl + 0.30 * depth_n * np.clip(0.5 + corner_shade, 0.0, 1.0)
-    shade = ambient + diffuse + (0.10 + 0.28 * depth_n) * crest * ndotl
-    max_v = _max_v(pixels)
-    base = np.array(color[:3], dtype=np.float32)
-    rgb = base * shade[..., None]
-    rgb = rgb + (max_v - rgb) * ((0.20 + 0.80 * high_n) * spec[..., None])
-    shadow = dark_c * (0.16 + 0.40 * depth_n) * np.clip(1.0 - crest * 0.5, 0.0, 1.0)
-    rgb = rgb * (1.0 - shadow[..., None])
-    rgb = np.clip(rgb, 0, max_v)
+        ambient = 1.0 - 0.86 * depth_n
+        diffuse = 0.70 * depth_n * ndotl + 0.30 * depth_n * np.clip(0.5 + corner_shade, 0.0, 1.0)
+        shade = ambient + diffuse + (0.10 + 0.28 * depth_n) * crest * ndotl
+        max_v = _max_v(pixels)
+        base = np.array(color[:3], dtype=np.float32)
+        rgb = base * shade[..., None]
+        rgb = rgb + (max_v - rgb) * ((0.20 + 0.80 * high_n) * spec[..., None])
+        shadow = dark_c * (0.16 + 0.40 * depth_n) * np.clip(1.0 - crest * 0.5, 0.0, 1.0)
+        rgb = rgb * (1.0 - shadow[..., None])
+        rgb = np.clip(rgb, 0, max_v)
 
-    alpha = float(color[3])
-    dest = pixels[y0:y1, x0:x1].astype(np.float32)
-    m = sub
-    a = alpha / max_v
-    if a >= 0.999:
-        dest[..., 0][m] = rgb[..., 0][m]
-        dest[..., 1][m] = rgb[..., 1][m]
-        dest[..., 2][m] = rgb[..., 2][m]
-        dest[..., 3][m] = alpha
-    elif a > 0.0:
-        dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
-        dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
-        dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
-        dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
-    pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+        alpha = float(color[3])
+        dest = pixels[y0:y1, x0:x1].astype(np.float32)
+        m = sub
+        a = alpha / max_v
+        if a >= 0.999:
+            dest[..., 0][m] = rgb[..., 0][m]
+            dest[..., 1][m] = rgb[..., 1][m]
+            dest[..., 2][m] = rgb[..., 2][m]
+            dest[..., 3][m] = alpha
+        elif a > 0.0:
+            dest[..., 0][m] = rgb[..., 0][m] * a + dest[..., 0][m] * (1.0 - a)
+            dest[..., 1][m] = rgb[..., 1][m] * a + dest[..., 1][m] * (1.0 - a)
+            dest[..., 2][m] = rgb[..., 2][m] * a + dest[..., 2][m] * (1.0 - a)
+            dest[..., 3][m] = alpha + dest[..., 3][m] * (1.0 - a)
+        pixels[y0:y1, x0:x1] = np.clip(dest, 0, _max_v(pixels)).astype(pixels.dtype)
+    finally:
+        _shade_end_wrap(pixels, ry, rx)
 
 
 def smear_sample_tip(
@@ -3441,7 +3552,7 @@ def smear_stamp(
     pickup: bool = True,
 ) -> None:
     """Smudge: blend *tip* into the canvas, then pick canvas color back into *tip* (in-place)."""
-    r = max(0.5, float(radius))
+    r = max(0.1, float(radius))
     strength = float(np.clip(strength, 0.0, 1.0))
     if strength <= 0.0 or tip.size == 0:
         return
@@ -3511,7 +3622,7 @@ def background_erase_stroke(
     wrap: bool = False,
 ) -> None:
     dist = float(np.hypot(x1 - x0, y1 - y0))
-    steps = max(1, int(dist / max(0.5, radius * 0.4)))
+    steps = max(1, int(dist / max(0.1, radius * 0.4)))
     op = float(np.clip(opacity, 0.0, 1.0))
     if op <= 0.0:
         return

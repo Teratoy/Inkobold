@@ -17,6 +17,21 @@ from inkobold.core.shortcuts import (
     format_accels,
 )
 from inkobold.ui.color_picker import ColorSelectButton, configure_hue_chooser, rgba_to_tuple, tuple_to_rgba
+from inkobold.ui.popup_keys import attach_popup_keys
+
+
+# Continuous numeric settings accept hundredths (e.g. 0.01 / locale 0,01).
+FLOAT_SPIN_DIGITS = 2
+
+
+def configure_numeric_spin(spin: Gtk.SpinButton, *, digits: int = FLOAT_SPIN_DIGITS) -> Gtk.SpinButton:
+    """Show *digits* places and allow arrow steps of 10^-digits (Page± stays coarse)."""
+    spin.set_digits(int(digits))
+    if digits > 0:
+        fine = 10.0 ** (-int(digits))
+        page = max(1.0, float(spin.get_adjustment().get_page_increment() or 1.0))
+        spin.set_increments(fine, page)
+    return spin
 
 
 @dataclass
@@ -30,7 +45,8 @@ class EffectOption:
     minimum: float = 0
     maximum: float = 100
     step: float = 1
-    digits: int = 0
+    # 0 = integer; default 2 = floats to hundredths (0.01)
+    digits: int = FLOAT_SPIN_DIGITS
     choices: tuple[str, ...] = field(default_factory=tuple)
     use_alpha: bool = True
 
@@ -41,10 +57,14 @@ EFFECT_APPLY_TO_CHOICES = (EFFECT_APPLY_TO_ACTIVE, EFFECT_APPLY_TO_ALL)
 
 
 def _attach_shortcut_focus_guard(parent: Gtk.Window, window: Gtk.Window) -> None:
-    """Suspend main-window bare-key shortcuts while this dialog focuses a text field."""
+    """Suspend main-window bare-key shortcuts while this dialog focuses a text field.
+
+    Also wires Esc-to-close, Enter-to-confirm, and Tab-among-editables for the popup.
+    """
     watch = getattr(parent, "_watch_focus_for_shortcuts", None)
     if callable(watch):
         watch(window)
+    attach_popup_keys(window)
 
 
 class StartupDialog(Gtk.Window):
@@ -150,9 +170,11 @@ class NewFileDialog(Gtk.Window):
         cancel.connect("clicked", self._on_cancel)
         create = Gtk.Button(label="Create")
         create.add_css_class("suggested-action")
+        create.set_can_default(True)
         create.connect("clicked", self._on_create)
         actions.append(cancel)
         actions.append(create)
+        self.set_default_widget(create)
 
         self.connect("close-request", self._on_close)
 
@@ -215,7 +237,7 @@ class ThemeColorDialog(Gtk.Window):
         )
         self.set_child(root)
         root.append(Gtk.Label(
-            label="Any color becomes the chrome accent (white keeps the DaemonDomain look).",
+            label="Any color becomes the chrome accent; sliders and focus rings use its complement (white keeps the DaemonDomain look).",
             xalign=0,
             wrap=True,
         ))
@@ -534,7 +556,7 @@ class SunSettingsDialog(Gtk.Window):
     def __init__(self, parent: Gtk.Window, elevation: float = 0.70) -> None:
         super().__init__(title="Sun Light", transient_for=parent, modal=True)
         _attach_shortcut_focus_guard(parent, self)
-        self.set_default_size(360, 200)
+        self.set_default_size(380, 220)
         self.set_resizable(False)
         self._callback = None
 
@@ -548,9 +570,10 @@ class SunSettingsDialog(Gtk.Window):
         )
         self.set_child(root)
         root.append(Gtk.Label(
-            label="When Show Sun is on, drag the sun on the canvas to aim "
-            "shadows and highlights for 3D Pen, 3D Fill, Bubbles, Metal Relief, "
-            "and Milk. Elevation controls how frontal vs. raking the light is.",
+            label="When Use Sun Light is on, lighting follows the sun "
+            "position and elevation (3D Pen, 3D Fill, Bubbles, Metal Relief, "
+            "Milk). Show Sun reveals the glyph so you can drag to aim. "
+            "Deactivate restores the classic fixed key light.",
             xalign=0,
             wrap=True,
         ))
@@ -558,7 +581,7 @@ class SunSettingsDialog(Gtk.Window):
         grid = Gtk.Grid(column_spacing=8, row_spacing=8)
         root.append(grid)
         self.elevation_spin = Gtk.SpinButton.new_with_range(0.15, 1.50, 0.05)
-        self.elevation_spin.set_digits(2)
+        configure_numeric_spin(self.elevation_spin)
         self.elevation_spin.set_value(elevation)
         self.elevation_spin.set_hexpand(True)
         grid.attach(Gtk.Label(label="Elevation", xalign=0), 0, 0, 1, 1)
@@ -566,11 +589,14 @@ class SunSettingsDialog(Gtk.Window):
 
         actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=8)
         root.append(actions)
+        deactivate = Gtk.Button(label="Deactivate")
+        deactivate.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.REJECT))
         cancel = Gtk.Button(label="Cancel")
         cancel.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
         apply = Gtk.Button(label="Apply")
         apply.add_css_class("suggested-action")
         apply.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.OK))
+        actions.append(deactivate)
         actions.append(cancel)
         actions.append(apply)
         self.connect("close-request", self._on_close)
@@ -1005,9 +1031,9 @@ class CaptureShortcutDialog(Gtk.Window):
         self.destroy()
 
     def _on_key(self, _c, keyval: int, _keycode: int, state: Gdk.ModifierType) -> bool:
+        # Esc is handled by attach_popup_keys (close → cancel).
         if keyval in (Gdk.KEY_Escape,):
-            self._emit(Gtk.ResponseType.CANCEL)
-            return True
+            return False
         if keyval in (Gdk.KEY_BackSpace, Gdk.KEY_Delete):
             self._accel = ""
             self._emit(Gtk.ResponseType.OK)
@@ -1228,7 +1254,7 @@ class EffectPreviewDialog(Gtk.Window):
                 self._widgets[opt.key] = btn
             else:
                 spin = Gtk.SpinButton.new_with_range(opt.minimum, opt.maximum, opt.step)
-                spin.set_digits(opt.digits)
+                configure_numeric_spin(spin, digits=opt.digits)
                 spin.set_value(float(opt.default))
                 spin.set_hexpand(True)
                 spin.connect("value-changed", self._schedule_preview)

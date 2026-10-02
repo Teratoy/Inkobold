@@ -28,7 +28,7 @@ Defaults from `inkobold/core/shortcuts.py`. Rebind under **Settings → Shortcut
 | Add / Dup / Delete frame | `Ctrl+Alt+N` / `Ctrl+Alt+D` / `Ctrl+Alt+Delete` |
 | Play / pause | `Space` or `F5` |
 | Stop | `F6` |
-| Brush size | `[` `]` |
+| Brush size | `[` `]` (range **0.1–256**) |
 
 ## Tools
 
@@ -55,13 +55,17 @@ Defaults from `inkobold/core/shortcuts.py`. Rebind under **Settings → Shortcut
 
 ## Unbound by default (menu only)
 
-`export_layers`, `export_anim_gif`, `export_anim_png`, `merge_all_layers`,
-`move_layer_to_top`, `move_layer_to_bottom`.
+`export_layer`, `export_layers`, `export_anim_gif`, `export_anim_png`, `merge_visible_layers`,
+`merge_all_layers`, `move_layer_to_top`, `move_layer_to_bottom`.
 
 ## Pointer
 
 | Action | Control |
 |--------|---------|
 | Pan | Middle mouse drag |
+
+## Dialogs / tool options
+
+Popups and tool-option panels (`popup_keys`): **Esc** closes, **Enter** activates the suggested-action button, **Tab** / **Shift+Tab** move among editable fields.
 
 See also [[Tools]] · [[View]] · [[Animation]].

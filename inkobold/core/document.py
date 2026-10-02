@@ -307,6 +307,26 @@ class Document:
         self.dirty = True
         return True
 
+    def merge_visible(self) -> bool:
+        """Merge all visible layers into the bottom-most visible one; keep hidden layers.
+
+        Returns False if fewer than two layers are visible.
+        """
+        visible_indices = [i for i, ly in enumerate(self.layers) if ly.visible]
+        if len(visible_indices) < 2:
+            return False
+        target_idx = visible_indices[0]
+        target = self.layers[target_idx]
+        self._apply_composite_to_layer(
+            target, [self.layers[i] for i in visible_indices]
+        )
+        for i in reversed(visible_indices[1:]):
+            del self.layers[i]
+        self.active_layer_index = min(target_idx, len(self.layers) - 1)
+        self._sync_frame_from_layers()
+        self.dirty = True
+        return True
+
     def _apply_composite_to_layer(self, target: Layer, layers: list[Layer]) -> None:
         """Bake a transparent composite of ``layers`` into ``target`` at native depth."""
         out = self._composite_float(layers)
@@ -921,6 +941,29 @@ class Document:
                 dpi=dpi,
             )
         return folder
+
+    def export_layer_png(self, path: Path, index: int | None = None) -> Path:
+        """Write one layer as a document-sized PNG (offset + opacity baked).
+
+        ``index`` defaults to the active layer. Always writes PNG.
+        """
+        path = Path(path)
+        if path.suffix.lower() != ".png":
+            path = path.with_suffix(".png")
+        if not self.layers:
+            raise ValueError("no layers to export")
+        idx = self.active_layer_index if index is None else int(index)
+        if idx < 0 or idx >= len(self.layers):
+            raise IndexError(f"layer index out of range: {idx}")
+        dpi = (max(1, int(self.dpi)), max(1, int(self.dpi)))
+        rgba = self._layer_rgba_u8(self.layers[idx])
+        Image.fromarray(rgba, mode="RGBA").save(
+            path,
+            format="PNG",
+            optimize=True,
+            dpi=dpi,
+        )
+        return path
 
     def export_image(self, path: Path) -> Path:
         """Flatten and write PNG / JPEG / WebP, honoring dpi and color_depth."""

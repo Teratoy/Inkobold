@@ -35,8 +35,9 @@ class AppSettings:
     shortcut_overrides: dict[str, list[str]] = field(default_factory=dict)
     # most-recent paint colors first (RGBA 0–255)
     recent_colors: list[tuple[int, int, int, int]] = field(default_factory=list)
-    # Movable sun light for 3D-illusion tools / relief effects
-    sun_enabled: bool = False
+    # Show the draggable sun glyph (lighting follows sun when sun_active)
+    sun_active: bool = True
+    sun_visible: bool = False
     sun_x_norm: float = 0.18
     sun_y_norm: float = 0.18
     sun_elevation: float = 0.70
@@ -84,7 +85,8 @@ class AppSettings:
             self.visible_tools = [str(t) for t in self.visible_tools if isinstance(t, str)]
         else:
             self.visible_tools = []
-        self.sun_enabled = bool(self.sun_enabled)
+        self.sun_active = bool(self.sun_active)
+        self.sun_visible = bool(self.sun_visible)
         self.sun_x_norm = max(0.0, min(1.0, float(self.sun_x_norm)))
         self.sun_y_norm = max(0.0, min(1.0, float(self.sun_y_norm)))
         self.sun_elevation = max(0.15, min(1.5, float(self.sun_elevation)))
@@ -140,8 +142,12 @@ def load_settings() -> AppSettings:
     raw_visible = data.get("visible_tools")
     if isinstance(raw_visible, list):
         settings.visible_tools = [str(t) for t in raw_visible if isinstance(t, str)]
-    if "sun_enabled" in data:
-        settings.sun_enabled = bool(data.get("sun_enabled"))
+    # Glyph visibility only. Do not migrate legacy ``sun_enabled`` — that flag
+    # also meant "use custom lighting", which is now ``sun_active``.
+    if "sun_active" in data:
+        settings.sun_active = bool(data.get("sun_active"))
+    if "sun_visible" in data:
+        settings.sun_visible = bool(data.get("sun_visible"))
     try:
         settings.sun_x_norm = float(data.get("sun_x_norm", 0.18))
     except (TypeError, ValueError):
@@ -177,7 +183,8 @@ def save_settings(settings: AppSettings) -> None:
                 k: list(v) for k, v in settings.shortcut_overrides.items()
             },
             "recent_colors": [list(c) for c in settings.recent_colors],
-            "sun_enabled": bool(settings.sun_enabled),
+            "sun_active": bool(settings.sun_active),
+            "sun_visible": bool(settings.sun_visible),
             "sun_x_norm": float(settings.sun_x_norm),
             "sun_y_norm": float(settings.sun_y_norm),
             "sun_elevation": float(settings.sun_elevation),

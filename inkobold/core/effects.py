@@ -1614,7 +1614,7 @@ def metal_relief(
     inv = 1.0 / np.maximum(1e-5, np.sqrt(nx * nx + ny * ny + nz * nz))
     nx, ny, nz = nx * inv, ny * inv, nz * inv
 
-    # Key light (canvas sun when enabled).
+    # Key light (canvas sun when active).
     lx, ly, lz = normalize_light(*light_dir)
     ndotl = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 

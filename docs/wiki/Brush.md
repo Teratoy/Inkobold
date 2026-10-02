@@ -14,4 +14,4 @@ Pressure-sensitive width. Modes:
 | `custom` | Tip image from [[Libraries]] brushes |
 | `bubbles` | Procedural bubble stamp |
 
-Brush size: `[` `]`. Parent: [[Tools]]
+Brush size: `[` `]` (range **0.1–256**). Parent: [[Tools]]
