@@ -170,7 +170,7 @@ class NewFileDialog(Gtk.Window):
         cancel.connect("clicked", self._on_cancel)
         create = Gtk.Button(label="Create")
         create.add_css_class("suggested-action")
-        create.set_can_default(True)
+        create.set_receives_default(True)
         create.connect("clicked", self._on_create)
         actions.append(cancel)
         actions.append(create)

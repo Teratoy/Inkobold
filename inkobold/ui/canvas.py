@@ -14,7 +14,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 from inkobold.core.document import Document
 from inkobold.core.grid import GridOverlay
 from inkobold.core.image_meta import constrain_pixels, has_alpha, is_gray
-from inkobold.core.mirror import MirrorModifier
+from inkobold.core.mirror import MirrorModifier, segment_distance_sq
 from inkobold.core.sun import SunLight
 from inkobold.gpu.renderer import GpuRenderer
 from inkobold.input import InputHub
@@ -68,6 +68,9 @@ class Canvas(Gtk.Overlay):
         self._pan_oy = 0.0
         self._drawing = False
         self._dragging_sun = False
+        self._dragging_mirror: str | None = None  # "center" | "rotate"
+        self._mirror_angle0 = 0.0
+        self._mirror_pointer_angle0 = 0.0
         self._btn1 = False
         self._pointer_x = 0.0
         self._pointer_y = 0.0
@@ -360,6 +363,74 @@ class Canvas(Gtk.Overlay):
         if commit and self._on_sun_moved is not None:
             self._on_sun_moved()
 
+    def _mirror_center_screen(self, doc: Document) -> tuple[float, float]:
+        mod = self._get_mirror()
+        cx, cy = mod.center(float(doc.width), float(doc.height))
+        return self.renderer.doc_to_screen(cx, cy)
+
+    def _hit_mirror_guides(self, screen_x: float, screen_y: float) -> str | None:
+        """Return ``center``, ``rotate``, or None for a symmetry-guide hit."""
+        mod = self._get_mirror()
+        if not mod.enabled:
+            return None
+        doc = self._get_document()
+        if doc is None:
+            return None
+        hx, hy = self._mirror_center_screen(doc)
+        if (screen_x - hx) ** 2 + (screen_y - hy) ** 2 <= 14.0 ** 2:
+            return "center"
+        hit_r2 = 8.0 ** 2
+        for (x0, y0), (x1, y1) in mod.guide_segments(doc.width, doc.height):
+            sx0, sy0 = self.renderer.doc_to_screen(x0, y0)
+            sx1, sy1 = self.renderer.doc_to_screen(x1, y1)
+            if segment_distance_sq(screen_x, screen_y, sx0, sy0, sx1, sy1) <= hit_r2:
+                return "rotate"
+        return None
+
+    def _begin_mirror_drag(self, kind: str, screen_x: float, screen_y: float) -> None:
+        doc = self._get_document()
+        if doc is None:
+            return
+        mod = self._get_mirror()
+        self._dragging_mirror = kind
+        if kind == "center":
+            self._move_mirror_center_to_screen(screen_x, screen_y)
+            return
+        hx, hy = self._mirror_center_screen(doc)
+        self._mirror_angle0 = float(mod.angle)
+        self._mirror_pointer_angle0 = math.atan2(screen_y - hy, screen_x - hx)
+        self.refresh_guides()
+
+    def _move_mirror_center_to_screen(self, screen_x: float, screen_y: float) -> None:
+        doc = self._get_document()
+        if doc is None:
+            return
+        dx, dy = self.renderer.screen_to_doc(screen_x, screen_y)
+        self._get_mirror().set_center(dx, dy, float(doc.width), float(doc.height))
+        self.refresh_guides()
+
+    def _rotate_mirror_to_screen(self, screen_x: float, screen_y: float) -> None:
+        doc = self._get_document()
+        if doc is None:
+            return
+        hx, hy = self._mirror_center_screen(doc)
+        ang = math.atan2(screen_y - hy, screen_x - hx)
+        delta = ang - self._mirror_pointer_angle0
+        mod = self._get_mirror()
+        mod.angle = self._mirror_angle0 + delta
+        mod.clamp()
+        self.refresh_guides()
+
+    def _update_mirror_drag(self, screen_x: float, screen_y: float) -> None:
+        kind = self._dragging_mirror
+        if kind == "center":
+            self._move_mirror_center_to_screen(screen_x, screen_y)
+        elif kind == "rotate":
+            self._rotate_mirror_to_screen(screen_x, screen_y)
+
+    def _end_mirror_drag(self) -> None:
+        self._dragging_mirror = None
+
     def _tool_xy(self, x: float, y: float) -> tuple[Optional[ToolContext], object, float, float]:
         ctx = self._ctx()
         tool = self._get_tool()
@@ -634,6 +705,16 @@ class Canvas(Gtk.Overlay):
             cr.move_to(sx0, sy0)
             cr.line_to(sx1, sy1)
         cr.stroke()
+        # Hub handle — drag to move the symmetry center.
+        hx, hy = self._mirror_center_screen(doc)
+        cr.set_dash([])
+        cr.set_source_rgba(0.75, 0.85, 1.0, 0.35)
+        cr.arc(hx, hy, 7.0, 0, math.tau)
+        cr.fill()
+        cr.set_source_rgba(0.85, 0.92, 1.0, 0.95)
+        cr.set_line_width(1.5)
+        cr.arc(hx, hy, 5.0, 0, math.tau)
+        cr.stroke()
         cr.restore()
 
     def refresh_guides(self) -> None:
@@ -667,13 +748,18 @@ class Canvas(Gtk.Overlay):
         self._catcher.grab_focus()
         # GestureDrag is CAPTURE-phase, so drag-begin often starts the stroke
         # before click pressed. Don't apply / checkpoint twice.
-        if self._drawing or self._dragging_sun:
+        if self._drawing or self._dragging_sun or self._dragging_mirror:
             self._btn1 = True
             return
         if self._hit_sun(x, y):
             self._dragging_sun = True
             self._btn1 = True
             self._move_sun_to_screen(x, y)
+            return
+        mirror_hit = self._hit_mirror_guides(x, y)
+        if mirror_hit is not None:
+            self._btn1 = True
+            self._begin_mirror_drag(mirror_hit, x, y)
             return
         self._pressure = self._read_pressure(gesture)
         ctx, tool, lx, ly = self._tool_xy(x, y)
@@ -699,6 +785,11 @@ class Canvas(Gtk.Overlay):
             self._btn1 = False
             self._move_sun_to_screen(x, y, commit=True)
             return
+        if self._dragging_mirror:
+            self._update_mirror_drag(x, y)
+            self._end_mirror_drag()
+            self._btn1 = False
+            return
         if self._panning and not self._drawing:
             self._panning = False
             return
@@ -716,11 +807,15 @@ class Canvas(Gtk.Overlay):
         self._after_tool(ctx, tool)
 
     def _on_drag_begin(self, gesture: Gtk.GestureDrag, x: float, y: float) -> None:
-        if self._dragging_sun:
+        if self._dragging_sun or self._dragging_mirror:
             return
         if self._hit_sun(x, y):
             self._dragging_sun = True
             self._move_sun_to_screen(x, y)
+            return
+        mirror_hit = self._hit_mirror_guides(x, y)
+        if mirror_hit is not None:
+            self._begin_mirror_drag(mirror_hit, x, y)
             return
         # If click already started the stroke, keep it; else start here.
         if not self._drawing:
@@ -748,6 +843,9 @@ class Canvas(Gtk.Overlay):
         x, y = sx + offset_x, sy + offset_y
         if self._dragging_sun:
             self._move_sun_to_screen(x, y)
+            return
+        if self._dragging_mirror:
+            self._update_mirror_drag(x, y)
             return
         if self._panning:
             self.renderer.pan_x = self._pan_ox + (x - self._pan_sx)
@@ -781,6 +879,11 @@ class Canvas(Gtk.Overlay):
             self._btn1 = False
             self._move_sun_to_screen(x, y, commit=True)
             return
+        if self._dragging_mirror:
+            self._update_mirror_drag(x, y)
+            self._end_mirror_drag()
+            self._btn1 = False
+            return
         if self._panning:
             self._panning = False
             self.refresh_guides()
@@ -803,6 +906,7 @@ class Canvas(Gtk.Overlay):
         self._panning = True
         self._drawing = False
         self._dragging_sun = False
+        self._dragging_mirror = None
         self._stroke_tools = None
         self._pan_sx, self._pan_sy = x, y
         self._pan_ox, self._pan_oy = self.renderer.pan_x, self.renderer.pan_y

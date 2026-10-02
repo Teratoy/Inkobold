@@ -39,7 +39,8 @@ Effects: CPU (NumPy). Flora: GPU attempt then CPU.
 | `core/shortcuts.py` | Defaults + rebinds |
 | `core/settings.py` | Persistence |
 | `core/paths.py` | XDG / APPDATA resolution |
+| `core/mirror.py` | Stroke Symmetry (Mirror / Radial) |
 | `gpu/renderer.py` | OpenGL composite |
-| `ui/canvas.py` | GLArea + input routing |
+| `ui/canvas.py` | GLArea + input routing; sun / symmetry guide drag |
 
 Related: [[Overview]] · [[File Format]] · [[Input]]

@@ -27,5 +27,6 @@ Notes for recent waves (around 2026-09). Not a full changelog.
 | **Merge visible / export layer** | Layers menu | Merge visible keeps hidden layers; export active layer as document-sized PNG |
 | **Popup keys** | `ui/popup_keys.py` | Esc close, Enter confirm, Tab among editables |
 | **Theme complement** | `ui/theme.py` | GTK selection / focus chrome uses complementary hue |
+| **Symmetry** | `core/mirror.py`, canvas guides | Toolbox **Symmetry**: Mirror / Radial, movable hub, free angle, Reset Guides |
 
 See also [[Lay]] · [[File Format]] · [[Rectangle]] · [[Stylize]] · [[Windows]] · [[Paths and Settings]] · [[View]]

@@ -14,7 +14,7 @@ Version **0.1.0** · Python **≥3.11** · App id `trinkets.inkobold`
 - **Libraries** — User brushes, patterns, and fonts under the platform data dir (see Paths below)
 - **Input** — GDK drawing path; on Linux, optional libinput poll + libwacom tablet identification
 - **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid, Use / Show / Deactivate Sun (draggable light for 3D / Metal / Milk; deactivate restores classic lighting), Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
-- **Edit** — Undo / Redo; stroke Mirror (1–16 axes, H / V / diagonal); Flip / Rotate layer; Crop Canvas (live size; optional selection bounds)
+- **Edit** — Undo / Redo; stroke Symmetry (Mirror or Radial, 1–16, movable hub, H / V / diagonal); Flip / Rotate layer; Crop Canvas (live size; optional selection bounds)
 - **Settings** — Theme, Memory (undo steps), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (rebind), Debug Mode
 
 ## Documentation

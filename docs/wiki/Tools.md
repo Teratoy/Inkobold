@@ -4,7 +4,7 @@ tags: [inkobold, wiki]
 
 # Tools
 
-Registered in `inkobold/tools/` via `default_tools()`. Shared paint helpers live in `paint.py`. Selection masks clip paint; tools with `supports_mirror` respect stroke [[View|Mirror]] and Wrap Moves.
+Registered in `inkobold/tools/` via `default_tools()`. Shared paint helpers live in `paint.py`. Selection masks clip paint; tools with `supports_mirror` respect stroke [[View|Symmetry]] (Mirror / Radial) and Wrap Moves.
 
 | Tool | id | Key | Behavior |
 |------|-----|-----|----------|

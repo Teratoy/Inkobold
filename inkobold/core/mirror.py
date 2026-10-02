@@ -6,12 +6,17 @@ import math
 from dataclasses import dataclass
 
 
-# First-axis angle offset (degrees). The axis *line* angle: Horizontal = left↔right
-# mirror (vertical line), Vertical = top↔bottom (horizontal line), Diagonal = 45°.
+# First-axis / guide phase presets. Horizontal = left↔right mirror (vertical line),
+# Vertical = top↔bottom (horizontal line), Diagonal = 45°.
 ORIENTATIONS = (
     ("horizontal", "Horizontal"),
     ("vertical", "Vertical"),
     ("diagonal", "Diagonal"),
+)
+
+MODES = (
+    ("mirror", "Mirror"),
+    ("radial", "Radial"),
 )
 
 _BASE_ANGLE = {
@@ -23,21 +28,39 @@ _BASE_ANGLE = {
 
 @dataclass
 class MirrorModifier:
-    """Symmetry applied to paint strokes around the document center.
+    """Symmetry applied to paint strokes around a movable center.
 
-    *axes* is the number of equally spaced reflection axes through the center
-    (angle between neighbors is always 180°/axes). *orientation* rotates the
-    whole set so the first axis is horizontal, vertical, or diagonal.
+    *mode* ``mirror`` (dihedral): *axes* equally spaced reflection axes
+    through the center (neighbors 180°/axes apart). Odd reflection branches
+    reverse orientation.
+
+    *mode* ``radial`` (cyclic): *axes* same-facing rotational copies at
+    360°/axes. No reflections.
+
+    *angle* is the continuous first-axis / first-ray phase (radians). The
+    Orientation dropdown snaps it to presets. *cx_norm* / *cy_norm* place the
+    hub (default canvas center).
     """
 
     enabled: bool = False
+    mode: str = "mirror"  # mirror | radial
     orientation: str = "horizontal"  # horizontal | vertical | diagonal
     axes: int = 1
+    # Continuous guide phase (radians). Defaults match Horizontal.
+    angle: float = math.pi * 0.5
+    # Normalized hub position (0–1). Default = document center.
+    cx_norm: float = 0.5
+    cy_norm: float = 0.5
 
     def clamp(self) -> None:
+        if self.mode not in {k for k, _ in MODES}:
+            self.mode = "mirror"
         if self.orientation not in _BASE_ANGLE:
             self.orientation = "horizontal"
         self.axes = max(1, min(16, int(self.axes)))
+        self.angle = float(self.angle) % (2.0 * math.pi)
+        self.cx_norm = max(0.0, min(1.0, float(self.cx_norm)))
+        self.cy_norm = max(0.0, min(1.0, float(self.cy_norm)))
 
     # Back-compat alias used by older call sites / UI wiring during rename.
     @property
@@ -49,7 +72,31 @@ class MirrorModifier:
         self.axes = int(value)
 
     def _base_angle(self) -> float:
-        return _BASE_ANGLE.get(self.orientation, math.pi * 0.5)
+        return float(self.angle)
+
+    def center(self, width: float, height: float) -> tuple[float, float]:
+        return float(self.cx_norm) * float(width), float(self.cy_norm) * float(height)
+
+    def set_center(self, x: float, y: float, width: float, height: float) -> None:
+        w = max(1.0, float(width))
+        h = max(1.0, float(height))
+        self.cx_norm = float(x) / w
+        self.cy_norm = float(y) / h
+        self.clamp()
+
+    def apply_orientation_preset(self, key: str) -> None:
+        """Snap *angle* to a named Orientation preset."""
+        if key not in _BASE_ANGLE:
+            return
+        self.orientation = key
+        self.angle = _BASE_ANGLE[key]
+        self.clamp()
+
+    def reset_guides(self) -> None:
+        """Restore hub to canvas center and angle to the Horizontal preset."""
+        self.cx_norm = 0.5
+        self.cy_norm = 0.5
+        self.apply_orientation_preset("horizontal")
 
     def transform_branches(
         self,
@@ -63,20 +110,26 @@ class MirrorModifier:
         *reverse_orientation* is True when the branch is an odd reflection (axis
         mirror). Handed constructions (e.g. circular arcs from a chord) must
         flip their bulge on those branches so the result matches a true mirror.
-        Rotations preserve orientation.
+        Rotations preserve orientation. Radial mode never reverses.
         """
         if not self.enabled:
             return [(float(x), float(y), False)]
         self.clamp()
-        cx = float(width) * 0.5
-        cy = float(height) * 0.5
+        cx, cy = self.center(width, height)
         dx = float(x) - cx
         dy = float(y) - cy
         n = self.axes
-        base = self._base_angle()
-        fx, fy = _reflect_across(dx, dy, base)
 
         out: list[tuple[float, float, bool]] = []
+        if self.mode == "radial":
+            for k in range(n):
+                ang = (2.0 * math.pi * k) / n
+                rx, ry = _rotate(dx, dy, ang)
+                out.append((cx + rx, cy + ry, False))
+            return _unique_branches(out)
+
+        base = self._base_angle()
+        fx, fy = _reflect_across(dx, dy, base)
         for k in range(n):
             ang = (2.0 * math.pi * k) / n
             rx, ry = _rotate(dx, dy, ang)
@@ -100,17 +153,31 @@ class MirrorModifier:
         width: float,
         height: float,
     ) -> list[tuple[tuple[float, float], tuple[float, float]]]:
-        """Document-space line segments for the equally spaced mirror axes."""
+        """Document-space guide lines around the hub."""
         if not self.enabled:
             return []
         self.clamp()
         w = float(width)
         h = float(height)
-        cx, cy = w * 0.5, h * 0.5
-        radius = math.hypot(cx, cy)
+        cx, cy = self.center(w, h)
+        # Reach past every canvas corner from the (possibly off-center) hub.
+        radius = math.hypot(max(cx, w - cx), max(cy, h - cy))
         base = self._base_angle()
         n = self.axes
         segs: list[tuple[tuple[float, float], tuple[float, float]]] = []
+        if self.mode == "radial":
+            # N rays from the hub (not diameters — those look like 2n spokes).
+            for k in range(n):
+                ang = base + (2.0 * math.pi * k) / n
+                c, s = math.cos(ang), math.sin(ang)
+                segs.append(
+                    (
+                        (cx, cy),
+                        (cx + c * radius, cy + s * radius),
+                    )
+                )
+            return segs
+
         for k in range(n):
             ang = base + (math.pi * k) / n
             c, s = math.cos(ang), math.sin(ang)
@@ -150,3 +217,23 @@ def _unique_branches(
         seen.add(key)
         out.append((x, y, rev))
     return out
+
+
+def segment_distance_sq(
+    px: float,
+    py: float,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+) -> float:
+    """Squared distance from point to a finite segment."""
+    dx = x1 - x0
+    dy = y1 - y0
+    len_sq = dx * dx + dy * dy
+    if len_sq < 1e-12:
+        ex, ey = px - x0, py - y0
+        return ex * ex + ey * ey
+    t = max(0.0, min(1.0, ((px - x0) * dx + (py - y0) * dy) / len_sq))
+    ex, ey = px - (x0 + t * dx), py - (y0 + t * dy)
+    return ex * ex + ey * ey

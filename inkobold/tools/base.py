@@ -145,7 +145,7 @@ class BaseTool:
     uses_document_coords: bool = False
     # When False, canvas skips GPU texture invalidation (offset-only tools).
     modifies_pixels: bool = True
-    # Live mirror / radial symmetry (Transform / Lasso opt out).
+    # Live Symmetry modifier — Mirror or Radial (Transform / Lasso opt out).
     supports_mirror: bool = True
     default_depth: float = 70.0
     default_highlight: float = 55.0

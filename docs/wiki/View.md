@@ -23,9 +23,16 @@ Canvas defaults: pan `(40, 40)`, zoom `1.0`. Zoom clamp **0.05–32**. App start
 | Fullscreen / Borderless / Windowed | `F11` / menu | |
 | Clear selection | `Esc`, `Ctrl+D` | |
 
-## Mirror
+## Symmetry
 
-Stroke mirror: **1–16** axes; horizontal / vertical / diagonal. Applies to tools with `supports_mirror` (not Transform).
+Live stroke symmetry around a movable hub (defaults to canvas center). Toggle **Symmetry** in the toolbox. Applies to tools with `supports_mirror` (not Transform / Lasso).
+
+| Mode | Behavior | Count |
+|------|----------|-------|
+| **Mirror** | Reflect across equally spaced axes (dihedral / kaleidoscope). Odd branches flip handedness. | **Axes** 1–16 |
+| **Radial** | Rotate same-facing copies (cyclic / pinwheel). No flips. | **Copies** 1–16 |
+
+**Orientation** (horizontal / vertical / diagonal) snaps the first-axis / first-ray angle. Drag the hub to move the center; drag a guide line to rotate freely. **Reset Guides** restores hub to center and Horizontal. Hub position and angle persist in the document workspace.
 
 ## Sun
 

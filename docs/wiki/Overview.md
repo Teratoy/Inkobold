@@ -13,6 +13,7 @@ Inkobold is a **GPU-composited** painting app: you draw into CPU layer buffers; 
 - Pressure-aware brushes (when the input path reports pressure)
 - Pattern laying along paths ([[Lay]])
 - Lit 3D strokes / fills driven by a movable **Sun** (Use / Show / Deactivate)
+- Live stroke **Symmetry** (Mirror or Radial around a movable hub)
 - Procedural / stylize effects (including Flora)
 - Seamless tile painting (Tile Preview + Wrap Moves)
 

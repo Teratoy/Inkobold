@@ -58,7 +58,7 @@ from inkobold.core.libraries import (
     list_system_fonts,
     open_in_file_manager,
 )
-from inkobold.core.mirror import ORIENTATIONS, MirrorModifier
+from inkobold.core.mirror import MODES, ORIENTATIONS, MirrorModifier
 from inkobold.core.settings import DEFAULT_THEME_RGB, load_settings, save_settings
 from inkobold.core.shortcuts import (
     DEFAULT_SHORTCUTS,
@@ -397,8 +397,12 @@ class MainWindow(Gtk.ApplicationWindow):
             "tools": tools,
             "mirror": {
                 "enabled": bool(self.mirror.enabled),
+                "mode": str(self.mirror.mode),
                 "orientation": str(self.mirror.orientation),
                 "axes": int(self.mirror.axes),
+                "angle": float(self.mirror.angle),
+                "cx_norm": float(self.mirror.cx_norm),
+                "cy_norm": float(self.mirror.cy_norm),
             },
             "grid": {
                 "enabled": bool(self.grid.enabled),
@@ -432,6 +436,9 @@ class MainWindow(Gtk.ApplicationWindow):
         mirror = workspace.get("mirror")
         if isinstance(mirror, dict):
             self.mirror.enabled = bool(mirror.get("enabled", False))
+            mode = str(mirror.get("mode", "mirror"))
+            if mode in {k for k, _ in MODES}:
+                self.mirror.mode = mode
             orient = str(mirror.get("orientation", "horizontal"))
             if orient in {k for k, _ in ORIENTATIONS}:
                 self.mirror.orientation = orient
@@ -439,11 +446,31 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.mirror.axes = int(mirror.get("axes", 1))
             except (TypeError, ValueError):
                 pass
+            if "angle" in mirror:
+                try:
+                    self.mirror.angle = float(mirror["angle"])
+                except (TypeError, ValueError):
+                    self.mirror.apply_orientation_preset(self.mirror.orientation)
+            else:
+                self.mirror.apply_orientation_preset(self.mirror.orientation)
+            try:
+                if "cx_norm" in mirror:
+                    self.mirror.cx_norm = float(mirror["cx_norm"])
+                if "cy_norm" in mirror:
+                    self.mirror.cy_norm = float(mirror["cy_norm"])
+            except (TypeError, ValueError):
+                pass
             self.mirror.clamp()
             if hasattr(self, "mirror_toggle"):
                 self.mirror_toggle.set_active(self.mirror.enabled)
             if hasattr(self, "mirror_opts"):
                 self.mirror_opts.set_visible(self.mirror.enabled)
+            if hasattr(self, "mirror_mode_dropdown"):
+                idx = next(
+                    (i for i, (k, _) in enumerate(MODES) if k == self.mirror.mode),
+                    0,
+                )
+                self.mirror_mode_dropdown.set_selected(idx)
             if hasattr(self, "mirror_orient_dropdown"):
                 idx = next(
                     (i for i, (k, _) in enumerate(ORIENTATIONS) if k == self.mirror.orientation),
@@ -452,6 +479,9 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.mirror_orient_dropdown.set_selected(idx)
             if hasattr(self, "mirror_axes_spin"):
                 self.mirror_axes_spin.set_value(self.mirror.axes)
+            self._update_mirror_mode_ui()
+            if hasattr(self, "canvas"):
+                self.canvas.refresh_guides()
 
         grid = workspace.get("grid")
         if isinstance(grid, dict):
@@ -1277,16 +1307,65 @@ class MainWindow(Gtk.ApplicationWindow):
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()
 
+    def _update_mirror_mode_ui(self) -> None:
+        """Swap Axes/Copies label and tooltips for the active symmetry mode."""
+        if not hasattr(self, "mirror_axes_label"):
+            return
+        radial = self.mirror.mode == "radial"
+        self.mirror_axes_label.set_text("Copies" if radial else "Axes")
+        if hasattr(self, "mirror_axes_spin"):
+            if radial:
+                self.mirror_axes_spin.set_tooltip_text(
+                    "Same-facing rotational copies around the center. "
+                    "2 = opposite pair; 3+ = pinwheel."
+                )
+            else:
+                self.mirror_axes_spin.set_tooltip_text(
+                    "Equally spaced mirror axes through the center. "
+                    "1 = single axis; 2 = four-way (perpendicular); 3+ = kaleidoscope."
+                )
+        if hasattr(self, "mirror_orient_dropdown"):
+            if radial:
+                self.mirror_orient_dropdown.set_tooltip_text(
+                    "Phases the guide rays only. Does not flip stroke direction."
+                )
+            else:
+                self.mirror_orient_dropdown.set_tooltip_text(
+                    "Rotates the axis set. Horizontal: left↔right first. "
+                    "Vertical: top↔bottom first. Diagonal: 45°."
+                )
+
+    def _on_mirror_mode_changed(self, dropdown: Gtk.DropDown, *_a) -> None:
+        idx = int(dropdown.get_selected())
+        if 0 <= idx < len(MODES):
+            self.mirror.mode = MODES[idx][0]
+        self.mirror.clamp()
+        self._update_mirror_mode_ui()
+        if hasattr(self, "canvas"):
+            self.canvas.refresh_guides()
+
     def _on_mirror_orient_changed(self, dropdown: Gtk.DropDown, *_a) -> None:
         idx = int(dropdown.get_selected())
         if 0 <= idx < len(ORIENTATIONS):
-            self.mirror.orientation = ORIENTATIONS[idx][0]
+            self.mirror.apply_orientation_preset(ORIENTATIONS[idx][0])
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()
 
     def _on_mirror_axes_changed(self, spin: Gtk.SpinButton) -> None:
         self.mirror.axes = int(spin.get_value())
         self.mirror.clamp()
+        if hasattr(self, "canvas"):
+            self.canvas.refresh_guides()
+
+    def _on_mirror_reset(self, *_a) -> None:
+        """Reset hub to center and angle to Horizontal (Mirror and Radial)."""
+        self.mirror.reset_guides()
+        if hasattr(self, "mirror_orient_dropdown"):
+            idx = next(
+                (i for i, (k, _) in enumerate(ORIENTATIONS) if k == self.mirror.orientation),
+                0,
+            )
+            self.mirror_orient_dropdown.set_selected(idx)
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()
 
@@ -2232,9 +2311,10 @@ class MainWindow(Gtk.ApplicationWindow):
         toolbox_page.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL, margin_top=6, margin_bottom=2))
         mirror_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         toolbox_page.append(mirror_box)
-        self.mirror_toggle = Gtk.CheckButton(label="Mirror")
+        self.mirror_toggle = Gtk.CheckButton(label="Symmetry")
         self.mirror_toggle.set_tooltip_text(
-            "Live symmetry while drawing. Equally spaced axes through the canvas center."
+            "Live symmetry while drawing. Drag the hub to move the center; "
+            "drag a guide line to rotate. Mirror reflects; Radial rotates copies."
         )
         self.mirror_toggle.connect("toggled", self._on_mirror_toggled)
         mirror_box.append(self.mirror_toggle)
@@ -2253,6 +2333,17 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mirror_opts.set_visible(False)
         mirror_box.append(self.mirror_opts)
 
+        self.mirror_opts.append(Gtk.Label(label="Mode", xalign=0))
+        mode_labels = [label for _key, label in MODES]
+        self.mirror_mode_dropdown = Gtk.DropDown(model=Gtk.StringList.new(mode_labels))
+        self.mirror_mode_dropdown.set_hexpand(True)
+        self.mirror_mode_dropdown.set_tooltip_text(
+            "Mirror: reflect across axes (kaleidoscope). "
+            "Radial: rotate same-facing copies (pinwheel)."
+        )
+        self.mirror_mode_dropdown.connect("notify::selected", self._on_mirror_mode_changed)
+        self.mirror_opts.append(self.mirror_mode_dropdown)
+
         self.mirror_opts.append(Gtk.Label(label="Orientation", xalign=0))
         orient_labels = [label for _key, label in ORIENTATIONS]
         self.mirror_orient_dropdown = Gtk.DropDown(model=Gtk.StringList.new(orient_labels))
@@ -2264,7 +2355,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mirror_orient_dropdown.connect("notify::selected", self._on_mirror_orient_changed)
         self.mirror_opts.append(self.mirror_orient_dropdown)
 
-        self.mirror_opts.append(Gtk.Label(label="Axes", xalign=0))
+        self.mirror_axes_label = Gtk.Label(label="Axes", xalign=0)
+        self.mirror_opts.append(self.mirror_axes_label)
         self.mirror_axes_spin = Gtk.SpinButton.new_with_range(1, 16, 1)
         self.mirror_axes_spin.set_value(1)
         self.mirror_axes_spin.set_hexpand(True)
@@ -2274,6 +2366,15 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         self.mirror_axes_spin.connect("value-changed", self._on_mirror_axes_changed)
         self.mirror_opts.append(self.mirror_axes_spin)
+
+        reset_btn = Gtk.Button(label="Reset Guides")
+        reset_btn.set_tooltip_text(
+            "Move the hub back to the canvas center and snap rotation to Horizontal. "
+            "Works for Mirror and Radial."
+        )
+        reset_btn.connect("clicked", self._on_mirror_reset)
+        self.mirror_opts.append(reset_btn)
+        self._update_mirror_mode_ui()
 
         # Libraries tab — open category folders in the system file manager
         libraries_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, css_classes=["toolbox"])

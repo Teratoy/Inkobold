@@ -52,7 +52,15 @@ Save aliases also accept `.scribbler` and `.zip`.
   "workspace": {
     "tool_id": "pen",
     "tools": {},
-    "mirror": { "enabled": false, "orientation": "horizontal", "axes": 1 },
+    "mirror": {
+      "enabled": false,
+      "mode": "mirror",
+      "orientation": "horizontal",
+      "axes": 1,
+      "angle": 1.5707963267948966,
+      "cx_norm": 0.5,
+      "cy_norm": 0.5
+    },
     "grid": { "enabled": false, "rows": 8, "columns": 8 },
     "tile_wrap": false,
     "view": { "zoom": 1.0, "pan_x": 40.0, "pan_y": 40.0 }
@@ -62,7 +70,7 @@ Save aliases also accept `.scribbler` and `.zip`.
 
 `layers` duplicates the current frame for older readers.
 
-`workspace` (v4) stores document-scoped tool options and view UI. Older files without it open normally; app-wide prefs (theme, shortcuts, sun, …) stay in [[Paths and Settings]].
+`workspace` (v4) stores document-scoped tool options and view UI. The `mirror` blob covers Symmetry (mode, orientation, axes/copies, continuous `angle`, hub `cx_norm`/`cy_norm`). Older files without new keys open with defaults (center hub, Horizontal). App-wide prefs (theme, shortcuts, sun, …) stay in [[Paths and Settings]].
 
 ## Also opens
 
