@@ -361,7 +361,6 @@ class Bone:
     parent: Optional[Bone]
     joint: complex  # canvas px of its joint (sprite offset = -joint)
     part: str = ""
-    behind_parent: bool = False
     position: complex = 0j
     rotation: float = 0.0
     scale: complex = 1 + 1j
@@ -543,9 +542,9 @@ class GoblinRig:
         old = getattr(self, "bones", {})
         pelvis = self._bone("Pelvis", None, j["pelvis"], 0j, "", old)
         thigh_l = self._bone("ThighL", pelvis, j["hip_l"], j["pelvis"], "thighL", old)
-        shin_l = self._bone("ShinL", thigh_l, j["knee_l"], j["hip_l"], "shinL", old, True)
+        shin_l = self._bone("ShinL", thigh_l, j["knee_l"], j["hip_l"], "shinL", old)
         thigh_r = self._bone("ThighR", pelvis, hip_r, j["pelvis"], "thighR", old)
-        shin_r = self._bone("ShinR", thigh_r, knee_r, hip_r, "shinR", old, True)
+        shin_r = self._bone("ShinR", thigh_r, knee_r, hip_r, "shinR", old)
         torso = self._bone("Torso", pelvis, j["pelvis"], j["pelvis"], "torso", old)
         head = self._bone("Head", torso, j["neck"], j["pelvis"], "head", old)
         arm_l = self._bone("ArmL", torso, j["shoulder_l"], j["pelvis"], "armL", old)
@@ -562,8 +561,8 @@ class GoblinRig:
         self._arm_len = abs(j["hand_l"] - j["shoulder_l"])
 
     @staticmethod
-    def _bone(name, parent, joint, parent_joint, part, old, behind=False) -> Bone:
-        bone = Bone(name, parent, joint, part, behind, position=joint - parent_joint)
+    def _bone(name, parent, joint, parent_joint, part, old) -> Bone:
+        bone = Bone(name, parent, joint, part, position=joint - parent_joint)
         prev = old.get(name)
         if prev is not None:  # keep the pose across a rebuild
             bone.rotation, bone.scale = prev.rotation, prev.scale
@@ -595,23 +594,11 @@ class GoblinRig:
     def to_local(self, bone: Bone, p: complex) -> complex:
         return self.global_xf(bone).inverse().xform(p)
 
-    def part_transforms(self) -> list[tuple[str, Xf]]:
-        """(part, world transform of its canvas-sized image), in the game's draw order."""
-        out: list[tuple[str, Xf]] = []
-
-        def visit(bone: Bone) -> None:
-            kids = [b for b in self.bones.values() if b.parent is bone]
-            for k in kids:
-                if k.behind_parent:
-                    visit(k)
-            if bone.part:
-                out.append((bone.part, self.global_xf(bone) * Xf(o=-bone.joint)))
-            for k in kids:
-                if not k.behind_parent:
-                    visit(k)
-
-        visit(self.bones["Pelvis"])
-        return out
+    def part_transforms(self, order: Optional[tuple[str, ...]] = None) -> list[tuple[str, Xf]]:
+        """(part, world transform of its canvas-sized image), bottom to top in ``order``
+        (default: the character's draw_order, as the game stacks its part sprites)."""
+        xfs = {b.part: self.global_xf(b) * Xf(o=-b.joint) for b in self.bones.values() if b.part}
+        return [(part, xfs[part]) for part in (order or self.char.draw_order) if part in xfs]
 
     def head_xf(self) -> Xf:
         """Head bone world transform (hats hang off it)."""
@@ -1255,7 +1242,8 @@ def scenario(
     def gesture(name: str, every: float) -> Scenario:
         def fn(d, t, dt):
             _set(d, ground_slope=slope, ground_step=step)
-            if math.fmod(t, every) < dt:
+            # Right away (the first frame may have dt = 0), then every `every` seconds.
+            if t <= dt or math.fmod(t, every) < dt:
                 d.gesture_request = name
         return fn
 

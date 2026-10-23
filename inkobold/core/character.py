@@ -27,8 +27,9 @@ from inkobold.core.layer import Layer
 FILE_NAME = "rig.json"
 VERSION = 1
 PARTS = ("head", "torso", "armL", "armR", "thighL", "thighR", "shinL", "shinR")
-# Layer stack bottom -> top, as the game draws them: each shin behind its thigh, the
-# legs behind the torso, the head (and hat) over it, arms on top.
+# Default layer stack bottom -> top, as the game draws them: each shin behind its thigh,
+# the legs behind the torso, the head (and hat) over it, arms on top. A character's own
+# order is rig.json "draw_order" (RigCharacter.draw_order), written from the layer order.
 DRAW_ORDER = ("shinL", "thighL", "shinR", "thighR", "torso", "head", "armL", "armR")
 # Points listed under "joints" in rig.json (canvas px). *_l points mirror to the right.
 JOINTS = ("pelvis", "neck", "shoulder_l", "hand_l", "hip_l", "knee_l", "ankle_l", "cheek_l")
@@ -105,6 +106,8 @@ class CharacterRig:
     hat_sit: float = 46.0
     hat_scale: float = 3.0
     params: dict = field(default_factory=dict)
+    # Part stack bottom -> top (the game's sprite order; the hat draws right after the head).
+    draw_order: tuple[str, ...] = DRAW_ORDER
     # Top-level rig.json keys this version does not know, written back untouched.
     extra: dict = field(default_factory=dict)
     # part -> (layer id, revision, offset x, offset y) as last read from / written to disk
@@ -126,7 +129,7 @@ class CharacterRig:
         """Fill from a parsed rig.json; missing keys keep their current value."""
         if not isinstance(data, dict):
             raise CharacterError("rig.json is not a JSON object")
-        known = {"version", "canvas", "art_top_y", "foot_sole_y", "joints", "hat", "params"}
+        known = {"version", "canvas", "art_top_y", "foot_sole_y", "joints", "hat", "params", "draw_order"}
         self.extra = {k: v for k, v in data.items() if k not in known}
         canvas = data.get("canvas")
         if isinstance(canvas, list) and len(canvas) == 2:
@@ -152,6 +155,14 @@ class CharacterRig:
         params = data.get("params")
         if isinstance(params, dict):
             self.params = dict(params)
+        order = data.get("draw_order")
+        if order is not None:
+            # Like the game: every part exactly once, else the default stack.
+            valid = isinstance(order, list) and sorted(map(str, order)) == sorted(PARTS)
+            self.draw_order = tuple(str(p) for p in order) if valid else DRAW_ORDER
+        elif "version" in data:
+            # A whole rig.json (or history snapshot) without one means the default stack.
+            self.draw_order = DRAW_ORDER
 
     def to_dict(self) -> dict:
         out: dict = {
@@ -167,6 +178,8 @@ class CharacterRig:
             },
             "params": dict(self.params),
         }
+        if tuple(self.draw_order) != DRAW_ORDER:
+            out["draw_order"] = list(self.draw_order)
         out.update(self.extra)
         return out
 
@@ -338,7 +351,7 @@ def open_character(folder: Path) -> tuple[Document, list[str]]:
     notes: list[str] = []
     doc = Document.blank(width, height, name=DRAW_ORDER[0])
     layers: list[Layer] = []
-    for part in DRAW_ORDER:
+    for part in rig.draw_order:
         ly = Layer(name=part, width=width, height=height, color_depth=doc.color_depth)
         arr = images.get(part)
         if arr is None:
@@ -402,6 +415,8 @@ def save_character(doc: Document, folder: Optional[Path] = None) -> list[str]:
         raise CharacterError(
             "Rename or add layers for the missing parts: " + ", ".join(missing)
         )
+    # The part layers' stack (extras skipped) is the game's draw order.
+    rig.draw_order = tuple(ly.name for ly in doc.layers if ly.name in PARTS)
     if (doc.width, doc.height) != (int(round(rig.canvas_width)), int(round(rig.canvas_height))):
         rig.canvas_width, rig.canvas_height = float(doc.width), float(doc.height)
     target.mkdir(parents=True, exist_ok=True)

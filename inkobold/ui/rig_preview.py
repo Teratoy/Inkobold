@@ -382,11 +382,9 @@ class RigPreview(Gtk.Box):
         cr.translate(ox, oy)
         cr.scale(s, s)
         hat = self._hat_surface(doc.character)
-        for part, xf in rig.part_transforms():
-            if part == "armL" and hat is not None:
-                # PlayerRig hangs the hat off the head bone, drawn after it (before the arms).
-                self._draw_hat(cr, rig, hat)
-                hat = None
+        # Stack as the canvas does right now: the layer order is the game's draw order once saved.
+        order = tuple(ly.name for ly in doc.layers if ly.name in PARTS)
+        for part, xf in rig.part_transforms(order):
             layer = layers.get(part)
             if layer is None:
                 continue
@@ -400,6 +398,9 @@ class RigPreview(Gtk.Box):
             cr.get_source().set_filter(cairo.FILTER_GOOD)
             cr.paint()
             cr.restore()
+            if part == "head" and hat is not None:
+                # PlayerRig stacks the hat right after the head sprite.
+                self._draw_hat(cr, rig, hat)
         cr.restore()
 
         if self.aim_check.get_active() and self._pointer is not None:

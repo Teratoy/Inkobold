@@ -209,6 +209,37 @@ def test_save_after_undo_leaves_untouched_parts_alone():
     assert {p: (folder / f"{p}.png").read_bytes() for p in ch.PARTS} == before
 
 
+def test_layer_order_becomes_draw_order():
+    folder = _folder()
+    doc, _ = ch.open_character(folder)
+    default_json = (folder / ch.FILE_NAME).read_text()
+    ch.save_character(doc)
+    assert "draw_order" not in json.loads((folder / ch.FILE_NAME).read_text())
+    # Arm L to the bottom of the stack (an extra layer in between is ignored).
+    arm = next(i for i, ly in enumerate(doc.layers) if ly.name == "armL")
+    doc.move_layer(arm, 0)
+    doc.add_layer("sketch")
+    ch.save_character(doc)
+    order = json.loads((folder / ch.FILE_NAME).read_text())["draw_order"]
+    assert order == ["armL", "shinL", "thighL", "shinR", "thighR", "torso", "head", "armR"]
+    reopened, _ = ch.open_character(folder)
+    assert [ly.name for ly in reopened.layers] == order
+    # Back to the default stack: the key disappears again.
+    back = next(i for i, ly in enumerate(reopened.layers) if ly.name == "armL")
+    reopened.move_layer(back, len(reopened.layers) - 2)
+    ch.save_character(reopened)
+    assert "draw_order" not in json.loads((folder / ch.FILE_NAME).read_text())
+    assert default_json  # (the first save only reformatted)
+
+
+def test_invalid_draw_order_falls_back():
+    rig = ch.CharacterRig.from_dict({"draw_order": ["head", "head"]})
+    assert rig.draw_order == ch.DRAW_ORDER
+    rig = ch.CharacterRig.from_dict({"draw_order": list(reversed(ch.DRAW_ORDER))})
+    assert rig.draw_order == tuple(reversed(ch.DRAW_ORDER))
+    assert ch.CharacterRig.from_dict(rig.to_dict()).draw_order == rig.draw_order
+
+
 def test_undo_restores_joints():
     doc, _ = ch.open_character(_folder())
     hist = History()
