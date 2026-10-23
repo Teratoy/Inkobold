@@ -72,6 +72,8 @@ def replay() -> list[str]:
         event = seg.get("event") or ""
         if event.startswith("knock_down:"):
             driver.knock_down(float(event.split(":", 1)[1]))
+        elif event.startswith("gesture:"):
+            rig.play_gesture(event.split(":", 1)[1])
         for i in range(int(seg["frames"])):
             want = next(frames)
             rig.step(dt)

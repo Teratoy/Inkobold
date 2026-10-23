@@ -67,7 +67,10 @@ DEFAULT_PARAMS: dict = {
     "climb_foot_amp": 2.5, "climb_arm_deg": 150.0, "hang_hand_spread": 6.0,
     "hang_leg_sway": 1.2, "hang_sway_hz": 0.7, "sleep_arm_deg": 8.0,
     "sleep_breath_hz": 0.22, "sleep_breath_px": 0.6, "sleep_blend_rate": 9.0,
-    "aim_blend_speed": 14.0, "aim_linger": 0.5, "bubble_fade_sec": 0.35,
+    "aim_blend_speed": 14.0, "aim_linger": 0.5, "wave_raise_deg": 115.0, "wave_swing_deg": 20.0,
+    "wave_hz": 2.4, "wave_sec": 1.6, "nod_px": 1.8, "nod_hz": 2.0, "nod_count": 2.0,
+    "shake_px": 1.2, "shake_tilt_deg": 6.0, "shake_hz": 2.6, "shake_count": 2.5,
+    "gesture_blend_sec": 0.15, "bubble_fade_sec": 0.35,
     "bubble_stretch_max": 1.0675, "bubble_stretch_speed": 850.0, "bubble_squash_max": 0.665,
     "bubble_squash_min": 0.25, "bubble_squash_speed": 900.0, "bubble_jelly_hz": 3.5,
     "bubble_jelly_damping": 0.28, "bubble_shine_period": 1.4, "bubble_shine_sweep_sec": 0.45,
@@ -106,6 +109,10 @@ DEFAULT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Hang", ("hang_hand_spread", "hang_leg_sway", "hang_sway_hz",)),
     ("Sleep", ("sleep_arm_deg", "sleep_breath_hz", "sleep_breath_px", "sleep_blend_rate",)),
     ("Aim", ("aim_blend_speed", "aim_linger",)),
+    ("Gestures", (
+        "wave_raise_deg", "wave_swing_deg", "wave_hz", "wave_sec", "nod_px", "nod_hz", "nod_count",
+        "shake_px", "shake_tilt_deg", "shake_hz", "shake_count", "gesture_blend_sec",
+    )),
     ("Bubble", (
         "bubble_fade_sec", "bubble_stretch_max", "bubble_stretch_speed", "bubble_squash_max",
         "bubble_squash_min", "bubble_squash_speed", "bubble_jelly_hz", "bubble_jelly_damping",
@@ -394,6 +401,8 @@ class PuppetDriver:
     ground_step: float = 0.0
     integrate: bool = True
     bubble_left: float = 0.0
+    # Preview scenarios ask for a gesture here; GoblinRig.step plays it (PlayerRig.play_gesture).
+    gesture_request: str = ""
     _knocked: bool = False
     _knock_elapsed: float = 0.0
     _knock_duration: float = 0.0
@@ -501,6 +510,8 @@ class GoblinRig:
         self._stretch = 0.0
         self._stretch_dir = complex(0.0, 1.0)
         self._deformed = False
+        self._gesture = ""
+        self._gesture_t = 0.0
         self.debug_targets: list[complex] = []
         self.rebuild(character or CharacterRig(), params)
 
@@ -610,6 +621,9 @@ class GoblinRig:
 
     def step(self, delta: float) -> None:
         d = self.driver
+        if d.gesture_request:
+            self.play_gesture(d.gesture_request)
+            d.gesture_request = ""
         self._time += delta
         d.advance(delta)
         expected = self._last_global + d.vel * delta
@@ -619,11 +633,54 @@ class GoblinRig:
             self._snap_state()
         self._last_global = body
         self._update_state(delta)
+        self._update_gesture(delta)
         self._pose_body(delta)
         self._pose_legs(delta)
         self._pose_arms_and_head()
         self._update_bubble(delta)
         self._apply_lying_turn()
+
+    # ---- gestures ----
+
+    GESTURES = ("wave", "yes", "no")
+
+    def play_gesture(self, gesture: str) -> bool:
+        """PlayerRig.play_gesture: "wave" (right-arm salute), "yes" (nod), "no" (head shake)."""
+        if gesture not in self.GESTURES:
+            return False
+        self._gesture = gesture
+        self._gesture_t = 0.0
+        return True
+
+    def is_gesturing(self) -> bool:
+        return self._gesture != ""
+
+    def gesture_length(self, gesture: str) -> float:
+        p = self.p
+        if gesture == "wave":
+            return p.wave_sec
+        if gesture == "yes":
+            return p.nod_count / max(p.nod_hz, 0.01)
+        if gesture == "no":
+            return p.shake_count / max(p.shake_hz, 0.01)
+        return 0.0
+
+    def _update_gesture(self, delta: float) -> None:
+        if not self._gesture:
+            return
+        self._gesture_t += delta
+        if self._gesture_t >= self.gesture_length(self._gesture):
+            self._gesture = ""
+            self._gesture_t = 0.0
+
+    def _gesture_weight(self) -> float:
+        if not self._gesture:
+            return 0.0
+        length = self.gesture_length(self._gesture)
+        blend = min(self.p.gesture_blend_sec, length * 0.5)
+        t = self._gesture_t
+        w = smoothstep(0.0, blend, t) * (1.0 - smoothstep(length - blend, length, t))
+        return w * (1.0 - self._sleep_w)
 
     def _snap_state(self) -> None:
         d = self.driver
@@ -999,6 +1056,10 @@ class GoblinRig:
             else:
                 aim_r = wrapf(angle(aim_local - arm_r.position) - self._rest_arm_r, -math.pi, math.pi)
                 rot_r = lerp_angle(base_r, aim_r, self._aim_w)
+        gesture_w = self._gesture_weight()
+        if self._gesture == "wave" and gesture_w > 0.001:
+            swing_t = math.sin(self._gesture_t * TAU * p.wave_hz) * rad(p.wave_swing_deg)
+            rot_r = lerp_angle(rot_r, -rad(p.wave_raise_deg) + swing_t, gesture_w)
         arm_l.rotation = rot_l
         arm_r.rotation = rot_r
 
@@ -1020,7 +1081,14 @@ class GoblinRig:
         tilt += math.sin(self._time * TAU * p.burn_head_shake_hz) * rad(p.burn_head_shake_deg) * self._burn_w
         tilt *= 1.0 - self._sleep_w
         look *= 1.0 - self._sleep_w
-        head.position = self._j["neck"] - self._j["pelvis"] + complex(look * p.head_look_shift * px, head_y * px)
+        head_x = look * p.head_look_shift
+        if self._gesture == "yes" and gesture_w > 0.001:
+            head_y += p.nod_px * (0.5 - 0.5 * math.cos(self._gesture_t * TAU * p.nod_hz)) * gesture_w
+        elif self._gesture == "no" and gesture_w > 0.001:
+            side = math.sin(self._gesture_t * TAU * p.shake_hz)
+            head_x += side * p.shake_px * gesture_w
+            tilt += side * rad(p.shake_tilt_deg) * gesture_w
+        head.position = self._j["neck"] - self._j["pelvis"] + complex(head_x * px, head_y * px)
         head.rotation = tilt - self._lean * 0.5
 
     def _brace_arm_angle(self, arm: Bone, outward: float, rest: float) -> float:
@@ -1184,7 +1252,15 @@ def scenario(
         pulse = max(math.sin(t * 2.5), 0.0) ** 4
         _set(d, on_floor=False, ground_y=math.nan, held=True, struggle=pulse)
 
+    def gesture(name: str, every: float) -> Scenario:
+        def fn(d, t, dt):
+            _set(d, ground_slope=slope, ground_step=step)
+            if math.fmod(t, every) < dt:
+                d.gesture_request = name
+        return fn
+
     table: dict[str, Scenario] = {
+        "Wave": gesture("wave", 2.5), "Yes": gesture("yes", 2.0), "No": gesture("no", 2.0),
         "Idle": idle, "Walk": walk, "Run": run, "Jump": jump, "Long fall": long_fall,
         "Knockdown": knockdown, "Swim": swim, "Float": float_, "Climb": climb, "Hang": hang,
         "Burn": burn, "Squash": squash, "Sleep": sleep, "Held": held,
@@ -1193,6 +1269,6 @@ def scenario(
 
 
 SCENARIOS = (
-    "Idle", "Walk", "Run", "Jump", "Long fall", "Knockdown", "Swim", "Float", "Climb", "Hang",
-    "Burn", "Squash", "Sleep", "Held",
+    "Idle", "Wave", "Yes", "No", "Walk", "Run", "Jump", "Long fall", "Knockdown", "Swim", "Float",
+    "Climb", "Hang", "Burn", "Squash", "Sleep", "Held",
 )
