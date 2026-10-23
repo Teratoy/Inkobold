@@ -19,6 +19,7 @@ from inkobold.core.assets import (  # noqa: E402
     is_listed,
     sort_key,
 )
+from inkobold.core.character import character_folder_for  # noqa: E402
 from inkobold.core.libraries import open_in_file_manager  # noqa: E402
 
 _ATTRS = ",".join((
@@ -55,12 +56,15 @@ class AssetBrowser(Gtk.Box):
         on_open: Callable[[Path], None],
         on_import: Callable[[Path], None],
         on_root_changed: Callable[[Path], None],
+        on_open_character: Optional[Callable[[Path], None]] = None,
+        on_new_character: Optional[Callable[[], None]] = None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6, css_classes=["toolbox"])
         self._root = root
         self._on_open = on_open
         self._on_import = on_import
         self._on_root_changed = on_root_changed
+        self._on_open_character = on_open_character
         self._thumbs: dict[tuple[str, int], Gdk.Texture] = {}
         self._selected: Optional[Path] = None
 
@@ -121,6 +125,20 @@ class AssetBrowser(Gtk.Box):
         row2.append(self._res_btn)
         row2.append(reveal)
         self.append(row2)
+        self._char_btn: Optional[Gtk.Button] = None
+        if on_open_character is not None and on_new_character is not None:
+            row3 = Gtk.Box(spacing=4, homogeneous=True)
+            self._char_btn = Gtk.Button(label="Open Character")
+            self._char_btn.set_tooltip_text(
+                "Open the selected character folder (part PNGs + rig.json) with its rig"
+            )
+            self._char_btn.connect("clicked", lambda *_: self._open_character())
+            new_char = Gtk.Button(label="New Character…")
+            new_char.set_tooltip_text("Make a new goblin-shaped character folder")
+            new_char.connect("clicked", lambda *_: on_new_character())
+            row3.append(self._char_btn)
+            row3.append(new_char)
+            self.append(row3)
 
         self.set_root(root)
 
@@ -242,6 +260,8 @@ class AssetBrowser(Gtk.Box):
         self._import_btn.set_sensitive(importable)
         res = godot_res_path(path) if path is not None else None
         self._res_btn.set_sensitive(res is not None)
+        if self._char_btn is not None:
+            self._char_btn.set_sensitive(character_folder_for(path) is not None)
         self._preview.clear()
         if path is None:
             self._info.set_text("Double-click an image to open it. Exports start in the selected folder.")
@@ -274,6 +294,15 @@ class AssetBrowser(Gtk.Box):
     def _open_selected(self) -> None:
         if self._selected is not None and self._selected.is_file():
             self._on_open(self._selected)
+
+    def selected_character(self) -> Optional[Path]:
+        """Character folder of the selection (the folder itself or a part inside it)."""
+        return character_folder_for(self._selected)
+
+    def _open_character(self) -> None:
+        folder = self.selected_character()
+        if folder is not None and self._on_open_character is not None:
+            self._on_open_character(folder)
 
     def _import_selected(self) -> None:
         if self._selected is not None and self._selected.is_file():

@@ -48,6 +48,7 @@ from inkobold.core.effects import (
     threshold,
 )
 from inkobold.core.assets import asset_root, export_folder
+from inkobold.core import character as ch
 from inkobold.core.flavor import current as current_flavor
 from inkobold.core.grid import GridOverlay
 from inkobold.core.history import History
@@ -79,9 +80,12 @@ from inkobold.core.sun import SunLight
 from inkobold.input import InputHub
 from inkobold.tools import default_tools
 from inkobold.ui.asset_browser import AssetBrowser
+from inkobold.ui.rig_panel import RigPanel
+from inkobold.ui.rig_preview import RigPreview
 from inkobold.ui.canvas import Canvas
 from inkobold.ui.color_picker import ColorSelectButton
 from inkobold.ui.dialogs import (
+    NewCharacterDialog,
     CaptureShortcutDialog,
     ColorDepthDialog,
     CropDialog,
@@ -184,6 +188,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._layers_sig: Optional[tuple] = None
         self.mirror = MirrorModifier()
         self.grid = GridOverlay()
+        self.rig_view = ch.RigView()
+        self.rig_panel: Optional[RigPanel] = None
+        self.rig_preview: Optional[RigPreview] = None
+        self._rig_page_index: Optional[int] = None
         self.sun = SunLight(
             active=bool(self.app_settings.sun_active),
             enabled=bool(self.app_settings.sun_visible),
@@ -220,6 +228,8 @@ class MainWindow(Gtk.ApplicationWindow):
             "open": self.action_open,
             "save": self.action_save,
             "save_as": self.action_save_as,
+            "new_character": self.action_new_character,
+            "open_character": self.action_open_character,
             "import_image": self.action_import_image,
             "export": self.action_export,
             "export_layer": self.action_export_layer,
@@ -604,6 +614,9 @@ class MainWindow(Gtk.ApplicationWindow):
         if doc is None:
             if on_done is not None:
                 on_done(False)
+            return
+        if doc.character is not None:
+            self._save_character(doc, path, on_done)
             return
         doc.workspace = self._capture_workspace()
         old_path, old_dirty = doc.path, doc.dirty
@@ -1760,6 +1773,9 @@ class MainWindow(Gtk.ApplicationWindow):
         file_menu.append("Open File…", "win.open")
         file_menu.append("Save File", "win.save")
         file_menu.append("Save As…", "win.save_as")
+        if current_flavor().character_rig:
+            file_menu.append("New Character…", "win.new_character")
+            file_menu.append("Open Character…", "win.open_character")
         file_menu.append("Export…", "win.export")
         file_menu.append("Export Selected Layer…", "win.export_layer")
         file_menu.append("Export Separated Layers…", "win.export_layers")
@@ -2533,8 +2549,22 @@ class MainWindow(Gtk.ApplicationWindow):
                 on_open=self.open_path,
                 on_import=self.import_image_path,
                 on_root_changed=self._on_asset_root_changed,
+                on_open_character=self.open_character_path if current_flavor().character_rig else None,
+                on_new_character=self.action_new_character if current_flavor().character_rig else None,
             )
             left_notebook.append_page(self.asset_browser, Gtk.Label(label="Assets"))
+        if current_flavor().character_rig:
+            self.rig_panel = RigPanel(
+                get_document=lambda: self.document,
+                view=self.rig_view,
+                push_history=self._push_history,
+                on_changed=self._on_rig_changed,
+                on_new=self.action_new_character,
+                on_open=self.action_open_character,
+                on_save=self.action_save,
+            )
+            self._rig_page_index = left_notebook.append_page(self.rig_panel, Gtk.Label(label="Rig"))
+        self._left_notebook = left_notebook
         left_notebook.connect("switch-page", self._on_left_tab_switched)
         split.set_start_child(left_notebook)
 
@@ -2564,13 +2594,30 @@ class MainWindow(Gtk.ApplicationWindow):
             get_tile_wrap=lambda: self.tile_wrap,
             on_type_editing=self._on_type_editing_changed,
             on_sun_moved=self._on_sun_moved,
+            get_rig_view=lambda: self.rig_view,
+            on_rig_changed=self._on_rig_changed,
         )
         type_tool = self.tools.get("type")
         if type_tool is not None and hasattr(type_tool, "set_editing_changed_callback"):
             type_tool.set_editing_changed_callback(self._on_type_editing_changed)
         self.canvas.animation_playing = False
         self.canvas.renderer.checker_light = bool(self.app_settings.checker_light)
-        right_split.set_start_child(self.canvas)
+        if current_flavor().character_rig:
+            # Canvas | live rig preview (shown for character tabs only)
+            canvas_split = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, hexpand=True, vexpand=True)
+            canvas_split.set_wide_handle(True)
+            canvas_split.set_resize_start_child(True)
+            canvas_split.set_shrink_start_child(False)
+            canvas_split.set_resize_end_child(False)
+            canvas_split.set_shrink_end_child(False)
+            canvas_split.set_start_child(self.canvas)
+            self.rig_preview = RigPreview(get_document=lambda: self.document)
+            self.rig_preview.set_size_request(300, -1)
+            self.rig_preview.set_visible(False)
+            canvas_split.set_end_child(self.rig_preview)
+            right_split.set_start_child(canvas_split)
+        else:
+            right_split.set_start_child(self.canvas)
 
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0, css_classes=["sidebar"])
         side.set_size_request(self._side_panel_w, -1)
@@ -2880,7 +2927,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self._rebuild_frames()
         self._rebuild_layers()
         self.canvas.queue_render()
+        self.canvas.refresh_guides()
         self._set_status()
+        self._sync_rig_panel()
 
     def action_undo(self, *_a) -> None:
         if not self.document or not self.history.can_undo:
@@ -3633,6 +3682,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._add_tab(doc, hist, fit=True)
 
     def _tab_display_name(self, doc: Optional[Document]) -> str:
+        if doc and doc.character is not None:
+            return f"{doc.character.name} (character)"
         if doc and doc.path:
             return doc.path.name
         return "untitled.inkobold"
@@ -3640,6 +3691,8 @@ class MainWindow(Gtk.ApplicationWindow):
     def _tab_is_unsaved(self, doc: Optional[Document]) -> bool:
         if not doc:
             return False
+        if doc.character is not None:
+            return doc.character.folder is None or bool(doc.dirty)
         return (not doc.path) or bool(doc.dirty)
 
     def _tab_title_text(self, doc: Document) -> tuple[str, str, str]:
@@ -3743,6 +3796,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._refresh_tab_styles()
         self._set_status()
         self.canvas.queue_render()
+        self._sync_rig_panel()
 
     def _refresh_tab_label(self, tab: _DocTab) -> None:
         if tab.label is None:
@@ -3807,10 +3861,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._activate_tab(index, fit=False)
             self._closing_tab_index = index
             self._quit_after_save = False
-            if self.document and self.document.path and self.document.path.suffix.lower() in {
-                ".inkobold",
-                ".scribbler",
-            }:
+            if self._saves_in_place(self.document):
                 self._closing_tab_index = None
                 self._save_document(on_done=self._close_tab_after_save(self.document))
                 return
@@ -4202,6 +4253,7 @@ class MainWindow(Gtk.ApplicationWindow):
         ):
             return
         self._layers_sig = sig
+        self._sync_rig_panel()
         self._dismiss_layer_context_menu()
         self._layer_rename_entry = None
         self._layer_rename_done = True
@@ -4525,7 +4577,7 @@ class MainWindow(Gtk.ApplicationWindow):
             text = self.input_hub.status
         else:
             d = self.document
-            path = d.path.name if d.path else "untitled.inkobold"
+            path = self._tab_display_name(d)
             dirty = "*" if d.dirty else ""
             ly = d.active_layer
             renderer = self.canvas.renderer
@@ -4816,6 +4868,156 @@ class MainWindow(Gtk.ApplicationWindow):
         self._apply_workspace(doc.workspace, restore_view=has_view)
         return True
 
+    # ---- GreenInkobold characters ----
+
+    @staticmethod
+    def _saves_in_place(doc: Optional[Document]) -> bool:
+        """Ctrl+S writes without asking: .inkobold files and character folders."""
+        if doc is None:
+            return False
+        if doc.character is not None:
+            return doc.character.folder is not None
+        return bool(doc.path) and doc.path.suffix.lower() in {".inkobold", ".scribbler"}
+
+    def _sync_rig_panel(self) -> None:
+        """Rig tab and live preview follow the active document."""
+        if self.rig_panel is not None:
+            self.rig_panel.sync()
+        if self.rig_preview is not None:
+            show = (
+                self.document is not None
+                and self.document.character is not None
+                and self.rig_view.preview
+            )
+            if show != self.rig_preview.get_visible():
+                self.rig_preview.set_visible(show)
+            self.rig_preview.set_active(show)
+
+    def _on_rig_changed(self) -> None:
+        self.canvas.refresh_guides()
+        self._set_status()
+        self._sync_rig_panel()
+
+    def _save_character(self, doc: Document, folder: Optional[Path], on_done=None) -> None:
+        try:
+            notes = ch.save_character(doc, folder)
+        except (ch.CharacterError, OSError) as exc:
+            self._alert("Character not saved", str(exc))
+            if on_done is not None:
+                on_done(False)
+            return
+        if notes:
+            self._alert(f"Saved {doc.character.name}", "\n".join(notes))
+        self._set_status()
+        self._sync_rig_panel()
+        if on_done is not None:
+            on_done(True)
+
+    def _save_character_as(self) -> None:
+        doc = self.document
+        if doc is None or doc.character is None:
+            return
+        dialog = Gtk.FileDialog(title="Save Character As (new folder)")
+        dialog.set_initial_name(f"{doc.character.name} copy")
+        if doc.character.folder is not None:
+            dialog.set_initial_folder(Gio.File.new_for_path(str(doc.character.folder.parent)))
+        dialog.save(self, None, self._on_save_character_as_done)
+
+    def _on_save_character_as_done(self, dialog: Gtk.FileDialog, result) -> None:
+        try:
+            file = dialog.save_finish(result)
+        except GLib.Error:
+            return
+        path = self._gfile_path(file, "folder") if file is not None else None
+        if path is None or self.document is None:
+            return
+        if path.exists() and (not path.is_dir() or any(path.iterdir())):
+            self._alert("Character not saved", f"{path} already exists. Pick a new folder name.")
+            return
+        self._save_character(self.document, path)
+
+    def _characters_location(self) -> Optional[Path]:
+        """Where New Character puts folders: the selected plain folder, else characters/."""
+        browser = self.asset_browser
+        selected = browser.selected_path() if browser is not None else None
+        if selected is not None and selected.is_dir() and not ch.is_character_folder(selected):
+            return selected
+        root = browser.root() if browser is not None else None
+        if root is None:
+            return None
+        chars = root / "characters"
+        return chars if chars.is_dir() else root
+
+    def _character_templates(self) -> list[tuple[str, Optional[Path]]]:
+        out: list[tuple[str, Optional[Path]]] = []
+        browser = self.asset_browser
+        root = browser.root() if browser is not None else None
+        goblin = root / "player" if root is not None else None
+        if goblin is not None and ch.is_character_folder(goblin):
+            out.append(("Copy of the player goblin", goblin))
+        selected = browser.selected_character() if browser is not None else None
+        if selected is not None and selected != goblin:
+            out.append((f"Copy of {selected.name}", selected))
+        out.append(("Blank parts (goblin joints)", None))
+        return out
+
+    def action_new_character(self, *_a) -> None:
+        dlg = NewCharacterDialog(self, self._characters_location(), self._character_templates())
+        dlg.connect_response(self._on_new_character_response)
+        dlg.present()
+
+    def _on_new_character_response(self, dlg: NewCharacterDialog, response: int) -> None:
+        if response != Gtk.ResponseType.OK:
+            return
+        folder = dlg.folder()
+        if folder is None:
+            return
+        try:
+            ch.create_character(folder, template=dlg.template())
+        except (ch.CharacterError, OSError) as exc:
+            self._alert("Could not create the character", str(exc))
+            return
+        self.open_character_path(folder)
+
+    def action_open_character(self, *_a) -> None:
+        dialog = Gtk.FileDialog(title="Open Character Folder")
+        location = self._characters_location()
+        if location is not None and location.is_dir():
+            dialog.set_initial_folder(Gio.File.new_for_path(str(location)))
+        dialog.select_folder(self, None, self._on_open_character_done)
+
+    def _on_open_character_done(self, dialog: Gtk.FileDialog, result) -> None:
+        try:
+            folder = dialog.select_folder_finish(result)
+        except GLib.Error:
+            return
+        path = self._gfile_path(folder, "folder") if folder is not None else None
+        if path is not None:
+            self.open_character_path(path)
+
+    def open_character_path(self, folder: Path) -> bool:
+        """Open a character folder in a new tab (or switch to it if already open)."""
+        folder = Path(folder)
+        for i, tab in enumerate(self._tabs):
+            rig = tab.document.character
+            if rig is not None and rig.folder is not None and rig.folder.resolve() == folder.resolve():
+                self._activate_tab(i, fit=False)
+                return True
+        self._startup_pending = False
+        self._open_at_startup = False
+        try:
+            doc, notes = ch.open_character(folder)
+        except (ch.CharacterError, OSError) as exc:
+            self._alert("Could not open the character", f"{folder}\n{exc}")
+            return False
+        self.rig_view.show = True
+        self._add_tab(doc, History(max_steps=self.app_settings.history_steps), fit=True)
+        if self._rig_page_index is not None:
+            self._left_notebook.set_current_page(self._rig_page_index)
+        if notes:
+            self._alert(f"Opened {doc.character.name}", "\n".join(notes))
+        return True
+
     def action_open(self, *_a) -> None:
         dialog = Gtk.FileDialog(title="Open File")
         filt = Gtk.FileFilter()
@@ -4855,12 +5057,15 @@ class MainWindow(Gtk.ApplicationWindow):
     def action_save(self, *_a) -> None:
         if not self.document:
             return
-        if self.document.path and self.document.path.suffix.lower() in {".inkobold", ".scribbler"}:
+        if self._saves_in_place(self.document):
             self._save_document()
             return
         self.action_save_as()
 
     def action_save_as(self, *_a) -> None:
+        if self.document is not None and self.document.character is not None:
+            self._save_character_as()
+            return
         dialog = Gtk.FileDialog(title="Save File")
         dialog.set_initial_name("drawing.inkobold")
         dialog.save(self, None, self._on_save_done)
@@ -4951,7 +5156,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.document:
             self._do_quit()
             return
-        if self.document.path and self.document.path.suffix.lower() in {".inkobold", ".scribbler"}:
+        if self._saves_in_place(self.document):
             def done(ok: bool) -> None:
                 if ok:
                     self._continue_quit()  # quits, or asks about the next unsaved tab

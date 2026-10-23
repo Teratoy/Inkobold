@@ -50,6 +50,8 @@ class _DocSnap:
     fps: float = DEFAULT_FPS
     onion_skin: bool = True
     onion_opacity: float = DEFAULT_ONION_OPACITY
+    # CharacterRig.to_dict() of a character canvas (joints are undoable too)
+    character: Optional[dict] = None
 
 
 @dataclass
@@ -236,6 +238,7 @@ class History:
             fps=float(doc.fps),
             onion_skin=bool(doc.onion_skin),
             onion_opacity=float(doc.onion_opacity),
+            character=doc.character.to_dict() if doc.character is not None else None,
         )
 
     def _restore(self, doc: Document, snap: _DocSnap) -> None:
@@ -248,6 +251,9 @@ class History:
             doc.fps = float(getattr(snap, "fps", DEFAULT_FPS))
             doc.onion_skin = bool(getattr(snap, "onion_skin", True))
             doc.onion_opacity = float(getattr(snap, "onion_opacity", DEFAULT_ONION_OPACITY))
+            rig_data = getattr(snap, "character", None)
+            if doc.character is not None and rig_data is not None:
+                doc.character.apply_dict(rig_data)
 
             frame_snaps = getattr(snap, "frames", None) or []
             if not frame_snaps and snap.layers:

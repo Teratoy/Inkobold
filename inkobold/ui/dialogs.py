@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from inkobold.core.flavor import current as current_flavor
 from inkobold.core.image_meta import COLOR_DEPTH_CHOICES, DEFAULT_DPI
@@ -220,6 +221,138 @@ class NewFileDialog(Gtk.Window):
 
     def _on_create(self, *_a) -> None:
         self._emit(Gtk.ResponseType.OK)
+
+    def _on_close(self, *_a) -> bool:
+        self._emit(Gtk.ResponseType.CANCEL)
+        return True
+
+
+class NewCharacterDialog(Gtk.Window):
+    """GreenInkobold: name a new goblin-shaped character and pick what it starts from."""
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        location: Optional[Path],
+        templates: list[tuple[str, Optional[Path]]],
+    ) -> None:
+        super().__init__(title="New Character", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
+        self.set_default_size(420, 240)
+        self.set_resizable(False)
+        self._callback = None
+        self._location = location
+        self._templates = templates
+
+        root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=16,
+            margin_bottom=16,
+            margin_start=16,
+            margin_end=16,
+        )
+        self.set_child(root)
+        root.append(Gtk.Label(
+            label="A folder of the eight body parts (head, torso, arms, thighs, shins) on one canvas, "
+            "plus rig.json with the joints. The game rig animates it like the goblin.",
+            xalign=0,
+            wrap=True,
+        ))
+        grid = Gtk.Grid(column_spacing=8, row_spacing=8)
+        root.append(grid)
+        grid.attach(Gtk.Label(label="Name", xalign=0), 0, 0, 1, 1)
+        self.name_entry = Gtk.Entry(hexpand=True, placeholder_text="Guild Merchant")
+        self.name_entry.connect("changed", lambda *_: self._validate())
+        self.name_entry.connect("activate", lambda *_: self._on_create())
+        grid.attach(self.name_entry, 1, 0, 2, 1)
+        grid.attach(Gtk.Label(label="Start from", xalign=0), 0, 1, 1, 1)
+        self.template_drop = Gtk.DropDown.new_from_strings([label for label, _ in templates])
+        self.template_drop.set_hexpand(True)
+        grid.attach(self.template_drop, 1, 1, 2, 1)
+        grid.attach(Gtk.Label(label="In", xalign=0), 0, 2, 1, 1)
+        self.location_label = Gtk.Label(xalign=0, hexpand=True, ellipsize=3)  # Pango END
+        grid.attach(self.location_label, 1, 2, 1, 1)
+        change = Gtk.Button(label="Change…")
+        change.connect("clicked", self._on_change_location)
+        grid.attach(change, 2, 2, 1, 1)
+        self.problem = Gtk.Label(xalign=0, wrap=True)
+        self.problem.add_css_class("dim-label")
+        root.append(self.problem)
+
+        actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=8)
+        root.append(actions)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
+        self.create_btn = Gtk.Button(label="Create")
+        self.create_btn.add_css_class("suggested-action")
+        self.create_btn.connect("clicked", lambda *_: self._on_create())
+        actions.append(cancel)
+        actions.append(self.create_btn)
+        self.connect("close-request", self._on_close)
+        self._show_location()
+        self._validate()
+
+    def folder(self) -> Optional[Path]:
+        name = self.name_entry.get_text().strip()
+        if not name or self._location is None:
+            return None
+        return self._location / name
+
+    def template(self) -> Optional[Path]:
+        i = self.template_drop.get_selected()
+        return self._templates[i][1] if 0 <= i < len(self._templates) else None
+
+    def _show_location(self) -> None:
+        text = str(self._location) if self._location is not None else "Pick a folder"
+        self.location_label.set_text(text)
+        self.location_label.set_tooltip_text(text)
+
+    def _problem(self) -> str:
+        name = self.name_entry.get_text().strip()
+        if self._location is None:
+            return "Pick a folder to create the character in."
+        if not name:
+            return "Name the character (it becomes the folder name)."
+        if "/" in name or "\\" in name or name in (".", ".."):
+            return "The name cannot contain slashes."
+        if (self._location / name).exists():
+            return f"{self._location / name} already exists."
+        return ""
+
+    def _validate(self) -> None:
+        problem = self._problem()
+        self.problem.set_text(problem)
+        self.create_btn.set_sensitive(not problem)
+
+    def _on_change_location(self, *_a) -> None:
+        dialog = Gtk.FileDialog(title="Create Character In")
+        if self._location is not None and self._location.is_dir():
+            dialog.set_initial_folder(Gio.File.new_for_path(str(self._location)))
+        dialog.select_folder(self, None, self._on_location_done)
+
+    def _on_location_done(self, dialog: Gtk.FileDialog, result) -> None:
+        try:
+            folder = dialog.select_folder_finish(result)
+        except GLib.Error:
+            return
+        raw = folder.get_path() if folder is not None else None
+        if raw:
+            self._location = Path(raw)
+            self._show_location()
+            self._validate()
+
+    def connect_response(self, callback) -> None:
+        self._callback = callback
+
+    def _on_create(self) -> None:
+        if not self._problem():
+            self._emit(Gtk.ResponseType.OK)
+
+    def _emit(self, response: Gtk.ResponseType) -> None:
+        if self._callback:
+            self._callback(self, response)
+        self.destroy()
 
     def _on_close(self, *_a) -> bool:
         self._emit(Gtk.ResponseType.CANCEL)

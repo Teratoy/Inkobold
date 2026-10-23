@@ -184,6 +184,9 @@ class Document:
     onion_opacity: float = DEFAULT_ONION_OPACITY
     # Document-scoped UI / tool options restored on open (see File Format).
     workspace: dict = field(default_factory=dict)
+    # GreenInkobold character (core.character.CharacterRig) when this canvas is a rig
+    # folder's parts; saved as part PNGs + rig.json instead of .inkobold.
+    character: Optional[object] = None
 
     @classmethod
     def blank(
@@ -984,8 +987,8 @@ class Document:
             )
         return folder
 
-    def _layer_rgba_u8(self, ly: Layer) -> np.ndarray:
-        """Document-sized RGBA uint8 for one layer (offset applied, opacity baked)."""
+    def _layer_rgba_u8(self, ly: Layer, *, bake_opacity: bool = True) -> np.ndarray:
+        """Document-sized RGBA uint8 for one layer (offset applied, opacity baked unless off)."""
         out = np.zeros((self.height, self.width, 4), dtype=np.uint8)
         src = to_display_u8(ly.pixels)
         ox, oy = int(ly.offset_x), int(ly.offset_y)
@@ -998,7 +1001,7 @@ class Document:
         if sx1 <= sx0 or sy1 <= sy0:
             return out
         tile = src[sy0:sy1, sx0:sx1]
-        opacity = float(ly.opacity)
+        opacity = float(ly.opacity) if bake_opacity else 1.0
         if opacity <= 0.0:
             return out
         if opacity < 1.0:

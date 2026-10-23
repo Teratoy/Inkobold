@@ -35,6 +35,8 @@ class Flavor:
     asset_env: str = ""
     # Export Separated Layers prefixes each file with the layer number (``03_Name.png``)
     layer_export_index: bool = True
+    # Goblin-rig characters (core.character): Rig tab, Open / New Character
+    character_rig: bool = False
     # New File size buttons as (label, width, height); the first one is the default size
     new_file_presets: tuple[tuple[str, int, int], ...] = (
         ("HD", 1920, 1080),
@@ -68,6 +70,7 @@ GREEN_INKOBOLD = Flavor(
     asset_root=Path.home() / "Toyfactory" / "GoblinEngineering" / "visual assets",
     asset_env="GREENINKOBOLD_ASSETS",
     layer_export_index=False,
+    character_rig=True,
     # Sizes used most in the Goblin Engineering visual assets; Block first so it is the default
     new_file_presets=(
         ("Block 100×100", 100, 100),
