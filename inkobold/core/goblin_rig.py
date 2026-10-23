@@ -69,7 +69,7 @@ DEFAULT_PARAMS: dict = {
     "sleep_breath_hz": 0.22, "sleep_breath_px": 0.6, "sleep_blend_rate": 9.0,
     "aim_blend_speed": 14.0, "aim_linger": 0.5, "wave_raise_deg": 115.0, "wave_swing_deg": 20.0,
     "wave_hz": 2.4, "wave_sec": 1.6, "nod_px": 1.8, "nod_hz": 2.0, "nod_count": 2.0,
-    "shake_px": 1.2, "shake_tilt_deg": 6.0, "shake_hz": 2.6, "shake_count": 2.5,
+    "shake_turn_deg": 35.0, "shake_px": 1.2, "shake_hz": 2.6, "shake_count": 2.5,
     "gesture_blend_sec": 0.15, "bubble_fade_sec": 0.35,
     "bubble_stretch_max": 1.0675, "bubble_stretch_speed": 850.0, "bubble_squash_max": 0.665,
     "bubble_squash_min": 0.25, "bubble_squash_speed": 900.0, "bubble_jelly_hz": 3.5,
@@ -111,7 +111,7 @@ DEFAULT_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Aim", ("aim_blend_speed", "aim_linger",)),
     ("Gestures", (
         "wave_raise_deg", "wave_swing_deg", "wave_hz", "wave_sec", "nod_px", "nod_hz", "nod_count",
-        "shake_px", "shake_tilt_deg", "shake_hz", "shake_count", "gesture_blend_sec",
+        "shake_turn_deg", "shake_px", "shake_hz", "shake_count", "gesture_blend_sec",
     )),
     ("Bubble", (
         "bubble_fade_sec", "bubble_stretch_max", "bubble_stretch_speed", "bubble_squash_max",
@@ -1069,14 +1069,17 @@ class GoblinRig:
         tilt *= 1.0 - self._sleep_w
         look *= 1.0 - self._sleep_w
         head_x = look * p.head_look_shift
+        head_turn = 0.0
         if self._gesture == "yes" and gesture_w > 0.001:
             head_y += p.nod_px * (0.5 - 0.5 * math.cos(self._gesture_t * TAU * p.nod_hz)) * gesture_w
         elif self._gesture == "no" and gesture_w > 0.001:
+            # A turn about the head's vertical axis: narrow by cos(turn), face slides that way.
             side = math.sin(self._gesture_t * TAU * p.shake_hz)
+            head_turn = side * rad(p.shake_turn_deg) * gesture_w
             head_x += side * p.shake_px * gesture_w
-            tilt += side * rad(p.shake_tilt_deg) * gesture_w
         head.position = self._j["neck"] - self._j["pelvis"] + complex(head_x * px, head_y * px)
         head.rotation = tilt - self._lean * 0.5
+        head.scale = complex(math.cos(head_turn), 1.0)
 
     def _brace_arm_angle(self, arm: Bone, outward: float, rest: float) -> float:
         rise = (self.char.art_top_y - self._j["pelvis"].imag) - arm.position.imag
