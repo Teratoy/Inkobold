@@ -24,6 +24,10 @@ class EraserTool(BaseTool):
     uses_eraser_modes = True
     default_eraser_mode = "freehand"
 
+    def damage_tracked(self) -> bool:
+        # Line mode restores a full-layer snapshot on every drag.
+        return self._mode() == "freehand"
+
     # Shared across mirror clones so only one branch restores the snapshot
     # before every clone redraws its segment on the same layer.
     _active_master: EraserTool | None = None

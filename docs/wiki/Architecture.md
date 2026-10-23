@@ -8,7 +8,7 @@ tags: [inkobold, wiki]
 
 | Package | Role |
 |---------|------|
-| `inkobold/app.py`, `__main__.py` | GTK `Application`; `python -m inkobold` |
+| `inkobold/app.py`, `__main__.py` | GTK `Application` (`HANDLES_OPEN`); `python -m inkobold [files…]` |
 | `inkobold/ui/` | `MainWindow`, `Canvas` (GLArea), dialogs, theme, color picker, `popup_keys` |
 | `inkobold/tools/` | Drawing tools (`default_tools()`), shared ops in `paint.py` |
 | `inkobold/gpu/` | `GpuRenderer` (composite, pan/zoom, checker, tile); `flora.py` |
@@ -40,6 +40,7 @@ Effects: CPU (NumPy). Flora: GPU attempt then CPU.
 | `core/settings.py` | Persistence |
 | `core/paths.py` | XDG / APPDATA resolution |
 | `core/mirror.py` | Stroke Symmetry (Mirror / Radial) |
+| `core/damage.py` | Dirty-rect tracking: freehand tools report the rectangle they paint so only that part of the layer texture is re-uploaded (`INKOBOLD_VERIFY_DAMAGE=1` checks it) |
 | `gpu/renderer.py` | OpenGL composite |
 | `ui/canvas.py` | GLArea + input routing; sun / symmetry guide drag |
 

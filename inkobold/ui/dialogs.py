@@ -9,6 +9,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
+from inkobold.core.flavor import current as current_flavor
 from inkobold.core.image_meta import COLOR_DEPTH_CHOICES, DEFAULT_DPI
 from inkobold.core.shortcuts import (
     DEFAULT_SHORTCUTS,
@@ -25,12 +26,24 @@ FLOAT_SPIN_DIGITS = 2
 
 
 def configure_numeric_spin(spin: Gtk.SpinButton, *, digits: int = FLOAT_SPIN_DIGITS) -> Gtk.SpinButton:
-    """Show *digits* places and allow arrow steps of 10^-digits (Page± stays coarse)."""
+    """Show *digits* places and allow arrow steps of 10^-digits (Page± stays coarse).
+
+    Stylus taps on the ± steppers must not focus the editable field: that would
+    summon the onscreen keyboard and reshape the window under GNOME/Wayland.
+    Tab still focuses the field for keyboard entry; OSK stays inhibited.
+    """
     spin.set_digits(int(digits))
     if digits > 0:
         fine = 10.0 ** (-int(digits))
         page = max(1.0, float(spin.get_adjustment().get_page_increment() or 1.0))
         spin.set_increments(fine, page)
+    spin.set_focus_on_click(False)
+    delegate = spin.get_delegate()
+    if delegate is not None and hasattr(delegate, "set_input_hints"):
+        hints = delegate.get_input_hints()
+        delegate.set_input_hints(hints | Gtk.InputHints.INHIBIT_OSK)
+        if hasattr(delegate, "set_input_purpose"):
+            delegate.set_input_purpose(Gtk.InputPurpose.NUMBER)
     return spin
 
 
@@ -71,7 +84,7 @@ class StartupDialog(Gtk.Window):
     """Ask Open or New at launch. YES=new, NO=open, CANCEL=quit."""
 
     def __init__(self, parent: Gtk.Window) -> None:
-        super().__init__(title="Inkobold", transient_for=parent, modal=True)
+        super().__init__(title=current_flavor().display_name, transient_for=parent, modal=True)
         _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(360, 140)
         self.set_resizable(False)
@@ -122,8 +135,13 @@ class StartupDialog(Gtk.Window):
 class NewFileDialog(Gtk.Window):
     """New-document size prompt. Uses a plain Window so action buttons always show on GTK4."""
 
-    def __init__(self, parent: Gtk.Window, default_w: int = 1920, default_h: int = 1080) -> None:
+    def __init__(
+        self, parent: Gtk.Window, default_w: Optional[int] = None, default_h: Optional[int] = None
+    ) -> None:
         super().__init__(title="New File", transient_for=parent, modal=True)
+        size_presets = current_flavor().new_file_presets
+        if default_w is None or default_h is None:
+            _, default_w, default_h = size_presets[0]
         _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(380, 240)
         self.set_resizable(False)
@@ -144,22 +162,25 @@ class NewFileDialog(Gtk.Window):
         grid = Gtk.Grid(column_spacing=8, row_spacing=8)
         root.append(grid)
         self.width_spin = Gtk.SpinButton.new_with_range(1, 16384, 1)
+        configure_numeric_spin(self.width_spin, digits=0)
         self.width_spin.set_value(default_w)
         self.height_spin = Gtk.SpinButton.new_with_range(1, 16384, 1)
+        configure_numeric_spin(self.height_spin, digits=0)
         self.height_spin.set_value(default_h)
         grid.attach(Gtk.Label(label="Width", xalign=0), 0, 0, 1, 1)
         grid.attach(self.width_spin, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="Height", xalign=0), 0, 1, 1, 1)
         grid.attach(self.height_spin, 1, 1, 1, 1)
 
-        presets = Gtk.Box(spacing=6)
+        presets = Gtk.FlowBox(
+            selection_mode=Gtk.SelectionMode.NONE,
+            column_spacing=6,
+            row_spacing=6,
+            max_children_per_line=3,
+            homogeneous=True,
+        )
         root.append(presets)
-        for label, w, h in (
-            ("HD", 1920, 1080),
-            ("Square", 2048, 2048),
-            ("A4@150", 1240, 1754),
-            ("4K", 3840, 2160),
-        ):
+        for label, w, h in size_presets:
             btn = Gtk.Button(label=label)
             btn.connect("clicked", self._preset, w, h)
             presets.append(btn)
@@ -344,6 +365,7 @@ class HistoryStepsDialog(Gtk.Window):
         root.append(row)
         row.append(Gtk.Label(label="Steps", xalign=0, hexpand=True))
         self.steps_spin = Gtk.SpinButton.new_with_range(1, 2000, 1)
+        configure_numeric_spin(self.steps_spin, digits=0)
         self.steps_spin.set_value(steps)
         self.steps_spin.set_hexpand(True)
         row.append(self.steps_spin)
@@ -482,14 +504,15 @@ class VisibleToolsDialog(Gtk.Window):
 
 
 class GridOverlayDialog(Gtk.Window):
-    """Choose how many row/column cells the canvas grid overlay uses."""
+    """Choose how many interior row/column guides the canvas grid overlay uses."""
 
     def __init__(self, parent: Gtk.Window, rows: int = 8, columns: int = 8) -> None:
         super().__init__(title="Grid Overlay", transient_for=parent, modal=True)
         _attach_shortcut_focus_guard(parent, self)
-        self.set_default_size(340, 200)
+        self.set_default_size(340, 220)
         self.set_resizable(False)
         self._callback = None
+        self._reset_callback = None
 
         root = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -502,17 +525,21 @@ class GridOverlayDialog(Gtk.Window):
         self.set_child(root)
         root.append(Gtk.Label(
             label="Visual guide only — does not snap or change drawing. "
-            "1×1 is a centered crosshair; higher values add evenly spaced guides.",
+            "Guides divide the canvas into equal parts "
+            "(2 columns → thirds). 0 omits that axis; 1×1 is a centered crosshair. "
+            "Alt-drag a grid line on the canvas to shift the overlay.",
             xalign=0,
             wrap=True,
         ))
 
         grid = Gtk.Grid(column_spacing=8, row_spacing=8)
         root.append(grid)
-        self.rows_spin = Gtk.SpinButton.new_with_range(1, 64, 1)
+        self.rows_spin = Gtk.SpinButton.new_with_range(0, 64, 1)
+        configure_numeric_spin(self.rows_spin, digits=0)
         self.rows_spin.set_value(rows)
         self.rows_spin.set_hexpand(True)
-        self.columns_spin = Gtk.SpinButton.new_with_range(1, 64, 1)
+        self.columns_spin = Gtk.SpinButton.new_with_range(0, 64, 1)
+        configure_numeric_spin(self.columns_spin, digits=0)
         self.columns_spin.set_value(columns)
         self.columns_spin.set_hexpand(True)
         grid.attach(Gtk.Label(label="Rows", xalign=0), 0, 0, 1, 1)
@@ -522,6 +549,12 @@ class GridOverlayDialog(Gtk.Window):
 
         actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=8)
         root.append(actions)
+        reset = Gtk.Button(label="Reset Offset")
+        reset.set_tooltip_text("Restore the default equal-division grid layout.")
+        reset.set_hexpand(True)
+        reset.set_halign(Gtk.Align.START)
+        reset.connect("clicked", self._on_reset_offset)
+        actions.append(reset)
         cancel = Gtk.Button(label="Cancel")
         cancel.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
         apply = Gtk.Button(label="Apply")
@@ -539,6 +572,13 @@ class GridOverlayDialog(Gtk.Window):
 
     def connect_response(self, callback) -> None:
         self._callback = callback
+
+    def connect_reset_offset(self, callback) -> None:
+        self._reset_callback = callback
+
+    def _on_reset_offset(self, *_a) -> None:
+        if self._reset_callback is not None:
+            self._reset_callback()
 
     def _emit(self, response: Gtk.ResponseType) -> None:
         if self._callback:
@@ -621,7 +661,7 @@ class QuitConfirmDialog(Gtk.Window):
     """Ask whether to save before quitting. YES=save, NO=discard, CANCEL=stay."""
 
     def __init__(self, parent: Gtk.Window, filename: str = "untitled") -> None:
-        super().__init__(title="Exit Inkobold", transient_for=parent, modal=True)
+        super().__init__(title=f"Exit {current_flavor().display_name}", transient_for=parent, modal=True)
         _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(420, 140)
         self.set_resizable(False)
@@ -698,6 +738,7 @@ class DpiDialog(Gtk.Window):
         root.append(row)
         row.append(Gtk.Label(label="DPI", xalign=0, hexpand=True))
         self.dpi_spin = Gtk.SpinButton.new_with_range(1, 1200, 1)
+        configure_numeric_spin(self.dpi_spin, digits=0)
         self.dpi_spin.set_value(dpi)
         self.dpi_spin.set_hexpand(True)
         row.append(self.dpi_spin)
@@ -845,6 +886,15 @@ class CropDialog(Gtk.Window):
         self.bottom_spin = Gtk.SpinButton.new_with_range(0, self._doc_h - 1, 1)
         self.width_spin = Gtk.SpinButton.new_with_range(1, self._doc_w, 1)
         self.height_spin = Gtk.SpinButton.new_with_range(1, self._doc_h, 1)
+        for spin in (
+            self.left_spin,
+            self.top_spin,
+            self.right_spin,
+            self.bottom_spin,
+            self.width_spin,
+            self.height_spin,
+        ):
+            configure_numeric_spin(spin, digits=0)
         self.width_spin.set_value(self._doc_w)
         self.height_spin.set_value(self._doc_h)
 

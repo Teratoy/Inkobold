@@ -118,6 +118,13 @@ class Tool(Protocol):
 
 
 class BaseTool:
+
+    def damage_tracked(self) -> bool:
+        """True if every pixel write this tool makes during press/drag goes
+        through ``core.damage.note`` (lets the canvas upload only the changed
+        rectangle). Leave False unless that is verified — see tests."""
+        return False
+
     name = "Tool"
     id = "tool"
     default_color: tuple[int, int, int, int] = (0, 0, 0, 255)

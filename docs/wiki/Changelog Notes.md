@@ -9,6 +9,7 @@ Notes for recent waves (around 2026-09). Not a full changelog.
 
 | Feature | Where | Notes |
 |---------|-------|-------|
+| **Floating Transform / import placement** | `tools/move.py` | Scale/rotate keep the original until Enter; Import Image opens at 1:1 as a float; Lanczos downscale |
 | **Lay tool** | `tools/lay.py` | id `lay`; shortcut **`K`**; stamps pattern-library images along line / freehand / arc / circle |
 | **Workspace in `.inkobold`** | `document.py` meta **v4** | Per-document tool options, mirror/grid/wrap, zoom/pan — see [[File Format]] |
 | **3D Fill wrap emboss** | `paint.shade_region_*` | With Wrap Moves, edge-straddling fills unroll + toroidal blur/normals |

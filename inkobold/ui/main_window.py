@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -46,8 +47,15 @@ from inkobold.core.effects import (
     solarize,
     threshold,
 )
+from inkobold.core.assets import asset_root, export_folder
+from inkobold.core.flavor import current as current_flavor
 from inkobold.core.grid import GridOverlay
 from inkobold.core.history import History
+from inkobold.core.image_meta import (
+    COLOR_DEPTH_RGBA32,
+    constrain_pixels,
+    convert_pixels,
+)
 from inkobold.core.libraries import (
     CATEGORIES,
     category_dir,
@@ -59,7 +67,7 @@ from inkobold.core.libraries import (
     open_in_file_manager,
 )
 from inkobold.core.mirror import MODES, ORIENTATIONS, MirrorModifier
-from inkobold.core.settings import DEFAULT_THEME_RGB, load_settings, save_settings
+from inkobold.core.settings import default_theme_rgb, load_settings, save_settings
 from inkobold.core.shortcuts import (
     DEFAULT_SHORTCUTS,
     SHORTCUT_LABELS,
@@ -70,6 +78,7 @@ from inkobold.core.shortcuts import (
 from inkobold.core.sun import SunLight
 from inkobold.input import InputHub
 from inkobold.tools import default_tools
+from inkobold.ui.asset_browser import AssetBrowser
 from inkobold.ui.canvas import Canvas
 from inkobold.ui.color_picker import ColorSelectButton
 from inkobold.ui.dialogs import (
@@ -137,7 +146,7 @@ class _DocTab:
 
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app: Gtk.Application) -> None:
-        super().__init__(application=app, title="Inkobold")
+        super().__init__(application=app, title=current_flavor().display_name)
         self.set_default_size(1280, 860)
 
         self.document: Optional[Document] = None
@@ -160,6 +169,12 @@ class MainWindow(Gtk.ApplicationWindow):
         self._allow_close = False
         self._quit_dialog_open = False
         self._quit_after_save = False
+        # Documents the user chose "Don't Save" for during the current quit.
+        self._quit_discarded: set[int] = set()
+        # One background writer, so saves land on disk in the order they were
+        # requested (a later save can never be overwritten by an earlier one).
+        self._save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inkobold-save")
+        self._save_futures: list[Future] = []
         self._window_mode = "borderless"
         self._anim_playing = False
         self._anim_timer_id: Optional[int] = None
@@ -192,7 +207,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._watch_focus_for_shortcuts(self)
         attach_tab_among_editables(self)
         self._open_at_startup = False
-        GLib.idle_add(self._prompt_startup)
+        # Cancelled when a path is opened via CLI / desktop "Open with"
+        # (HANDLES_OPEN) before the idle runs.
+        self._startup_pending = True
+        GLib.idle_add(self._maybe_prompt_startup)
 
         GLib.timeout_add_seconds(2, self._refresh_status)
 
@@ -408,6 +426,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 "enabled": bool(self.grid.enabled),
                 "rows": int(self.grid.rows),
                 "columns": int(self.grid.columns),
+                "ox_norm": float(self.grid.ox_norm),
+                "oy_norm": float(self.grid.oy_norm),
             },
             "tile_wrap": bool(self.tile_wrap),
         }
@@ -491,6 +511,13 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.grid.columns = int(grid.get("columns", self.grid.columns))
             except (TypeError, ValueError):
                 pass
+            try:
+                if "ox_norm" in grid:
+                    self.grid.ox_norm = float(grid["ox_norm"])
+                if "oy_norm" in grid:
+                    self.grid.oy_norm = float(grid["oy_norm"])
+            except (TypeError, ValueError):
+                pass
             self.grid.clamp()
             action = self.lookup_action("show_grid")
             if action is not None:
@@ -532,12 +559,99 @@ class MainWindow(Gtk.ApplicationWindow):
             self.canvas.refresh_guides()
             self.canvas.queue_render()
 
-    def _save_document(self, path: Path | None = None) -> Path:
-        """Persist the active document including the current workspace snapshot."""
-        if not self.document:
-            raise RuntimeError("No document to save")
-        self.document.workspace = self._capture_workspace()
-        return self.document.save(path)
+    def _alert(self, message: str, detail: str = "") -> None:
+        err = Gtk.AlertDialog()
+        err.set_message(message)
+        if detail:
+            err.set_detail(detail)
+        err.show(self)
+
+    def _gfile_path(self, gfile, what: str = "file") -> Optional[Path]:
+        """Local path of a Gio.File from a file dialog, or None (with an alert)."""
+        raw = gfile.get_path() if gfile is not None else None
+        if not raw:
+            uri = gfile.get_uri() if gfile is not None else ""
+            self._alert(
+                f"Can't use that {what}",
+                f"{current_flavor().display_name} can only read and write local files.\n{uri}",
+            )
+            return None
+        return Path(raw)
+
+    def _start_in_asset_folder(self, dialog: Gtk.FileDialog) -> None:
+        """Point an export dialog at the visual-asset folder (flavors with an asset pipeline)."""
+        browser = self.asset_browser
+        folder = export_folder(
+            browser.root() if browser is not None else None,
+            self.document.path if self.document else None,
+            browser.selected_path() if browser is not None else None,
+        )
+        if folder is not None:
+            dialog.set_initial_folder(Gio.File.new_for_path(str(folder)))
+
+    def _on_asset_root_changed(self, root: Path) -> None:
+        self.app_settings.asset_root = str(root)
+        self._persist_settings()
+
+    def _save_document(self, path: Path | None = None, on_done=None) -> None:
+        """Save the active document (plus workspace) without blocking the UI.
+
+        Pixels are copied on the main thread, then compressed and written on a
+        worker thread. The write is atomic, so a failure never damages the
+        existing file. ``on_done(ok: bool)`` runs on the main thread afterwards.
+        """
+        doc = self.document
+        if doc is None:
+            if on_done is not None:
+                on_done(False)
+            return
+        doc.workspace = self._capture_workspace()
+        old_path, old_dirty = doc.path, doc.dirty
+        try:
+            job = doc.prepare_save(path)
+        except Exception as exc:
+            doc.path, doc.dirty = old_path, old_dirty
+            self._alert("Save failed", str(exc))
+            if on_done is not None:
+                on_done(False)
+            return
+        self._set_status()
+
+        def finish(error: Optional[BaseException]) -> bool:
+            self._save_futures = [f for f in self._save_futures if not f.done()]
+            if error is not None:
+                if doc.path == job.target:
+                    doc.path = old_path
+                doc.dirty = True
+                self._alert("Save failed", f"{job.target}\n{error}\n\nThe existing file was not changed.")
+            self._set_status()
+            if on_done is not None:
+                on_done(error is None)
+            return False
+
+        def work() -> None:
+            error: Optional[BaseException] = None
+            try:
+                job.write()
+            except Exception as exc:  # reported on the main thread
+                error = exc
+            GLib.idle_add(finish, error)
+
+        self._save_futures.append(self._save_executor.submit(work))
+
+    def _wait_for_saves(self) -> None:
+        for fut in list(self._save_futures):
+            try:
+                fut.result()
+            except Exception:
+                pass
+        self._save_futures.clear()
+
+    def _tab_index_of(self, doc: Optional[Document]) -> Optional[int]:
+        for i, tab in enumerate(self._tabs):
+            if tab.document is doc:
+                return i
+        return None
 
     def _active_tool(self):
         return self.tools[self.tool_id]
@@ -1553,7 +1667,13 @@ class MainWindow(Gtk.ApplicationWindow):
     def action_grid_settings(self, *_a) -> None:
         dlg = GridOverlayDialog(self, self.grid.rows, self.grid.columns)
         dlg.connect_response(self._on_grid_settings_response)
+        dlg.connect_reset_offset(self._on_grid_reset_offset)
         dlg.present()
+
+    def _on_grid_reset_offset(self) -> None:
+        self.grid.reset_offset()
+        if hasattr(self, "canvas"):
+            self.canvas.refresh_guides()
 
     def _on_grid_settings_response(self, dlg: GridOverlayDialog, response: int) -> None:
         if response != Gtk.ResponseType.OK:
@@ -1593,10 +1713,11 @@ class MainWindow(Gtk.ApplicationWindow):
 
     @staticmethod
     def _default_icon_path() -> Path:
-        env = os.environ.get("INKOBOLD_ICON")
+        flavor = current_flavor()
+        env = os.environ.get(f"{flavor.env_prefix}_ICON")
         if env:
             return Path(env)
-        return Path(__file__).resolve().parents[2] / "scripts" / "inkobold.png"
+        return Path(__file__).resolve().parents[2] / "scripts" / flavor.icon_file
 
     def _build_toolbar_app_icon(self) -> Gtk.Widget:
         size = 28
@@ -1605,7 +1726,7 @@ class MainWindow(Gtk.ApplicationWindow):
         pic.set_content_fit(Gtk.ContentFit.CONTAIN)
         pic.set_can_shrink(False)
         pic.add_css_class("app-icon")
-        pic.set_tooltip_text("Inkobold")
+        pic.set_tooltip_text(current_flavor().display_name)
         path = self._default_icon_path()
         if path.is_file():
             try:
@@ -1812,7 +1933,7 @@ class MainWindow(Gtk.ApplicationWindow):
         tabs_host.append(new_tab_btn)
 
         self.reload_btn = Gtk.Button(label="Reload")
-        self.reload_btn.set_tooltip_text("Reload Inkobold (debug)")
+        self.reload_btn.set_tooltip_text(f"Reload {current_flavor().display_name} (debug)")
         self.reload_btn.add_css_class("exit-btn")
         self.reload_btn.set_halign(Gtk.Align.END)
         self.reload_btn.set_visible(bool(self.app_settings.debug_mode))
@@ -1820,7 +1941,7 @@ class MainWindow(Gtk.ApplicationWindow):
         menubar.append(self.reload_btn)
 
         exit_btn = Gtk.Button(label="Exit")
-        exit_btn.set_tooltip_text("Exit Inkobold")
+        exit_btn.set_tooltip_text(f"Exit {current_flavor().display_name}")
         exit_btn.add_css_class("exit-btn")
         exit_btn.set_halign(Gtk.Align.END)
         exit_btn.connect("clicked", self.request_quit)
@@ -2313,8 +2434,8 @@ class MainWindow(Gtk.ApplicationWindow):
         toolbox_page.append(mirror_box)
         self.mirror_toggle = Gtk.CheckButton(label="Symmetry")
         self.mirror_toggle.set_tooltip_text(
-            "Live symmetry while drawing. Drag the hub to move the center; "
-            "drag a guide line to rotate. Mirror reflects; Radial rotates copies."
+            "Live symmetry while drawing. Alt-drag the hub to move the center; "
+            "Alt-drag a guide line to rotate. Mirror reflects; Radial rotates copies."
         )
         self.mirror_toggle.connect("toggled", self._on_mirror_toggled)
         mirror_box.append(self.mirror_toggle)
@@ -2358,6 +2479,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mirror_axes_label = Gtk.Label(label="Axes", xalign=0)
         self.mirror_opts.append(self.mirror_axes_label)
         self.mirror_axes_spin = Gtk.SpinButton.new_with_range(1, 16, 1)
+        configure_numeric_spin(self.mirror_axes_spin, digits=0)
         self.mirror_axes_spin.set_value(1)
         self.mirror_axes_spin.set_hexpand(True)
         self.mirror_axes_spin.set_tooltip_text(
@@ -2404,6 +2526,15 @@ class MainWindow(Gtk.ApplicationWindow):
         tools_scroll.set_child(toolbox_page)
         left_notebook.append_page(tools_scroll, Gtk.Label(label="Tools"))
         left_notebook.append_page(libraries_page, Gtk.Label(label="Libraries"))
+        self.asset_browser: Optional[AssetBrowser] = None
+        if current_flavor().asset_root is not None:
+            self.asset_browser = AssetBrowser(
+                asset_root(self.app_settings.asset_root),
+                on_open=self.open_path,
+                on_import=self.import_image_path,
+                on_root_changed=self._on_asset_root_changed,
+            )
+            left_notebook.append_page(self.asset_browser, Gtk.Label(label="Assets"))
         left_notebook.connect("switch-page", self._on_left_tab_switched)
         split.set_start_child(left_notebook)
 
@@ -3680,9 +3811,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 ".inkobold",
                 ".scribbler",
             }:
-                self._save_document()
-                self._set_status()
-                self._close_tab(index)
+                self._closing_tab_index = None
+                self._save_document(on_done=self._close_tab_after_save(self.document))
                 return
             dialog = Gtk.FileDialog(title="Save File")
             dialog.set_initial_name("drawing.inkobold")
@@ -3695,14 +3825,22 @@ class MainWindow(Gtk.ApplicationWindow):
         except GLib.Error:
             self._closing_tab_index = None
             return
-        if not file or not self.document:
-            self._closing_tab_index = None
-            return
-        self._save_document(Path(file.get_path()))
-        self._set_status()
         self._closing_tab_index = None
-        if index is not None:
-            self._close_tab(index)
+        if not file or not self.document or index is None:
+            return
+        path = self._gfile_path(file)
+        if path is None:
+            return
+        self._save_document(path, on_done=self._close_tab_after_save(self.document))
+
+    def _close_tab_after_save(self, doc: Optional[Document]):
+        def done(ok: bool) -> None:
+            if not ok:
+                return  # keep the tab open; the user already saw the error
+            idx = self._tab_index_of(doc)
+            if idx is not None:
+                self._close_tab(idx)
+        return done
 
     def _close_tab(self, index: int) -> None:
         if not (0 <= index < len(self._tabs)):
@@ -3739,6 +3877,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _first_unsaved_tab_index(self) -> Optional[int]:
         for i, tab in enumerate(self._tabs):
+            if id(tab.document) in self._quit_discarded:
+                continue
             if self._tab_is_unsaved(tab.document):
                 return i
         return None
@@ -4368,10 +4508,10 @@ class MainWindow(Gtk.ApplicationWindow):
     def _update_doc_title(self) -> None:
         self._refresh_tab_styles()
         if not self.document:
-            title = "Inkobold"
+            title = current_flavor().display_name
         else:
             _text, _tip, marked = self._tab_title_text(self.document)
-            title = f"Inkobold — {marked}"
+            title = f"{current_flavor().display_name} — {marked}"
         if title != self._shown_title:
             self._shown_title = title
             self.set_title(title)
@@ -4409,6 +4549,8 @@ class MainWindow(Gtk.ApplicationWindow):
         elif self.app_settings.use_custom_theme:
             r, g, b = self.app_settings.theme_rgb
             css_text = build_theme_css(r, g, b)
+        elif current_flavor().theme_rgb is not None:
+            css_text = build_theme_css(*current_flavor().theme_rgb)
         else:
             css_text = DEFAULT_CSS
         self._css_provider.load_from_data(css_text.encode("utf-8"))
@@ -4417,7 +4559,7 @@ class MainWindow(Gtk.ApplicationWindow):
         save_settings(self.app_settings)
 
     def action_theme_color(self, *_a) -> None:
-        seed = self.app_settings.theme_rgb if self.app_settings.use_custom_theme else DEFAULT_THEME_RGB
+        seed = self.app_settings.theme_rgb if self.app_settings.use_custom_theme else default_theme_rgb()
         dlg = ThemeColorDialog(self, seed, on_preview=self._apply_theme_css)
         dlg.connect_response(self._on_theme_color_response)
         dlg.present()
@@ -4433,7 +4575,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def action_theme_reset(self, *_a) -> None:
         self.app_settings.use_custom_theme = False
-        self.app_settings.theme_rgb = DEFAULT_THEME_RGB
+        self.app_settings.theme_rgb = default_theme_rgb()
         self._persist_settings()
         self._apply_theme_css()
 
@@ -4602,7 +4744,25 @@ class MainWindow(Gtk.ApplicationWindow):
         self._apply_shortcuts_map(updated)
 
     # --- startup ---
+    def _maybe_prompt_startup(self) -> bool:
+        if not self._startup_pending:
+            return False
+        if self._tabs:
+            self._startup_pending = False
+            return False
+        self._prompt_startup()
+        return False
+
+    def request_startup_prompt(self) -> None:
+        """Show Open/New if nothing was opened (used when CLI paths fail)."""
+        if self._tabs:
+            self._startup_pending = False
+            return
+        self._startup_pending = True
+        GLib.idle_add(self._maybe_prompt_startup)
+
     def _prompt_startup(self) -> bool:
+        self._startup_pending = False
         dlg = StartupDialog(self)
         dlg.connect_response(self._on_startup_response)
         dlg.present()
@@ -4638,6 +4798,24 @@ class MainWindow(Gtk.ApplicationWindow):
             w, h = dlg.size()
             self._new_document(w, h)
 
+    def open_path(self, path: Path) -> bool:
+        """Open *path* in a new tab. Returns False on failure."""
+        self._startup_pending = False
+        self._open_at_startup = False
+        try:
+            doc = Document.open(Path(path))
+        except Exception as exc:
+            err = Gtk.AlertDialog()
+            err.set_message("Could not open file")
+            err.set_detail(f"{path}\n{exc}")
+            err.show(self)
+            return False
+        hist = History(max_steps=self.app_settings.history_steps)
+        has_view = isinstance((doc.workspace or {}).get("view"), dict)
+        self._add_tab(doc, hist, fit=not has_view)
+        self._apply_workspace(doc.workspace, restore_view=has_view)
+        return True
+
     def action_open(self, *_a) -> None:
         dialog = Gtk.FileDialog(title="Open File")
         filt = Gtk.FileFilter()
@@ -4648,6 +4826,7 @@ class MainWindow(Gtk.ApplicationWindow):
         filt.add_pattern("*.jpg")
         filt.add_pattern("*.jpeg")
         filt.add_pattern("*.webp")
+        filt.add_pattern("*.bmp")
         filt.add_pattern("*.gif")
         dialog.set_default_filter(filt)
         dialog.open(self, None, self._on_open_done)
@@ -4665,21 +4844,19 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._open_at_startup = False
                 GLib.idle_add(self._prompt_startup)
             return
-        path = Path(file.get_path())
-        self._open_at_startup = False
-        self.action_stop_animation()
-        doc = Document.open(path)
-        hist = History(max_steps=self.app_settings.history_steps)
-        has_view = isinstance((doc.workspace or {}).get("view"), dict)
-        self._add_tab(doc, hist, fit=not has_view)
-        self._apply_workspace(doc.workspace, restore_view=has_view)
+        path = file.get_path()
+        if not path:
+            if self._open_at_startup:
+                self._open_at_startup = False
+                GLib.idle_add(self._prompt_startup)
+            return
+        self.open_path(Path(path))
 
     def action_save(self, *_a) -> None:
         if not self.document:
             return
         if self.document.path and self.document.path.suffix.lower() in {".inkobold", ".scribbler"}:
             self._save_document()
-            self._set_status()
             return
         self.action_save_as()
 
@@ -4697,12 +4874,21 @@ class MainWindow(Gtk.ApplicationWindow):
         if not file or not self.document:
             self._quit_after_save = False
             return
-        self._save_document(Path(file.get_path()))
-        self._set_status()
-        if self._quit_after_save:
+        path = self._gfile_path(file)
+        if path is None:
             self._quit_after_save = False
-            # Continue quit flow for any remaining unsaved tabs.
-            self.request_quit()
+            return
+        quitting = self._quit_after_save
+        self._quit_after_save = False
+
+        def done(ok: bool) -> None:
+            if quitting and ok:
+                # Continue quit flow for any remaining unsaved tabs.
+                self._continue_quit()
+            elif quitting:
+                self._quit_discarded.clear()
+
+        self._save_document(path, on_done=done)
 
     def apply_window_mode(self, mode: str) -> None:
         """Switch between fullscreen, borderless (maximized), and windowed."""
@@ -4724,6 +4910,13 @@ class MainWindow(Gtk.ApplicationWindow):
         GLib.idle_add(self.canvas.request_fit)
 
     def request_quit(self, *_a) -> None:
+        """Start a quit: ask about each unsaved tab in turn."""
+        if self._quit_dialog_open or self._allow_close:
+            return
+        self._quit_discarded.clear()
+        self._continue_quit()
+
+    def _continue_quit(self) -> None:
         if self._quit_dialog_open or self._allow_close:
             return
         if not self._tabs:
@@ -4743,9 +4936,13 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_quit_response(self, _dlg: QuitConfirmDialog, response: int) -> None:
         self._quit_dialog_open = False
         if response == Gtk.ResponseType.CANCEL:
+            self._quit_discarded.clear()
             return
         if response == Gtk.ResponseType.NO:
-            self._do_quit()
+            # Discard this document only, then ask about the next unsaved one.
+            if self.document is not None:
+                self._quit_discarded.add(id(self.document))
+            self._continue_quit()
             return
         if response == Gtk.ResponseType.YES:
             self._save_then_quit()
@@ -4755,14 +4952,13 @@ class MainWindow(Gtk.ApplicationWindow):
             self._do_quit()
             return
         if self.document.path and self.document.path.suffix.lower() in {".inkobold", ".scribbler"}:
-            self._save_document()
-            self._set_status()
-            # More unsaved tabs?
-            nxt = self._first_unsaved_tab_index()
-            if nxt is None:
-                self._do_quit()
-            else:
-                self.request_quit()
+            def done(ok: bool) -> None:
+                if ok:
+                    self._continue_quit()  # quits, or asks about the next unsaved tab
+                else:
+                    self._quit_discarded.clear()
+
+            self._save_document(on_done=done)
             return
         self._quit_after_save = True
         dialog = Gtk.FileDialog(title="Save File")
@@ -4770,6 +4966,8 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog.save(self, None, self._on_save_done)
 
     def _do_quit(self) -> None:
+        # Never exit with a save half-written (the atomic rename would be lost).
+        self._wait_for_saves()
         self._allow_close = True
         self.shutdown_input()
         app = self.get_application()
@@ -4782,7 +4980,7 @@ class MainWindow(Gtk.ApplicationWindow):
         """Restart the process so code changes take effect; debug_mode stays in settings."""
         self._persist_settings()
         self.shutdown_input()
-        argv = [sys.executable, "-m", "inkobold", *sys.argv[1:]]
+        argv = [sys.executable, "-m", current_flavor().module, *sys.argv[1:]]
         if sys.platform == "win32":
             # os.execv is unreliable with Windows paths/spaces; spawn then quit.
             import subprocess
@@ -4811,6 +5009,7 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog.set_default_filter(filters.get_item(0))
         stem = self.document.path.stem if self.document.path else "drawing"
         dialog.set_initial_name(f"{stem}.png")
+        self._start_in_asset_folder(dialog)
         dialog.save(self, None, self._on_export_done)
 
     def _on_export_done(self, dialog: Gtk.FileDialog, result) -> None:
@@ -4820,7 +5019,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if not file or not self.document:
             return
-        path = Path(file.get_path())
+        path = self._gfile_path(file)
+        if path is None:
+            return
         # If the chosen filter implies a type but the name has no/unknown suffix, fix it
         filt = dialog.get_default_filter()
         if filt is not None and path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
@@ -4854,6 +5055,7 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog.set_default_filter(filt)
         stem = self.document.path.stem if self.document.path else "animation"
         dialog.set_initial_name(f"{stem}.gif")
+        self._start_in_asset_folder(dialog)
         dialog.save(self, None, self._on_export_anim_gif_done)
 
     def _on_export_anim_gif_done(self, dialog: Gtk.FileDialog, result) -> None:
@@ -4863,7 +5065,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if not file or not self.document:
             return
-        path = Path(file.get_path())
+        path = self._gfile_path(file)
+        if path is None:
+            return
         if path.suffix.lower() != ".gif":
             path = path.with_suffix(".gif")
         try:
@@ -4880,6 +5084,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.document:
             return
         dialog = Gtk.FileDialog(title="Export Animation as PNG Folder")
+        self._start_in_asset_folder(dialog)
         dialog.select_folder(self, None, self._on_export_anim_png_done)
 
     def _on_export_anim_png_done(self, dialog: Gtk.FileDialog, result) -> None:
@@ -4889,7 +5094,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if not folder or not self.document:
             return
-        path = Path(folder.get_path())
+        path = self._gfile_path(folder, "folder")
+        if path is None:
+            return
         try:
             self.document.export_animation_png_sequence(path)
         except Exception as exc:
@@ -4913,6 +5120,7 @@ class MainWindow(Gtk.ApplicationWindow):
         dialog.set_default_filter(filt)
         stem = self.document._sanitize_layer_filename(self.document.active_layer.name)
         dialog.set_initial_name(f"{stem}.png")
+        self._start_in_asset_folder(dialog)
         dialog.save(self, None, self._on_export_layer_done)
 
     def _on_export_layer_done(self, dialog: Gtk.FileDialog, result) -> None:
@@ -4922,7 +5130,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if not file or not self.document:
             return
-        path = Path(file.get_path())
+        path = self._gfile_path(file)
+        if path is None:
+            return
         if path.suffix.lower() != ".png":
             path = path.with_suffix(".png")
         try:
@@ -4939,6 +5149,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not self.document:
             return
         dialog = Gtk.FileDialog(title="Export Separated Layers")
+        self._start_in_asset_folder(dialog)
         dialog.select_folder(self, None, self._on_export_layers_done)
 
     def _on_export_layers_done(self, dialog: Gtk.FileDialog, result) -> None:
@@ -4948,9 +5159,13 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if not folder or not self.document:
             return
-        path = Path(folder.get_path())
+        path = self._gfile_path(folder, "folder")
+        if path is None:
+            return
         try:
-            self.document.export_layers_png(path)
+            self.document.export_layers_png(
+                path, index_prefix=current_flavor().layer_export_index
+            )
         except Exception as exc:
             err = Gtk.AlertDialog()
             err.set_message("Layer export failed")
@@ -4975,19 +5190,39 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if not file or not self.document:
             return
-        path = Path(file.get_path())
-        img = Image.open(path).convert("RGBA")
-        arr = np.array(img, dtype=np.uint8)
-        # Fit into document canvas
-        h = min(arr.shape[0], self.document.height)
-        w = min(arr.shape[1], self.document.width)
-        layer_pixels = np.zeros((self.document.height, self.document.width, 4), dtype=np.uint8)
-        layer_pixels[:h, :w] = arr[:h, :w]
+        path = self._gfile_path(file)
+        if path is None:
+            return
+        self.import_image_path(path)
+
+    def import_image_path(self, path: Path) -> None:
+        """Float *path* onto a new layer of the active document (Transform until Enter)."""
+        if not self.document:
+            return
+        try:
+            with Image.open(path) as img:
+                arr = np.array(img.convert("RGBA"), dtype=np.uint8)
+        except Exception as exc:
+            self._alert("Could not import image", f"{path}\n{exc}")
+            return
+        doc = self.document
+        self._cancel_type_edit_if_any()
         self._push_history()
-        self.document.add_layer(name=path.stem, fill=layer_pixels)
+        doc.add_layer(name=path.stem)
+        # Float the full image at 1:1 with Transform so it can be scaled from
+        # its original pixels (even past the canvas edge) until Enter.
+        self.select_tool("move")
+        tool = self.tools["move"]
+        ctx = self.canvas._ctx()
+        if ctx is not None:
+            src = convert_pixels(arr, COLOR_DEPTH_RGBA32, doc.color_depth)
+            constrain_pixels(src, doc.color_depth)
+            tool.begin_placement(ctx, src)
         self.canvas.renderer.invalidate()
         self._rebuild_layers()
         self.canvas.queue_render()
+        self.canvas.refresh_guides()
+        self.canvas._catcher.grab_focus()
         self._set_status()
 
     def action_clear_selection(self, *_a) -> None:
@@ -5060,8 +5295,16 @@ class MainWindow(Gtk.ApplicationWindow):
     def action_merge_layer_down(self, *_a) -> None:
         if not self.document or self.document.active_layer_index <= 0:
             return
+        idx = self.document.active_layer_index
+        if not (self.document.layers[idx].visible and self.document.layers[idx - 1].visible):
+            self._alert(
+                "Can't merge a hidden layer",
+                "Show both layers before merging down, or the hidden one's pixels would be lost.",
+            )
+            return
         self._push_history()
         if not self.document.merge_down():
+            self.history.discard_last_push()
             return
         self.canvas.renderer.invalidate()
         self._rebuild_layers()
@@ -5076,6 +5319,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self._push_history()
         if not self.document.merge_visible():
+            self.history.discard_last_push()
             return
         self.canvas.renderer.invalidate()
         self._rebuild_layers()
@@ -5085,8 +5329,38 @@ class MainWindow(Gtk.ApplicationWindow):
     def action_merge_all_layers(self, *_a) -> None:
         if not self.document or len(self.document.layers) <= 1:
             return
+        hidden = self.document.hidden_layer_count()
+        if hidden:
+            doc = self.document
+            dlg = Gtk.AlertDialog()
+            dlg.set_message("Discard hidden layers?")
+            noun = "layer is" if hidden == 1 else "layers are"
+            dlg.set_detail(
+                f"{hidden} hidden {noun} not part of the flattened image and will be "
+                "deleted. You can undo this afterwards."
+            )
+            dlg.set_buttons(["Cancel", "Merge All"])
+            dlg.set_cancel_button(0)
+            dlg.set_default_button(0)
+
+            def on_choice(d: Gtk.AlertDialog, result) -> None:
+                try:
+                    choice = d.choose_finish(result)
+                except GLib.Error:
+                    return
+                if choice == 1 and self.document is doc:
+                    self._merge_all_now()
+
+            dlg.choose(self, None, on_choice)
+            return
+        self._merge_all_now()
+
+    def _merge_all_now(self) -> None:
+        if not self.document:
+            return
         self._push_history()
         if not self.document.merge_all():
+            self.history.discard_last_push()
             return
         self.canvas.renderer.invalidate()
         self._rebuild_layers()

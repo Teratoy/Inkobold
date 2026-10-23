@@ -12,14 +12,21 @@ from inkobold.core.image_meta import (
     COLOR_DEPTH_RGBA32,
     DEFAULT_DPI,
 )
+from inkobold.core.flavor import current
 from inkobold.core.paths import config_dir
 
 # DaemonDomain default: white accent on black glass chrome
 DEFAULT_THEME_RGB: tuple[int, int, int] = (255, 255, 255)
 
+
+def default_theme_rgb() -> tuple[int, int, int]:
+    """Accent the active flavor starts from (white for plain Inkobold)."""
+    return current().theme_rgb or DEFAULT_THEME_RGB
+
+
 @dataclass
 class AppSettings:
-    theme_rgb: tuple[int, int, int] = DEFAULT_THEME_RGB
+    theme_rgb: tuple[int, int, int] = field(default_factory=default_theme_rgb)
     use_custom_theme: bool = False
     checker_light: bool = False
     history_steps: int = DEFAULT_HISTORY_STEPS
@@ -41,6 +48,8 @@ class AppSettings:
     sun_x_norm: float = 0.18
     sun_y_norm: float = 0.18
     sun_elevation: float = 0.70
+    # Visual-asset folder override (GreenInkobold); empty means the flavor default
+    asset_root: str = ""
 
     def clamp(self) -> None:
         r, g, b = self.theme_rgb
@@ -90,6 +99,7 @@ class AppSettings:
         self.sun_x_norm = max(0.0, min(1.0, float(self.sun_x_norm)))
         self.sun_y_norm = max(0.0, min(1.0, float(self.sun_y_norm)))
         self.sun_elevation = max(0.15, min(1.5, float(self.sun_elevation)))
+        self.asset_root = self.asset_root if isinstance(self.asset_root, str) else ""
 
 
 def config_path() -> Path:
@@ -160,6 +170,9 @@ def load_settings() -> AppSettings:
         settings.sun_elevation = float(data.get("sun_elevation", 0.70))
     except (TypeError, ValueError):
         settings.sun_elevation = 0.70
+    raw_assets = data.get("asset_root")
+    if isinstance(raw_assets, str):
+        settings.asset_root = raw_assets
     settings.clamp()
     return settings
 
@@ -188,6 +201,7 @@ def save_settings(settings: AppSettings) -> None:
             "sun_x_norm": float(settings.sun_x_norm),
             "sun_y_norm": float(settings.sun_y_norm),
             "sun_elevation": float(settings.sun_elevation),
+            "asset_root": settings.asset_root,
         }
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     except OSError:

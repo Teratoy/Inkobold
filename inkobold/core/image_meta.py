@@ -73,7 +73,14 @@ def scale_threshold(tol_u8: int, depth: int) -> int:
 
 
 def constrain_pixels(pixels: np.ndarray, depth: int) -> None:
-    """Force gray / opaque alpha in-place for the active color depth."""
+    """Force gray channels in-place for grayscale documents.
+
+    Layer alpha is left alone in every mode. RGB / grayscale documents have no
+    transparency in the *flattened image* (the bottom layer starts opaque white
+    and exports composite onto white), but individual layers still need alpha
+    or every layer would hide the ones below it — and forcing alpha on a fresh
+    layer turned its transparent pixels solid black.
+    """
     depth = valid_color_depth(depth)
     max_v = channel_max(depth)
     if is_gray(depth):
@@ -94,9 +101,6 @@ def constrain_pixels(pixels: np.ndarray, depth: int) -> None:
         pixels[..., 0] = y
         pixels[..., 1] = y
         pixels[..., 2] = y
-        pixels[..., 3] = max_v
-    elif not has_alpha(depth):
-        pixels[..., 3] = max_v
 
 
 def convert_pixels(pixels: np.ndarray, old_depth: int, new_depth: int) -> np.ndarray:
@@ -113,13 +117,8 @@ def convert_pixels(pixels: np.ndarray, old_depth: int, new_depth: int) -> np.nda
         out[..., 0] = y
         out[..., 1] = y
         out[..., 2] = y
-        out[..., 3] = 1.0
+        out[..., 3] = f[..., 3]
         f = out
-    elif not has_alpha(new_depth):
-        # Composite on white, then lock opaque
-        a = f[..., 3:4]
-        rgb = f[..., :3] * a + (1.0 - a)
-        f = np.concatenate([rgb, np.ones_like(a)], axis=-1)
     return np.clip(np.rint(f * new_max), 0, new_max).astype(new_dt)
 
 

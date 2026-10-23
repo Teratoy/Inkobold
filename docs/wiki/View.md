@@ -11,8 +11,9 @@ Canvas defaults: pan `(40, 40)`, zoom `1.0`. Zoom clamp **0.05–32**. App start
 | Pan | Middle-mouse drag | |
 | Zoom | Scroll wheel | |
 | Fit Canvas | `Ctrl+0`, `Ctrl+F` | |
-| Show Grid | View menu | Visual only; default 8×8 bands (1–64); no snap |
-| Grid… | Settings | rows / columns |
+| Show Grid | View menu | Visual only; default 8×8 interior guides (0–64), equal parts; no snap |
+| Grid… | Settings | rows / columns; **Reset Offset** restores default centering |
+| Move Grid | Alt-drag a grid line | Vertical line → shift X; horizontal → Y; crossing → both |
 | Show Sun | View + drag glyph | Shows/drags the sun glyph; also turns Use Sun Light on |
 | Use Sun Light | View | When off, classic fixed key light (pre-sun) |
 | Deactivate Sun | View / Sun… | Turns Use Sun Light off and hides the glyph |
@@ -32,7 +33,7 @@ Live stroke symmetry around a movable hub (defaults to canvas center). Toggle **
 | **Mirror** | Reflect across equally spaced axes (dihedral / kaleidoscope). Odd branches flip handedness. | **Axes** 1–16 |
 | **Radial** | Rotate same-facing copies (cyclic / pinwheel). No flips. | **Copies** 1–16 |
 
-**Orientation** (horizontal / vertical / diagonal) snaps the first-axis / first-ray angle. Drag the hub to move the center; drag a guide line to rotate freely. **Reset Guides** restores hub to center and Horizontal. Hub position and angle persist in the document workspace.
+**Orientation** (horizontal / vertical / diagonal) snaps the first-axis / first-ray angle. **Alt-drag** the hub to move the center; **Alt-drag** a guide line to rotate freely. **Reset Guides** restores hub to center and Horizontal. Hub position and angle persist in the document workspace.
 
 ## Sun
 

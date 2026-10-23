@@ -6,6 +6,7 @@ import math
 
 import numpy as np
 
+from inkobold.core.damage import note as _damage_note
 from inkobold.core.bubbles import (
     bubble_influence_bbox,
     place_bubble_cluster,
@@ -1316,6 +1317,7 @@ def _liquify_brush_stamp_at(
     out = region.astype(np.float64, copy=True)
     out[active] = sampled[active]
     lo, hi = 0, np.iinfo(pixels.dtype).max if np.issubdtype(pixels.dtype, np.integer) else 1
+    _damage_note(pixels, x0, y0, x1, y1)
     pixels[y0:y1, x0:x1] = np.clip(out, lo, hi).astype(pixels.dtype, copy=False)
 
 

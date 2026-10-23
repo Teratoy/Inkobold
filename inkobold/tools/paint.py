@@ -9,6 +9,7 @@ import random
 import numpy as np
 from PIL import Image, ImageFilter
 
+from inkobold.core.damage import note as _damage_note
 from inkobold.core.bubbles import (
     bubble_influence_bbox,
     place_bubble_cluster as _place_bubble_cluster,
@@ -132,6 +133,7 @@ def stamp_disk(
     if not cov.any():
         return
     max_v = _max_v(pixels)
+    _damage_note(pixels, x0, y0, x1, y1)
     region = pixels[y0:y1, x0:x1]
     needs_rgb = not erase or (key_color is not None and threshold is not None)
     # Erasing only touches alpha; skip converting RGB unless a colour key needs it.
@@ -798,6 +800,7 @@ def stamp_brush_tip(
     if not cov.any():
         return
     max_v = _max_v(pixels)
+    _damage_note(pixels, cx0, cy0, cx1, cy1)
     region = pixels[cy0:cy1, cx0:cx1]
     patch = region.astype(np.float32)
     src = np.array(color, dtype=np.float32)
@@ -1210,6 +1213,7 @@ def _weld_window(
     r = int(weld_r)
     if r <= 0:
         return False
+    _damage_note(pixels, wx0, wy0, wx1, wy1)
     region = pixels[wy0:wy1, wx0:wx1]
     wh, ww = region.shape[:2]
     lx0, ly0, lx1, ly1 = sx0 - wx0, sy0 - wy0, sx1 - wx0, sy1 - wy0
@@ -2806,6 +2810,7 @@ def stamp_disk_3d(
     a = (alpha / max_v)[..., None]
     patch[..., :3] = rgb * a + patch[..., :3] * (1.0 - a)
     patch[..., 3:4] = np.maximum(patch[..., 3:4], alpha[..., None])
+    _damage_note(pixels, x0, y0, x1, y1)
     pixels[y0:y1, x0:x1] = np.clip(patch, 0, _max_v(pixels)).astype(pixels.dtype)
 
 
@@ -3600,6 +3605,7 @@ def smear_stamp(
     src = tip[tip_y0:tip_y1, tip_x0:tip_x1]
     # Paint tip onto canvas
     out = dest * (1.0 - blend) + src * blend
+    _damage_note(pixels, x0, y0, x1, y1)
     pixels[y0:y1, x0:x1] = np.clip(out, 0, _max_v(pixels)).astype(pixels.dtype)
     if not pickup:
         return

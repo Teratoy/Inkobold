@@ -23,6 +23,9 @@ class WeldBrushTool(BaseTool):
     uses_intensity = True
     uses_brush_options = False
 
+    def damage_tracked(self) -> bool:
+        return True
+
     def __init__(self) -> None:
         super().__init__()
         self._drawing = False

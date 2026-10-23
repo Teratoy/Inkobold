@@ -159,6 +159,13 @@ class GpuRenderer:
         return loc
 
     def init_gl(self) -> None:
+        # A (re)created GL context has none of our old textures: forget them so
+        # every layer is fully re-uploaded instead of patched into a dead name.
+        self.textures.clear()
+        self.tex_stamps.clear()
+        self.tex_sizes.clear()
+        self._sel_size = None
+        self._sel_stamp = None
         version = _gl_string(GL.GL_VERSION)
         self.es = "ES" in version.upper()
         pre = _prelude(self.es)
@@ -242,11 +249,38 @@ class GpuRenderer:
             self.textures[key] = tid
         return tid
 
-    def upload_layer(self, layer_id: str, pixels: np.ndarray, stamp: int) -> None:
-        if self.tex_stamps.get(layer_id) == stamp:
+    def upload_layer(self, layer_id: str, pixels: np.ndarray, stamp: int, layer=None) -> None:
+        """Bring the layer's texture up to date.
+
+        When ``layer`` reports a damage rectangle (see core.damage) and the
+        texture already holds the previous state, only that rectangle is
+        converted and sent; otherwise the whole layer is.
+        """
+        prev_stamp = self.tex_stamps.get(layer_id)
+        if prev_stamp == stamp:
+            return
+        dmg = layer.take_damage() if layer is not None else None
+        h, w = pixels.shape[:2]
+        if (
+            isinstance(dmg, tuple)
+            and prev_stamp is not None
+            and layer_id in self.textures
+            and self.tex_sizes.get(layer_id) == (w, h)
+        ):
+            x0, y0, x1, y1 = dmg
+            x0, y0 = max(0, x0), max(0, y0)
+            x1, y1 = min(w, x1), min(h, y1)
+            if x1 > x0 and y1 > y0:
+                sub = np.ascontiguousarray(to_display_u8(pixels[y0:y1, x0:x1]))
+                GL.glBindTexture(GL.GL_TEXTURE_2D, self.textures[layer_id])
+                GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
+                GL.glTexSubImage2D(
+                    GL.GL_TEXTURE_2D, 0, x0, y0, x1 - x0, y1 - y0,
+                    GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, sub,
+                )
+            self.tex_stamps[layer_id] = stamp
             return
         tid = self._tex_for(layer_id)
-        h, w = pixels.shape[:2]
         contiguous = np.ascontiguousarray(to_display_u8(pixels))
         GL.glBindTexture(GL.GL_TEXTURE_2D, tid)
         GL.glPixelStorei(GL.GL_UNPACK_ALIGNMENT, 1)
@@ -408,7 +442,7 @@ class GpuRenderer:
                 for ly in layers:
                     if not ly.visible:
                         continue
-                    self.upload_layer(ly.id, ly.pixels, ly.dirty_stamp())
+                    self.upload_layer(ly.id, ly.pixels, ly.dirty_stamp(), ly)
                     ox = float(ly.offset_x) + tox
                     oy = float(ly.offset_y) + toy
                     if first:

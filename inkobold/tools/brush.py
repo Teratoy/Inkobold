@@ -6,6 +6,7 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 
+from inkobold.core.damage import note as _damage_note
 from inkobold.tools.base import BaseTool, ToolContext
 from inkobold.core.sun import DEFAULT_MILK_LIGHT_DIR
 from inkobold.tools.paint import (
@@ -62,6 +63,7 @@ def render_bubbles_incremental(
     x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
     if x0 >= x1 or y0 >= y1:
         return
+    _damage_note(pixels, x0, y0, x1, y1)
     pixels[y0:y1, x0:x1] = base[y0:y1, x0:x1]
     render_bubbles_list(
         pixels,
@@ -90,6 +92,9 @@ class BrushTool(BaseTool):
     default_density = 10.0
     uses_opacity = True
     uses_brush_options = True
+
+    def damage_tracked(self) -> bool:
+        return True
 
     def __init__(self) -> None:
         super().__init__()

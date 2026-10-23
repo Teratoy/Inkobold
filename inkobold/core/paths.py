@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from inkobold.core.flavor import current
+
 
 def is_windows() -> bool:
     return sys.platform == "win32"
@@ -16,23 +18,24 @@ def is_linux() -> bool:
 
 
 def config_dir() -> Path:
-    """Directory for settings.json (created by callers as needed)."""
-    override = os.environ.get("INKOBOLD_CONFIG_HOME")
+    """Directory for settings.json (created by callers as needed); one per flavor."""
+    flavor = current()
+    override = os.environ.get(f"{flavor.env_prefix}_CONFIG_HOME")
     if override:
         return Path(override)
     if is_windows():
         base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
         if base:
-            return Path(base) / "Inkobold"
-        return Path.home() / "AppData" / "Roaming" / "Inkobold"
+            return Path(base) / flavor.win_config_name
+        return Path.home() / "AppData" / "Roaming" / flavor.win_config_name
     xdg = os.environ.get("XDG_CONFIG_HOME")
     if xdg:
-        return Path(xdg) / "inkobold"
-    return Path.home() / ".config" / "inkobold"
+        return Path(xdg) / flavor.config_name
+    return Path.home() / ".config" / flavor.config_name
 
 
 def data_dir() -> Path:
-    """Directory for libraries and other user data."""
+    """Directory for libraries and other user data (shared by all flavors)."""
     override = os.environ.get("INKOBOLD_DATA_HOME")
     if override:
         return Path(override)

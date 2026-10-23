@@ -39,6 +39,10 @@ python3 -m venv --system-site-packages .venv
 
 Requires system **PyGObject** + **GTK4** (distro packages; use a venv with `--system-site-packages`).
 
+## GreenInkobold
+
+A flavor for the Goblin Engineering asset pipeline: export dialogs open in `visual assets/`, and an **Assets** tab shows the whole folder as a live file tree. Run it with `./scripts/run-green.sh` or `python -m inkobold.green`.
+
 ## Run / package (Windows)
 
 See **[docs/WINDOWS.md](docs/WINDOWS.md)** (MSYS2 MINGW64 recommended) and `scripts/run.ps1`.
@@ -63,10 +67,11 @@ Shortcuts are rebindable under **Settings → Shortcuts**. Defaults are listed i
 ```
 document.json
 frames/FFF/layers/LLL.png   # or .npy for 16 bpc
-layers/LLL.png              # legacy mirror of the current frame
 ```
 
-Also opens PNG / JPEG / WebP / BMP / GIF (multi-frame GIF → animation). Details: [File Format](https://github.com/Teratoy/Inkobold/wiki/File-Format).
+Saves are atomic (temp file + rename), so a failed save never damages the existing file.
+
+Also opens PNG / JPEG / WebP / BMP / GIF (multi-frame GIF → animation). Pass paths on the command line (`inkobold file.inkobold`) or via the desktop entry (`%F`). Details: [File Format](https://github.com/Teratoy/Inkobold/wiki/File-Format).
 
 ## Author
 

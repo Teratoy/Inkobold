@@ -13,6 +13,9 @@ class PenTool(BaseTool):
     default_color = (0, 0, 0, 255)
     uses_opacity = True
 
+    def damage_tracked(self) -> bool:
+        return True
+
     def __init__(self) -> None:
         super().__init__()
         self._drawing = False

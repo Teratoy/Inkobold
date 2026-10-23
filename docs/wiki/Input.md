@@ -16,4 +16,6 @@ tags: [inkobold, wiki]
 
 Linux tip: readable `/dev/input` (often `input` group) for enrichment. Drawing still works via GDK without it.
 
+> **Security note:** membership in the `input` group lets *every* program you run read all input devices directly, including keyboards (so a malicious program could log keystrokes, even outside its own window). GTK already delivers tablet pressure and tilt, so only add yourself to `input` if you need the extra libinput data.
+
 Related: [[Windows]] · [[Install and Run]] · [[Architecture]]

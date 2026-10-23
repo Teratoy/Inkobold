@@ -11,8 +11,11 @@ tags: [inkobold, wiki]
 ```
 document.json
 frames/FFF/layers/LLL.png   # or .npy if 16 bpc
-layers/LLL.png              # legacy mirror of current frame
 ```
+
+The top-level `layers` list mirrors the current frame for older readers; since the save-safety update its entries point at the `frames/…` files instead of storing the pixels a second time (older files with a separate `layers/` folder still open).
+
+Saves are atomic: Inkobold writes a temporary file beside the target and renames it into place, so a failed save never damages the existing file.
 
 Save aliases also accept `.scribbler` and `.zip`.
 
@@ -61,7 +64,7 @@ Save aliases also accept `.scribbler` and `.zip`.
       "cx_norm": 0.5,
       "cy_norm": 0.5
     },
-    "grid": { "enabled": false, "rows": 8, "columns": 8 },
+    "grid": { "enabled": false, "rows": 8, "columns": 8, "ox_norm": 0.0, "oy_norm": 0.0 },
     "tile_wrap": false,
     "view": { "zoom": 1.0, "pan_x": 40.0, "pan_y": 40.0 }
   }
@@ -75,5 +78,7 @@ Save aliases also accept `.scribbler` and `.zip`.
 ## Also opens
 
 `.png` `.jpg` `.jpeg` `.webp` `.bmp` `.gif` (multi-frame GIF → [[Animation]]).
+
+Paths can be passed on the command line (`inkobold file.inkobold`) or via the desktop entry (`%F` / Open with). See [[Install and Run]].
 
 Related: [[Layers]] · [[Architecture]] · [[Tools]]

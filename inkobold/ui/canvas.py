@@ -13,7 +13,8 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from inkobold.core.document import Document
 from inkobold.core.grid import GridOverlay
-from inkobold.core.image_meta import constrain_pixels, has_alpha, is_gray
+from inkobold.core import damage
+from inkobold.core.image_meta import constrain_pixels, is_gray
 from inkobold.core.mirror import MirrorModifier, segment_distance_sq
 from inkobold.core.sun import SunLight
 from inkobold.gpu.renderer import GpuRenderer
@@ -71,6 +72,11 @@ class Canvas(Gtk.Overlay):
         self._dragging_mirror: str | None = None  # "center" | "rotate"
         self._mirror_angle0 = 0.0
         self._mirror_pointer_angle0 = 0.0
+        self._dragging_grid: str | None = None  # "x" | "y" | "both"
+        self._grid_ox0 = 0.0
+        self._grid_oy0 = 0.0
+        self._grid_doc_x0 = 0.0
+        self._grid_doc_y0 = 0.0
         self._btn1 = False
         self._pointer_x = 0.0
         self._pointer_y = 0.0
@@ -431,6 +437,54 @@ class Canvas(Gtk.Overlay):
     def _end_mirror_drag(self) -> None:
         self._dragging_mirror = None
 
+    def _hit_grid_guides(self, screen_x: float, screen_y: float) -> str | None:
+        """Return ``x``, ``y``, ``both``, or None for a grid-guide hit."""
+        grid = self._get_grid()
+        if not grid.enabled:
+            return None
+        doc = self._get_document()
+        if doc is None:
+            return None
+        dx, dy = self.renderer.screen_to_doc(screen_x, screen_y)
+        # ~6 screen px in document space so grab feel stays stable while zoomed.
+        zoom = max(1e-3, float(self.renderer.zoom))
+        tol = 6.0 / zoom
+        return grid.hit_axis(dx, dy, float(doc.width), float(doc.height), tol=tol)
+
+    def _begin_grid_drag(self, kind: str, screen_x: float, screen_y: float) -> None:
+        doc = self._get_document()
+        if doc is None:
+            return
+        grid = self._get_grid()
+        self._dragging_grid = kind
+        self._grid_ox0 = float(grid.ox_norm)
+        self._grid_oy0 = float(grid.oy_norm)
+        self._grid_doc_x0, self._grid_doc_y0 = self.renderer.screen_to_doc(screen_x, screen_y)
+        self.refresh_guides()
+
+    def _update_grid_drag(self, screen_x: float, screen_y: float) -> None:
+        doc = self._get_document()
+        if doc is None or self._dragging_grid is None:
+            return
+        grid = self._get_grid()
+        dx, dy = self.renderer.screen_to_doc(screen_x, screen_y)
+        w = max(1.0, float(doc.width))
+        h = max(1.0, float(doc.height))
+        kind = self._dragging_grid
+        if kind in ("x", "both"):
+            grid.ox_norm = self._grid_ox0 + (dx - self._grid_doc_x0) / w
+        else:
+            grid.ox_norm = self._grid_ox0
+        if kind in ("y", "both"):
+            grid.oy_norm = self._grid_oy0 + (dy - self._grid_doc_y0) / h
+        else:
+            grid.oy_norm = self._grid_oy0
+        grid.clamp()
+        self.refresh_guides()
+
+    def _end_grid_drag(self) -> None:
+        self._dragging_grid = None
+
     def _tool_xy(self, x: float, y: float) -> tuple[Optional[ToolContext], object, float, float]:
         ctx = self._ctx()
         tool = self._get_tool()
@@ -538,8 +592,17 @@ class Canvas(Gtk.Overlay):
         points = [(mx, my) for mx, my, _rev in branches]
         tools = self._begin_stroke_tools(tool, points)
         self._prepare_bubble_stroke_tools(ctx, tools)
-        for t, (mx, my, rev) in zip(tools, branches):
-            t.on_press(ctx, mx, my, shift=shift, alt=self._branch_alt(t, alt, rev))
+        with self._damage_scope(ctx, tools):
+            for t, (mx, my, rev) in zip(tools, branches):
+                t.on_press(ctx, mx, my, shift=shift, alt=self._branch_alt(t, alt, rev))
+
+    @staticmethod
+    def _damage_scope(ctx: ToolContext, tools: list[object]):
+        """Track which rectangle these tool calls paint, for a partial GPU upload."""
+        tracked = bool(tools) and all(
+            callable(getattr(t, "damage_tracked", None)) and t.damage_tracked() for t in tools
+        )
+        return damage.track(ctx.document.active_layer, enabled=tracked)
 
     def _stroke_tool_list(self, tool: object) -> list[object]:
         if self._stroke_tools:
@@ -548,10 +611,19 @@ class Canvas(Gtk.Overlay):
 
     def _after_tool(self, ctx: ToolContext, tool: object) -> None:
         if getattr(tool, "modifies_pixels", True):
+            layer = ctx.document.active_layer
+            dmg = layer.damage
+            partial = isinstance(dmg, tuple)
             depth = ctx.document.color_depth
-            if is_gray(depth) or not has_alpha(depth):
-                constrain_pixels(ctx.document.active_layer.pixels, depth)
-            self.renderer.invalidate(ctx.document.active_layer.id)
+            if is_gray(depth):
+                if partial:
+                    x0, y0, x1, y1 = dmg
+                    constrain_pixels(layer.pixels[y0:y1, x0:x1], depth)
+                else:
+                    constrain_pixels(layer.pixels, depth)
+            if not partial:
+                # Unknown extent: make sure the whole layer is re-sent.
+                self.renderer.invalidate(layer.id)
         self.queue_render()
         self.refresh_guides()
         self._on_changed()
@@ -642,6 +714,9 @@ class Canvas(Gtk.Overlay):
                     cr.save()
                     cr.set_source_rgba(0.95, 0.95, 1.0, 0.95)
                     cr.set_line_width(1.0)
+                    if getattr(tool, "floating", False):
+                        # Dashed while the original pixels are still floating.
+                        cr.set_dash([5.0, 3.0])
                     sx0, sy0 = self.renderer.doc_to_screen(corners[0][0], corners[0][1])
                     cr.move_to(sx0, sy0)
                     for px, py in corners[1:]:
@@ -649,6 +724,7 @@ class Canvas(Gtk.Overlay):
                         cr.line_to(sx, sy)
                     cr.close_path()
                     cr.stroke()
+                    cr.set_dash([])
                     handle = 3.5
                     for px, py in corners:
                         sx, sy = self.renderer.doc_to_screen(px, py)
@@ -705,7 +781,7 @@ class Canvas(Gtk.Overlay):
             cr.move_to(sx0, sy0)
             cr.line_to(sx1, sy1)
         cr.stroke()
-        # Hub handle — drag to move the symmetry center.
+        # Hub handle — Alt-drag to move the symmetry center.
         hx, hy = self._mirror_center_screen(doc)
         cr.set_dash([])
         cr.set_source_rgba(0.75, 0.85, 1.0, 0.35)
@@ -739,6 +815,16 @@ class Canvas(Gtk.Overlay):
             return False
         return not bool(would(ctx, x, y, alt=alt))
 
+    def commit_transform_float(self) -> bool:
+        """Apply a live Transform float (Enter / click outside). True if one was live."""
+        tool = self._get_tool()
+        commit = getattr(tool, "commit", None)
+        if getattr(tool, "id", None) != "move" or commit is None or not commit():
+            return False
+        self.refresh_guides()
+        self._on_changed()
+        return True
+
     # --- primary button: click (tap) + drag (stroke) ---
     def _checkpoint(self) -> None:
         if self._push_history is not None:
@@ -748,7 +834,7 @@ class Canvas(Gtk.Overlay):
         self._catcher.grab_focus()
         # GestureDrag is CAPTURE-phase, so drag-begin often starts the stroke
         # before click pressed. Don't apply / checkpoint twice.
-        if self._drawing or self._dragging_sun or self._dragging_mirror:
+        if self._drawing or self._dragging_sun or self._dragging_mirror or self._dragging_grid:
             self._btn1 = True
             return
         if self._hit_sun(x, y):
@@ -756,18 +842,26 @@ class Canvas(Gtk.Overlay):
             self._btn1 = True
             self._move_sun_to_screen(x, y)
             return
-        mirror_hit = self._hit_mirror_guides(x, y)
-        if mirror_hit is not None:
-            self._btn1 = True
-            self._begin_mirror_drag(mirror_hit, x, y)
-            return
+        shift, alt = self._mods_from_gesture(gesture)
+        # Guides only grab when Alt is held so they don't block drawing.
+        if alt:
+            mirror_hit = self._hit_mirror_guides(x, y)
+            if mirror_hit is not None:
+                self._btn1 = True
+                self._begin_mirror_drag(mirror_hit, x, y)
+                return
+            grid_hit = self._hit_grid_guides(x, y)
+            if grid_hit is not None:
+                self._btn1 = True
+                self._begin_grid_drag(grid_hit, x, y)
+                return
         self._pressure = self._read_pressure(gesture)
         ctx, tool, lx, ly = self._tool_xy(x, y)
         if ctx is None:
             return
         self._prepare_transform_tool(tool, ctx)
-        shift, alt = self._mods_from_gesture(gesture)
         if self._transform_idle_miss(tool, ctx, lx, ly, alt=alt):
+            self.commit_transform_float()
             return
         editing = self._type_tool_editing(tool)
         if not editing:
@@ -790,6 +884,11 @@ class Canvas(Gtk.Overlay):
             self._end_mirror_drag()
             self._btn1 = False
             return
+        if self._dragging_grid:
+            self._update_grid_drag(x, y)
+            self._end_grid_drag()
+            self._btn1 = False
+            return
         if self._panning and not self._drawing:
             self._panning = False
             return
@@ -807,16 +906,23 @@ class Canvas(Gtk.Overlay):
         self._after_tool(ctx, tool)
 
     def _on_drag_begin(self, gesture: Gtk.GestureDrag, x: float, y: float) -> None:
-        if self._dragging_sun or self._dragging_mirror:
+        if self._dragging_sun or self._dragging_mirror or self._dragging_grid:
             return
         if self._hit_sun(x, y):
             self._dragging_sun = True
             self._move_sun_to_screen(x, y)
             return
-        mirror_hit = self._hit_mirror_guides(x, y)
-        if mirror_hit is not None:
-            self._begin_mirror_drag(mirror_hit, x, y)
-            return
+        shift, alt = self._mods_from_gesture(gesture)
+        # Guides only grab when Alt is held so they don't block drawing.
+        if alt:
+            mirror_hit = self._hit_mirror_guides(x, y)
+            if mirror_hit is not None:
+                self._begin_mirror_drag(mirror_hit, x, y)
+                return
+            grid_hit = self._hit_grid_guides(x, y)
+            if grid_hit is not None:
+                self._begin_grid_drag(grid_hit, x, y)
+                return
         # If click already started the stroke, keep it; else start here.
         if not self._drawing:
             self._pressure = self._read_pressure(gesture)
@@ -824,8 +930,8 @@ class Canvas(Gtk.Overlay):
             if ctx is None:
                 return
             self._prepare_transform_tool(tool, ctx)
-            shift, alt = self._mods_from_gesture(gesture)
             if self._transform_idle_miss(tool, ctx, lx, ly, alt=alt):
+                self.commit_transform_float()
                 return
             editing = self._type_tool_editing(tool)
             if not editing:
@@ -847,6 +953,9 @@ class Canvas(Gtk.Overlay):
         if self._dragging_mirror:
             self._update_mirror_drag(x, y)
             return
+        if self._dragging_grid:
+            self._update_grid_drag(x, y)
+            return
         if self._panning:
             self.renderer.pan_x = self._pan_ox + (x - self._pan_sx)
             self.renderer.pan_y = self._pan_oy + (y - self._pan_sy)
@@ -866,8 +975,9 @@ class Canvas(Gtk.Overlay):
             # Settings changed mid-stroke — stick to the primary branch.
             tools = tools[:1]
             branches = branches[:1]
-        for t, (mx, my, rev) in zip(tools, branches):
-            t.on_drag(ctx, mx, my, shift=shift, alt=self._branch_alt(t, alt, rev))
+        with self._damage_scope(ctx, tools):
+            for t, (mx, my, rev) in zip(tools, branches):
+                t.on_drag(ctx, mx, my, shift=shift, alt=self._branch_alt(t, alt, rev))
         self._after_tool(ctx, tool)
 
     def _on_drag_end(self, gesture: Gtk.GestureDrag, offset_x: float, offset_y: float) -> None:
@@ -882,6 +992,11 @@ class Canvas(Gtk.Overlay):
         if self._dragging_mirror:
             self._update_mirror_drag(x, y)
             self._end_mirror_drag()
+            self._btn1 = False
+            return
+        if self._dragging_grid:
+            self._update_grid_drag(x, y)
+            self._end_grid_drag()
             self._btn1 = False
             return
         if self._panning:
@@ -907,6 +1022,7 @@ class Canvas(Gtk.Overlay):
         self._drawing = False
         self._dragging_sun = False
         self._dragging_mirror = None
+        self._dragging_grid = None
         self._stroke_tools = None
         self._pan_sx, self._pan_sy = x, y
         self._pan_ox, self._pan_oy = self.renderer.pan_x, self.renderer.pan_y
@@ -961,6 +1077,8 @@ class Canvas(Gtk.Overlay):
 
     def _on_key_pressed(self, _c, keyval, _keycode, state) -> bool:
         tool = self._get_tool()
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and self.commit_transform_float():
+            return True
         if self._type_tool_editing(tool) and hasattr(tool, "on_text_key"):
             ctx = self._ctx()
             if ctx is not None:

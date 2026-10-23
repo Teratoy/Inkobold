@@ -15,6 +15,8 @@ tags: [inkobold, wiki]
 
 `name`, `visible`, `opacity`, `offset_x` / `offset_y`, `id`, straight RGBA `pixels` (uint8 or uint16).
 
+In RGB and Grayscale documents, layers still keep their own transparency; the bottom layer starts as opaque white and exports are flattened onto white.
+
 ## Operations
 
 | Op | Shortcut (default) |
@@ -22,9 +24,9 @@ tags: [inkobold, wiki]
 | Add | `Ctrl+Shift+N` |
 | Duplicate | `Ctrl+J` |
 | Delete | `Ctrl+Shift+Delete` |
-| Merge down | `Ctrl+Shift+E` |
-| Merge visible | menu only |
-| Merge all | menu only |
+| Merge down | `Ctrl+Shift+E` (both layers must be visible) |
+| Merge visible | menu only (hidden layers are kept) |
+| Merge all | menu only (asks before discarding hidden layers) |
 | Rename / reorder | UI |
 | Export selected layer | menu (PNG, document-sized) |
 | Export separated layers | menu |
