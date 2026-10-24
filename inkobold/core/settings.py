@@ -50,6 +50,8 @@ class AppSettings:
     sun_elevation: float = 0.70
     # Visual-asset folder override (GreenInkobold); empty means the flavor default
     asset_root: str = ""
+    # File name of the active palette in Libraries → Palettes; empty means the first one
+    active_palette: str = ""
 
     def clamp(self) -> None:
         r, g, b = self.theme_rgb
@@ -100,6 +102,7 @@ class AppSettings:
         self.sun_y_norm = max(0.0, min(1.0, float(self.sun_y_norm)))
         self.sun_elevation = max(0.15, min(1.5, float(self.sun_elevation)))
         self.asset_root = self.asset_root if isinstance(self.asset_root, str) else ""
+        self.active_palette = self.active_palette if isinstance(self.active_palette, str) else ""
 
 
 def config_path() -> Path:
@@ -173,6 +176,9 @@ def load_settings() -> AppSettings:
     raw_assets = data.get("asset_root")
     if isinstance(raw_assets, str):
         settings.asset_root = raw_assets
+    raw_palette = data.get("active_palette")
+    if isinstance(raw_palette, str):
+        settings.active_palette = raw_palette
     settings.clamp()
     return settings
 
@@ -202,6 +208,7 @@ def save_settings(settings: AppSettings) -> None:
             "sun_y_norm": float(settings.sun_y_norm),
             "sun_elevation": float(settings.sun_elevation),
             "asset_root": settings.asset_root,
+            "active_palette": settings.active_palette,
         }
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     except OSError:

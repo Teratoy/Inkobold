@@ -1,4 +1,4 @@
-"""User library folders (brushes, patterns, fonts) under the platform data dir."""
+"""User library folders (brushes, patterns, fonts, palettes) under the platform data dir."""
 
 from __future__ import annotations
 
@@ -13,11 +13,13 @@ from inkobold.core.paths import data_dir, is_windows
 PATTERN_SUFFIXES = {".png", ".jpg", ".jpeg"}
 BRUSH_SUFFIXES = {".png", ".jpg", ".jpeg"}
 FONT_SUFFIXES = {".ttf", ".otf", ".ttc", ".otc"}
+PALETTE_SUFFIXES = {".gpl"}
 
 CATEGORIES: tuple[tuple[str, str], ...] = (
     ("brushes", "Brushes"),
     ("patterns", "Patterns"),
     ("fonts", "Fonts"),
+    ("palettes", "Palettes"),
 )
 
 _system_fonts_cache: list["SystemFont"] | None = None
@@ -48,10 +50,23 @@ def category_dir(category: str) -> Path:
 
 
 def ensure_libraries() -> Path:
-    """Create library root and category folders; return root."""
+    """Create library root and category folders; return root.
+
+    A newly created Palettes folder is seeded with the starter palette.
+    """
     root = libraries_root()
     for cat, _label in CATEGORIES:
-        (root / cat).mkdir(parents=True, exist_ok=True)
+        folder = root / cat
+        created = not folder.is_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        if created and cat == "palettes":
+            from inkobold.core.palette import default_palette, save_palette, unique_palette_path
+
+            pal = default_palette()
+            try:
+                save_palette(pal, unique_palette_path(folder, pal.name))
+            except OSError:
+                pass
     return root
 
 
@@ -78,6 +93,20 @@ def list_brushes() -> list[Path]:
         p
         for p in folder.iterdir()
         if p.is_file() and p.suffix.lower() in BRUSH_SUFFIXES
+    ]
+    files.sort(key=lambda p: p.name.lower())
+    return files
+
+
+def list_palettes() -> list[Path]:
+    """Return palette file paths sorted by name (case-insensitive)."""
+    folder = category_dir("palettes")
+    if not folder.is_dir():
+        return []
+    files = [
+        p
+        for p in folder.iterdir()
+        if p.is_file() and p.suffix.lower() in PALETTE_SUFFIXES
     ]
     files.sort(key=lambda p: p.name.lower())
     return files

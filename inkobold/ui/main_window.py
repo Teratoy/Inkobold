@@ -2461,6 +2461,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 btn.set_tooltip_text("Open brushes folder — drop .png tip images here")
             elif cat_id == "fonts":
                 btn.set_tooltip_text("Open fonts folder — drop .ttf / .otf files here")
+            elif cat_id == "palettes":
+                btn.set_tooltip_text("Open palettes folder — drop GIMP .gpl palettes here")
             else:
                 btn.set_tooltip_text("Open patterns folder — drop .png / .jpeg tiles here")
             btn.connect("clicked", self._on_library_category, cat_id)
