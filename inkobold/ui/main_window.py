@@ -84,6 +84,7 @@ from inkobold.ui.rig_panel import RigPanel
 from inkobold.ui.rig_preview import RigPreview
 from inkobold.ui.canvas import Canvas
 from inkobold.ui.color_picker import ColorSelectButton, rgba_to_tuple, tuple_to_rgba
+from inkobold.ui.palette_panel import PalettePanel
 from inkobold.ui.dialogs import (
     NewCharacterDialog,
     CaptureShortcutDialog,
@@ -840,6 +841,7 @@ class MainWindow(Gtk.ApplicationWindow):
         procedural = maze_mode or puzzle_mode
         show_color = bool(getattr(tool, "uses_color", True)) and not pattern_mode and not uses_lay
         self.color_pair_row.set_visible(show_color)
+        self.palette_panel.set_visible(show_color)
         if maze_mode:
             self.maze_cell_label.set_label("Cell Size")
             self.maze_cell_spin.set_tooltip_text("Maze cell size in pixels (walls + corridor)")
@@ -2286,6 +2288,16 @@ class MainWindow(Gtk.ApplicationWindow):
         swap_colors.connect("clicked", self.action_swap_colors)
         self.color_pair_row.attach(swap_colors, 2, 1, 1, 1)
 
+        self.palette_panel = PalettePanel(
+            active_name=self.app_settings.active_palette,
+            get_primary=lambda: tuple(int(v) for v in self._active_tool().color[:3]),
+            on_pick=self._on_palette_pick,
+            on_active_changed=self._on_active_palette_changed,
+            on_colors_changed=self._on_palette_colors_changed,
+            on_error=self._alert,
+        )
+        opts.append(self.palette_panel)
+
         self.threshold_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         opts.append(self.threshold_row)
         self.threshold_row.append(Gtk.Label(label="Threshold", xalign=0))
@@ -2867,6 +2879,26 @@ class MainWindow(Gtk.ApplicationWindow):
             if secondary is not None:
                 tool.secondary_color = secondary
         self._refresh_type_preview()
+
+    def _on_palette_pick(self, rgb: tuple[int, int, int], primary: bool) -> None:
+        """Palette swatches are opaque RGB: keep the slot's current alpha."""
+        tool = self._active_tool()
+        alpha = int((tool.color if primary else tool.secondary_color)[3])
+        color = (int(rgb[0]), int(rgb[1]), int(rgb[2]), alpha)
+        if primary:
+            self._set_colors(primary=color)
+        else:
+            self._set_colors(secondary=color)
+        self._sync_color_buttons()
+
+    def _on_active_palette_changed(self, name: str) -> None:
+        if self.app_settings.active_palette != name:
+            self.app_settings.active_palette = name
+            save_settings(self.app_settings)
+
+    def _on_palette_colors_changed(self, colors: list[tuple[int, int, int]]) -> None:
+        for btn in (self.color_btn, self.secondary_color_btn):
+            btn.set_palette_colors(colors)
 
     def _sync_color_buttons(self) -> None:
         tool = self._active_tool()
