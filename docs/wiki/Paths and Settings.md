@@ -38,7 +38,7 @@ Continuous numeric tool/effect controls (size, opacity, amounts, sun elevation, 
 
 ## Persisted keys (`AppSettings`)
 
-`theme_rgb` (default white), `use_custom_theme`, `checker_light`, `history_steps`, `default_dpi`, `default_color_depth`, `color_follows_tools`, `debug_mode`, `visible_tools`, `shortcut_overrides`, `recent_colors` (max 8), `sun_active`, `sun_visible`, `sun_x_norm`, `sun_y_norm`, `sun_elevation`.
+`theme_rgb` (default white), `use_custom_theme`, `checker_light`, `history_steps`, `default_dpi`, `default_color_depth`, `color_follows_tools`, `debug_mode`, `visible_tools`, `shortcut_overrides`, `recent_colors` (max 8), `sun_active`, `sun_visible`, `sun_x_norm`, `sun_y_norm`, `sun_elevation`, `active_palette` (file name in Libraries → Palettes).
 
 Tool options, mirror/grid/wrap, and canvas view are saved per document in the `.inkobold` `workspace` blob — see [[File Format]].
 

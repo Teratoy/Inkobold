@@ -28,3 +28,21 @@ Registered in `inkobold/tools/` via `default_tools()`. Shared paint helpers live
 | [[Type\|Type]] | `type` | `T` | Live text; Enter commits |
 
 Visibility of individual tools can be toggled in **Settings → Tools**. See [[Shortcuts]].
+
+## Colors
+
+Color tools show a **primary / secondary** pair; **⇄** or `X` swaps them. With **Settings → Tools →
+Color follows tools** on, the pair is shared by every tool; off, each tool keeps its own pair.
+The secondary color is the [[Gradient]] end, the maze corridor and the puzzle piece in [[Fill]].
+
+The **Palette** strip below shows the active palette from [[Libraries]] → `palettes`:
+
+| Action | Effect |
+|--------|--------|
+| Click / right-click a swatch | Set primary / secondary (keeps that color's alpha) |
+| **+** | Add the primary color |
+| Ctrl+click or middle-click | Rename / remove the swatch |
+| Drag | Reorder |
+| **⋯** | New, Duplicate, Rename, Delete (to trash), Import, Reload, Open Folder |
+
+Edits are saved to the `.gpl` immediately. The color picker lists the same swatches under **Recent**.
