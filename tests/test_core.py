@@ -235,6 +235,40 @@ def test_all_tools_run():
         _stroke(doc, tool_id)
 
 
+def test_secondary_color_restores_legacy_end_and_corridor_keys():
+    tools = default_tools()
+    tools["gradient"].apply_settings_dict({"end_color": [1, 2, 3, 255]})
+    tools["fill"].apply_settings_dict({"corridor_color": [4, 5, 6, 255]})
+    assert tools["gradient"].secondary_color == (1, 2, 3, 255)
+    assert tools["fill"].secondary_color == (4, 5, 6, 255)
+    saved = tools["gradient"].to_settings_dict()
+    assert saved["secondary_color"] == [1, 2, 3, 255]
+    assert "end_color" not in saved
+    fresh = default_tools()["gradient"]
+    fresh.apply_settings_dict(saved)
+    assert fresh.secondary_color == (1, 2, 3, 255)
+
+
+def test_gradient_and_maze_paint_the_secondary_color():
+    doc = Document.blank(40, 40)
+    secondary = (10, 200, 30, 255)
+    ctx = ToolContext(document=doc, color=(0, 0, 0, 255), secondary_color=secondary, threshold=255)
+    grad = default_tools()["gradient"]
+    grad.on_press(ctx, 0, 20)
+    grad.on_drag(ctx, 39, 20)
+    grad.on_release(ctx, 39, 20)
+    assert tuple(doc.active_layer.pixels[20, 39]) == secondary
+
+    doc = Document.blank(40, 40)
+    ctx.document = doc
+    ctx.fill_mode = "maze"
+    fill = default_tools()["fill"]
+    fill.on_press(ctx, 20, 20)
+    fill.on_release(ctx, 20, 20)
+    colors = {tuple(int(v) for v in px) for px in doc.active_layer.pixels.reshape(-1, 4)}
+    assert secondary in colors and (0, 0, 0, 255) in colors
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

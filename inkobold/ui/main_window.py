@@ -83,7 +83,7 @@ from inkobold.ui.asset_browser import AssetBrowser
 from inkobold.ui.rig_panel import RigPanel
 from inkobold.ui.rig_preview import RigPreview
 from inkobold.ui.canvas import Canvas
-from inkobold.ui.color_picker import ColorSelectButton
+from inkobold.ui.color_picker import ColorSelectButton, rgba_to_tuple, tuple_to_rgba
 from inkobold.ui.dialogs import (
     NewCharacterDialog,
     CaptureShortcutDialog,
@@ -158,8 +158,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.tool_id = "pen"
         self._syncing_tool_ui = False
         self.app_settings = load_settings()
-        # Shared paint color when color_follows_tools is on
+        # Shared primary / secondary paint colors when color_follows_tools is on
         self._shared_color: tuple[int, int, int, int] = self.tools["pen"].color
+        self._shared_secondary: tuple[int, int, int, int] = self.tools["pen"].secondary_color
         self.shortcuts = merge_shortcuts(self.app_settings.shortcut_overrides)
         self.history = History(max_steps=self.app_settings.history_steps)
         self._tabs: list[_DocTab] = []
@@ -286,6 +287,8 @@ class MainWindow(Gtk.ApplicationWindow):
             "stop_animation": self.action_stop_animation,
             "brush_smaller": self.action_brush_smaller,
             "brush_larger": self.action_brush_larger,
+            "swap_colors": self.action_swap_colors,
+            "reset_colors": self.action_reset_colors,
             "theme_color": self.action_theme_color,
             "theme_reset": self.action_theme_reset,
             "memory_steps": self.action_memory_steps,
@@ -546,8 +549,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if isinstance(tid, str) and tid in self.tools:
             self.select_tool(tid)
         if self.app_settings.color_follows_tools:
-            c = self._active_tool().color
-            self._shared_color = (int(c[0]), int(c[1]), int(c[2]), int(c[3]))
+            self._take_shared_colors_from_active_tool()
         self._load_active_tool_settings()
 
         if restore_view:
@@ -691,24 +693,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.brush_spin.set_value(tool.brush_size)
             if self.app_settings.color_follows_tools:
                 tool.color = self._shared_color
-            rgba = self.color_btn.get_rgba()
-            r, g, b, a = tool.color
-            rgba.red, rgba.green, rgba.blue, rgba.alpha = r / 255.0, g / 255.0, b / 255.0, a / 255.0
-            self.color_btn.set_rgba(rgba)
-            if show_replace and getattr(tool, "replace_action", "replace") == "erase":
-                self.color_label.set_label("Erase Color")
-            elif bool(getattr(tool, "uses_end_color", False)):
-                self.color_label.set_label("Start Color")
-            else:
-                self.color_label.set_label("Color")
-            show_end_color = bool(getattr(tool, "uses_end_color", False))
-            self.end_color_row.set_visible(show_end_color)
-            if show_end_color:
-                er, eg, eb, ea = getattr(tool, "end_color", (255, 255, 255, 255))
-                end_rgba = self.end_color_btn.get_rgba()
-                end_rgba.red, end_rgba.green = er / 255.0, eg / 255.0
-                end_rgba.blue, end_rgba.alpha = eb / 255.0, ea / 255.0
-                self.end_color_btn.set_rgba(end_rgba)
+                tool.secondary_color = self._shared_secondary
+            self._sync_color_buttons()
             show_thr = bool(getattr(tool, "uses_threshold", False))
             self.threshold_row.set_visible(show_thr)
             if show_thr:
@@ -739,11 +725,6 @@ class MainWindow(Gtk.ApplicationWindow):
                 )
                 self.tile_scale_spin.set_value(float(getattr(tool, "tile_scale", 1.0)))
                 self.maze_cell_spin.set_value(float(getattr(tool, "maze_cell_size", 8.0)))
-                cr, cg, cb, ca = getattr(tool, "corridor_color", (255, 255, 255, 255))
-                corridor_rgba = self.corridor_color_btn.get_rgba()
-                corridor_rgba.red, corridor_rgba.green = cr / 255.0, cg / 255.0
-                corridor_rgba.blue, corridor_rgba.alpha = cb / 255.0, ca / 255.0
-                self.corridor_color_btn.set_rgba(corridor_rgba)
             show_lay = bool(getattr(tool, "uses_lay_options", False))
             self.lay_opts_row.set_visible(show_lay)
             if show_lay:
@@ -858,30 +839,17 @@ class MainWindow(Gtk.ApplicationWindow):
         puzzle_mode = mode == "puzzle"
         procedural = maze_mode or puzzle_mode
         show_color = bool(getattr(tool, "uses_color", True)) and not pattern_mode and not uses_lay
-        self.color_label.set_visible(show_color)
-        self.color_btn.set_visible(show_color)
+        self.color_pair_row.set_visible(show_color)
         if maze_mode:
-            self.color_label.set_label("Wall Color")
             self.maze_cell_label.set_label("Cell Size")
             self.maze_cell_spin.set_tooltip_text("Maze cell size in pixels (walls + corridor)")
-            self.corridor_color_label.set_label("Corridor Color")
-            self.corridor_color_btn.set_tooltip_text("Color for maze corridors / paths")
         elif puzzle_mode:
-            self.color_label.set_label("Outline Color")
             self.maze_cell_label.set_label("Piece Size")
             self.maze_cell_spin.set_tooltip_text("Approximate jigsaw piece size in pixels")
-            self.corridor_color_label.set_label("Piece Color")
-            self.corridor_color_btn.set_tooltip_text("Fill color for puzzle piece interiors")
-        elif getattr(tool, "uses_replace_modes", False) and getattr(tool, "replace_action", "replace") == "erase":
-            self.color_label.set_label("Erase Color")
-        elif bool(getattr(tool, "uses_end_color", False)):
-            self.color_label.set_label("Start Color")
-        else:
-            self.color_label.set_label("Color")
+        self._update_color_labels()
         self.pattern_row.set_visible(self._tool_uses_pattern_picker(tool))
         self.tile_scale_row.set_visible(uses_fill and pattern_mode)
         self.maze_cell_row.set_visible(uses_fill and procedural)
-        self.corridor_color_row.set_visible(uses_fill and procedural)
         self.lay_spacing_row.set_visible(uses_lay)
 
     def _update_brush_mode_visibility(self) -> None:
@@ -1068,7 +1036,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if not getattr(tool, "uses_replace_modes", False):
             return
         tool.replace_action = "erase" if dropdown.get_selected() == 1 else "replace"
-        self.color_label.set_label("Erase Color" if tool.replace_action == "erase" else "Color")
+        self._update_color_labels()
 
     def _on_apply_mode_changed(self, dropdown: Gtk.DropDown, *_a) -> None:
         if self._syncing_tool_ui:
@@ -1128,38 +1096,6 @@ class MainWindow(Gtk.ApplicationWindow):
         tool = self._active_tool()
         if getattr(tool, "uses_fill_options", False):
             tool.maze_cell_size = float(spin.get_value())
-
-    def _on_corridor_color(self, btn: ColorSelectButton) -> None:
-        if self._syncing_tool_ui:
-            return
-        tool = self._active_tool()
-        if not getattr(tool, "uses_fill_options", False):
-            return
-        c = btn.get_rgba()
-        tool.corridor_color = (
-            int(c.red * 255),
-            int(c.green * 255),
-            int(c.blue * 255),
-            int(c.alpha * 255),
-        )
-        self.app_settings.recent_colors = btn.get_recent_colors()
-        save_settings(self.app_settings)
-
-    def _on_end_color(self, btn: ColorSelectButton) -> None:
-        if self._syncing_tool_ui:
-            return
-        tool = self._active_tool()
-        if not getattr(tool, "uses_end_color", False):
-            return
-        c = btn.get_rgba()
-        tool.end_color = (
-            int(c.red * 255),
-            int(c.green * 255),
-            int(c.blue * 255),
-            int(c.alpha * 255),
-        )
-        self.app_settings.recent_colors = btn.get_recent_colors()
-        save_settings(self.app_settings)
 
     def _refresh_font_dropdown(
         self,
@@ -1612,9 +1548,8 @@ class MainWindow(Gtk.ApplicationWindow):
         action.set_state(value)
         self.app_settings.color_follows_tools = enabled
         if enabled:
-            # Start shared mode from the color currently shown for the active tool
-            c = self._active_tool().color
-            self._shared_color = (int(c[0]), int(c[1]), int(c[2]), int(c[3]))
+            # Start shared mode from the colors currently shown for the active tool
+            self._take_shared_colors_from_active_tool()
             self._apply_shared_color_to_tools()
         self._persist_settings()
         if hasattr(self, "color_btn"):
@@ -1628,10 +1563,16 @@ class MainWindow(Gtk.ApplicationWindow):
         if hasattr(self, "reload_btn"):
             self.reload_btn.set_visible(enabled)
 
+    def _take_shared_colors_from_active_tool(self) -> None:
+        tool = self._active_tool()
+        self._shared_color = tuple(int(v) for v in tool.color)
+        self._shared_secondary = tuple(int(v) for v in tool.secondary_color)
+
     def _apply_shared_color_to_tools(self) -> None:
         for tool in self.tools.values():
             if getattr(tool, "uses_color", True):
                 tool.color = self._shared_color
+                tool.secondary_color = self._shared_secondary
 
     def _resolved_visible_tools(self) -> list[str]:
         all_ids = [tid for tid, *_ in TOOL_ORDER]
@@ -2285,20 +2226,6 @@ class MainWindow(Gtk.ApplicationWindow):
         self.maze_cell_spin.connect("value-changed", self._on_maze_cell_changed)
         self.maze_cell_row.append(self.maze_cell_spin)
 
-        self.corridor_color_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=2)
-        opts.append(self.corridor_color_row)
-        self.corridor_color_label = Gtk.Label(label="Corridor Color", xalign=0)
-        self.corridor_color_row.append(self.corridor_color_label)
-        self.corridor_color_btn = ColorSelectButton(use_alpha=True)
-        self.corridor_color_btn.set_hexpand(True)
-        self.corridor_color_btn.set_tooltip_text("Color for maze corridors / paths")
-        self.corridor_color_btn.set_recent_colors(self.app_settings.recent_colors)
-        corridor_rgba = self.corridor_color_btn.get_rgba()
-        corridor_rgba.red = corridor_rgba.green = corridor_rgba.blue = 1.0
-        corridor_rgba.alpha = 1.0
-        self.corridor_color_btn.set_rgba(corridor_rgba)
-        self.corridor_color_btn.connect("color-set", self._on_corridor_color)
-        self.corridor_color_row.append(self.corridor_color_btn)
 
         self.type_opts_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         opts.append(self.type_opts_row)
@@ -2333,27 +2260,31 @@ class MainWindow(Gtk.ApplicationWindow):
         self.font_dropdown.connect("notify::selected", self._on_font_changed)
         self.type_opts_row.append(self.font_dropdown)
 
-        self.color_label = Gtk.Label(label="Color", xalign=0, margin_top=4)
-        opts.append(self.color_label)
+        # Primary / secondary color pair; X swaps them
+        self.color_pair_row = Gtk.Grid(column_spacing=4, row_spacing=4, margin_top=4)
+        opts.append(self.color_pair_row)
+        self.color_label = Gtk.Label(label="Color", xalign=0)
+        self.secondary_label = Gtk.Label(label="Secondary", xalign=0)
+        self.color_pair_row.attach(self.color_label, 0, 0, 1, 1)
+        self.color_pair_row.attach(self.secondary_label, 1, 0, 1, 1)
         self.color_btn = ColorSelectButton(use_alpha=True)
         self.color_btn.set_hexpand(True)
-        self.color_btn.set_tooltip_text("Open color picker (hue + recent colors)")
+        self.color_btn.set_tooltip_text("Primary color: open color picker (hue + recent colors)")
         self.color_btn.set_recent_colors(self.app_settings.recent_colors)
         self.color_btn.connect("color-set", self._on_color)
-        opts.append(self.color_btn)
-
-        self.end_color_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
-        opts.append(self.end_color_row)
-        self.end_color_row.append(Gtk.Label(label="End Color", xalign=0))
-        self.end_color_btn = ColorSelectButton(use_alpha=True)
-        self.end_color_btn.set_hexpand(True)
-        self.end_color_btn.set_tooltip_text("Gradient finishing color")
-        self.end_color_btn.set_recent_colors(self.app_settings.recent_colors)
-        end_rgba = self.end_color_btn.get_rgba()
-        end_rgba.red, end_rgba.green, end_rgba.blue, end_rgba.alpha = 1.0, 1.0, 1.0, 1.0
-        self.end_color_btn.set_rgba(end_rgba)
-        self.end_color_btn.connect("color-set", self._on_end_color)
-        self.end_color_row.append(self.end_color_btn)
+        self.color_pair_row.attach(self.color_btn, 0, 1, 1, 1)
+        self.secondary_color_btn = ColorSelectButton(use_alpha=True)
+        self.secondary_color_btn.set_hexpand(True)
+        self.secondary_color_btn.set_tooltip_text(
+            "Secondary color: Gradient end, maze corridors, puzzle pieces"
+        )
+        self.secondary_color_btn.set_recent_colors(self.app_settings.recent_colors)
+        self.secondary_color_btn.connect("color-set", self._on_secondary_color)
+        self.color_pair_row.attach(self.secondary_color_btn, 1, 1, 1, 1)
+        swap_colors = Gtk.Button(label="⇄", valign=Gtk.Align.CENTER)
+        swap_colors.set_tooltip_text("Swap primary and secondary colors (X)")
+        swap_colors.connect("clicked", self.action_swap_colors)
+        self.color_pair_row.attach(swap_colors, 2, 1, 1, 1)
 
         self.threshold_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         opts.append(self.threshold_row)
@@ -2898,21 +2829,69 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_color(self, btn: ColorSelectButton) -> None:
         if self._syncing_tool_ui:
             return
-        c = btn.get_rgba()
-        color = (
-            int(c.red * 255),
-            int(c.green * 255),
-            int(c.blue * 255),
-            int(c.alpha * 255),
-        )
+        self._set_colors(primary=rgba_to_tuple(btn.get_rgba()))
+        self._remember_recent_colors(btn)
+
+    def _on_secondary_color(self, btn: ColorSelectButton) -> None:
+        if self._syncing_tool_ui:
+            return
+        self._set_colors(secondary=rgba_to_tuple(btn.get_rgba()))
+        self._remember_recent_colors(btn)
+
+    def _remember_recent_colors(self, btn: ColorSelectButton) -> None:
+        recent = btn.get_recent_colors()
+        for other in (self.color_btn, self.secondary_color_btn):
+            other.set_recent_colors(recent)
+        self.app_settings.recent_colors = recent
+        save_settings(self.app_settings)
+
+    def _set_colors(
+        self,
+        *,
+        primary: Optional[tuple[int, int, int, int]] = None,
+        secondary: Optional[tuple[int, int, int, int]] = None,
+    ) -> None:
+        """Set the paint color pair: shared by all tools, or the active tool's own."""
         if self.app_settings.color_follows_tools:
-            self._shared_color = color
+            if primary is not None:
+                self._shared_color = primary
+            if secondary is not None:
+                self._shared_secondary = secondary
             self._apply_shared_color_to_tools()
         else:
-            self._active_tool().color = color
+            tool = self._active_tool()
+            if primary is not None:
+                tool.color = primary
+            if secondary is not None:
+                tool.secondary_color = secondary
         self._refresh_type_preview()
-        self.app_settings.recent_colors = btn.get_recent_colors()
-        save_settings(self.app_settings)
+
+    def _sync_color_buttons(self) -> None:
+        tool = self._active_tool()
+        self.color_btn.set_rgba(tuple_to_rgba(tool.color))
+        self.secondary_color_btn.set_rgba(tuple_to_rgba(tool.secondary_color))
+
+    def _update_color_labels(self) -> None:
+        tool = self._active_tool()
+        primary, secondary = getattr(tool, "color_labels", ("Color", "Secondary"))
+        mode = getattr(tool, "fill_mode", "color") if getattr(tool, "uses_fill_options", False) else ""
+        if mode == "maze":
+            primary, secondary = "Wall", "Corridor"
+        elif mode == "puzzle":
+            primary, secondary = "Outline", "Piece"
+        elif getattr(tool, "uses_replace_modes", False) and getattr(tool, "replace_action", "replace") == "erase":
+            primary = "Erase Color"
+        self.color_label.set_label(primary)
+        self.secondary_label.set_label(secondary)
+
+    def action_swap_colors(self, *_a) -> None:
+        tool = self._active_tool()
+        self._set_colors(primary=tool.secondary_color, secondary=tool.color)
+        self._sync_color_buttons()
+
+    def action_reset_colors(self, *_a) -> None:
+        self._set_colors(primary=(0, 0, 0, 255), secondary=(255, 255, 255, 255))
+        self._sync_color_buttons()
 
     def _push_history(self) -> None:
         if self.document is not None:

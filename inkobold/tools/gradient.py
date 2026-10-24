@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from inkobold.core.image_meta import channel_max, prepare_paint_color
+from inkobold.core.image_meta import channel_max
 from inkobold.tools.base import BaseTool, ToolContext
 from inkobold.tools.line import LineTool
 from inkobold.tools.paint import flood_fill_gradient, stroke_segment
@@ -17,12 +17,11 @@ class GradientTool(BaseTool):
     name = "Gradient"
     id = "gradient"
     default_color = (0, 0, 0, 255)
-    default_end_color = (255, 255, 255, 255)
     default_threshold = 200
     uses_size = False
     uses_threshold = True
     uses_opacity = True
-    uses_end_color = True
+    color_labels = ("Start", "End")
 
     # Shared across mirror clones so only one branch restores the snapshot
     # before every clone redraws its guide on the same layer.
@@ -30,17 +29,11 @@ class GradientTool(BaseTool):
 
     def __init__(self) -> None:
         super().__init__()
-        self.end_color: tuple[int, int, int, int] = self.default_end_color
         self._drawing = False
         self._sx = 0.0
         self._sy = 0.0
         self._shift = False
         self._snapshot: np.ndarray | None = None
-
-    def _end_paint_color(self, ctx: ToolContext) -> tuple[int, int, int, int]:
-        r, g, b, a = getattr(ctx, "end_color", None) or self.end_color
-        color = (r, g, b, int(round(a * self._opacity_factor(ctx))))
-        return prepare_paint_color(color, ctx.document.color_depth)
 
     def _preview_color(self, ctx: ToolContext) -> tuple[int, int, int, int]:
         """Semi-transparent start color for the temporary guide line."""
@@ -102,7 +95,7 @@ class GradientTool(BaseTool):
             ex,
             ey,
             self._paint_color(ctx),
-            self._end_paint_color(ctx),
+            self._secondary_paint_color(ctx),
             tolerance=self._threshold(ctx),
             mask=self._mask(ctx),
             wrap=ctx.tile_wrap,
