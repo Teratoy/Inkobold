@@ -8,13 +8,16 @@ written straight back to the palette's ``.gpl`` file.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk  # noqa: E402
+
+if TYPE_CHECKING:
+    import numpy as np
 
 from inkobold.core import libraries
 from inkobold.core.palette import (
@@ -25,6 +28,7 @@ from inkobold.core.palette import (
     Swatch,
     import_palette,
     load_palette,
+    palette_from_pixels,
     save_palette,
     unique_palette_path,
 )
@@ -44,6 +48,7 @@ class PalettePanel(Gtk.Box):
         on_active_changed: Callable[[str], None],
         on_colors_changed: Callable[[list[Rgb]], None],
         on_error: Callable[[str, str], None],
+        get_layer: Callable[[], Optional[tuple[str, "np.ndarray"]]] = lambda: None,
     ) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
         self._get_primary = get_primary
@@ -51,6 +56,7 @@ class PalettePanel(Gtk.Box):
         self._on_active_changed = on_active_changed
         self._on_colors_changed = on_colors_changed
         self._on_error = on_error
+        self._get_layer = get_layer
         self._paths: list[Path] = []
         self._path: Optional[Path] = None
         self._palette: Optional[Palette] = None
@@ -290,6 +296,7 @@ class PalettePanel(Gtk.Box):
         needs_palette: list[Gtk.Button] = []
         for label, cb in (
             ("New Palette…", lambda: self._ask_name("new", "New palette name", "New Palette")),
+            ("From Selected Layer…", self._ask_from_layer),
             ("Duplicate…", lambda: self._ask_name("duplicate", "Copy name", self._copy_name())),
             ("Rename…", lambda: self._ask_name("rename", "Palette name", self._palette.name if self._palette else "")),
             ("Delete…", self._ask_delete),
@@ -304,6 +311,8 @@ class PalettePanel(Gtk.Box):
             items.append(btn)
             if label in ("Duplicate…", "Rename…", "Delete…"):
                 needs_palette.append(btn)
+            elif label == "From Selected Layer…":
+                from_layer = btn
 
         ask = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self._menu_stack.add_named(ask, "ask")
@@ -327,6 +336,7 @@ class PalettePanel(Gtk.Box):
             self._menu_stack.set_visible_child_name("items")
             for btn in needs_palette:
                 btn.set_sensitive(self._palette is not None)
+            from_layer.set_sensitive(self._get_layer() is not None)
 
         pop.connect("show", on_show)
         self._menu = pop
@@ -346,6 +356,11 @@ class PalettePanel(Gtk.Box):
         self._menu_stack.set_visible_child_name("ask")
         self._ask_entry.grab_focus()
         self._ask_entry.select_region(0, -1)
+
+    def _ask_from_layer(self) -> None:
+        layer = self._get_layer()
+        if layer is not None:
+            self._ask_name("layer", "Palette name (colors of the selected layer)", layer[0])
 
     def _ask_delete(self) -> None:
         if self._path is None:
@@ -373,6 +388,14 @@ class PalettePanel(Gtk.Box):
                 copy = Palette(name, [Swatch(s.rgb, s.name) for s in self._palette.swatches], self._palette.columns)
                 save_palette(copy, path)
                 self.reload(select_name=path.name)
+            elif mode == "layer" and name:
+                layer = self._get_layer()
+                if layer is None:
+                    return
+                pal = palette_from_pixels(layer[1], name=name)
+                path = unique_palette_path(folder, name)
+                save_palette(pal, path)
+                self.reload(select_name=path.name)
             elif mode == "rename" and name and self._palette is not None and self._path is not None:
                 path = unique_palette_path(folder, name, ignore=self._path)
                 self._palette.name = name
@@ -384,7 +407,7 @@ class PalettePanel(Gtk.Box):
                 self._trash(self._path)
                 self._path = None
                 self.reload(select_name="")
-        except OSError as exc:
+        except (PaletteError, OSError) as exc:
             self._on_error("Palette operation failed", str(exc))
 
     @staticmethod

@@ -134,6 +134,35 @@ def test_new_palettes_library_is_seeded_once():
             os.environ["INKOBOLD_DATA_HOME"] = old
 
 
+def test_palette_from_pixels_keeps_few_colors_in_reading_order():
+    rgba = np.zeros((2, 3, 4), dtype=np.uint8)
+    rgba[0, 0] = (0, 0, 255, 255)
+    rgba[0, 2] = (255, 0, 0, 128)
+    rgba[1, 1] = (0, 0, 255, 255)
+    rgba[1, 2] = (9, 9, 9, 0)  # transparent: ignored
+    got = pal.palette_from_pixels(rgba, name="Layer 1")
+    assert got.name == "Layer 1"
+    assert [s.rgb for s in got.swatches] == [(0, 0, 255), (255, 0, 0)]
+
+
+def test_palette_from_pixels_reduces_busy_layers():
+    ramp = np.zeros((1, 1000, 4), dtype=np.uint8)
+    ramp[0, :, 0] = np.arange(1000) % 256
+    ramp[0, :, 1] = np.arange(1000) // 4
+    ramp[..., 3] = 255
+    got = pal.palette_from_pixels(ramp, name="Busy", max_colors=16)
+    assert 0 < len(got.swatches) <= 16
+    assert len({s.rgb for s in got.swatches}) == len(got.swatches)
+
+
+def test_palette_from_pixels_empty_layer_raises():
+    try:
+        pal.palette_from_pixels(np.zeros((4, 4, 4), dtype=np.uint8), name="Empty")
+    except pal.PaletteError:
+        return
+    raise AssertionError("expected PaletteError")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
@@ -145,3 +174,4 @@ if __name__ == "__main__":
                 failures += 1
                 print(f"FAIL  {name}: {type(exc).__name__}: {exc}")
     sys.exit(1 if failures else 0)
+

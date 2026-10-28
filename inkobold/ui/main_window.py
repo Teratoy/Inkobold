@@ -56,6 +56,7 @@ from inkobold.core.image_meta import (
     COLOR_DEPTH_RGBA32,
     constrain_pixels,
     convert_pixels,
+    to_display_u8,
 )
 from inkobold.core.libraries import (
     CATEGORIES,
@@ -2295,6 +2296,7 @@ class MainWindow(Gtk.ApplicationWindow):
             on_active_changed=self._on_active_palette_changed,
             on_colors_changed=self._on_palette_colors_changed,
             on_error=self._alert,
+            get_layer=self._active_layer_for_palette,
         )
         opts.append(self.palette_panel)
 
@@ -2890,6 +2892,13 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             self._set_colors(secondary=color)
         self._sync_color_buttons()
+
+    def _active_layer_for_palette(self):
+        """(name, uint8 RGBA) of the active layer for Palette ⋯ → From Selected Layer."""
+        if self.document is None:
+            return None
+        layer = self.document.active_layer
+        return layer.name, to_display_u8(layer.pixels)
 
     def _on_active_palette_changed(self, name: str) -> None:
         if self.app_settings.active_palette != name:
