@@ -22,7 +22,7 @@ from inkobold.gpu.renderer import GpuRenderer
 from inkobold.input import InputHub
 from inkobold.tools.base import ToolContext
 from inkobold.tools.brush import MAX_STROKE_BUBBLES
-from inkobold.tools.paint import render_bubbles_list
+from inkobold.tools.paint import render_bubbles_list, set_pixel_mode
 from inkobold.ui import rig_overlay
 
 
@@ -42,6 +42,7 @@ class Canvas(Gtk.Overlay):
         get_grid: Callable[[], GridOverlay] | None = None,
         get_sun: Callable[[], SunLight] | None = None,
         get_tile_wrap: Callable[[], bool] | None = None,
+        get_pixel_mode: Callable[[], bool] | None = None,
         on_type_editing: Callable[[bool], None] | None = None,
         on_sun_moved: Callable[[], None] | None = None,
         get_rig_view: Callable[[], RigView] | None = None,
@@ -63,6 +64,7 @@ class Canvas(Gtk.Overlay):
         self._get_grid = get_grid or (lambda: GridOverlay())
         self._get_sun = get_sun or (lambda: SunLight())
         self._get_tile_wrap = get_tile_wrap or (lambda: False)
+        self._get_pixel_mode = get_pixel_mode or (lambda: False)
         self._on_type_editing = on_type_editing
         self._on_sun_moved = on_sun_moved
         self._get_rig_view = get_rig_view or (lambda: RigView(show=False))
@@ -322,11 +324,16 @@ class Canvas(Gtk.Overlay):
         if doc is None:
             return None
         tool = self._get_tool()
+        # Every tool call builds its context here, so this keeps the paint
+        # primitives in step with the Pixel toggle.
+        pixel = bool(self._get_pixel_mode())
+        set_pixel_mode(pixel)
         return ToolContext(
             document=doc,
             color=self._get_color(),
             brush_size=self._get_brush(),
-            pressure=self._pressure,
+            # Pixel mode draws at exactly Size wide, so pressure is ignored.
+            pressure=1.0 if pixel else self._pressure,
             threshold=int(getattr(tool, "threshold", 28)),
             depth=float(getattr(tool, "depth", 70)),
             highlight=float(getattr(tool, "highlight", 55)),

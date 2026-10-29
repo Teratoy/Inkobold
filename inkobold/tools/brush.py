@@ -10,6 +10,7 @@ from inkobold.core.damage import note as _damage_note
 from inkobold.tools.base import BaseTool, ToolContext
 from inkobold.core.sun import DEFAULT_MILK_LIGHT_DIR
 from inkobold.tools.paint import (
+    PixelPath,
     bubble_influence_bbox,
     collect_bubbles_along_segment,
     render_bubbles_list,
@@ -107,6 +108,7 @@ class BrushTool(BaseTool):
         self._lx = 0.0
         self._ly = 0.0
         self._lr = 0.5
+        self._path = PixelPath()
         # Bubbles stroke accumulate — blended together on release.
         self._bubble_placed: list[tuple[float, float, float, float]] = []
         self._bubble_base: Optional[np.ndarray] = None
@@ -279,12 +281,14 @@ class BrushTool(BaseTool):
         stroke_segment_tapered(
             pixels, x0, y0, x1, y1, r0, r1, color,
             mask=mask,
+            path=self._path,
             **self._stamp_kwargs(ctx),
         )
 
     def on_press(self, ctx: ToolContext, x: float, y: float, shift: bool = False, alt: bool = False) -> None:
         self._drawing = True
         self._lx, self._ly = x, y
+        self._path = PixelPath()
         self._lr = self._pressure_radius(ctx)
         self._paint_segment(ctx, x, y, x, y, self._lr, self._lr, force=True)
         ctx.document.mark_dirty()

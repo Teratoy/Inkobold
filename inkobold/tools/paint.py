@@ -56,6 +56,142 @@ def wrap_pixel_coords(x: float, y: float, width: int, height: int) -> tuple[int,
     return int(math.floor(_period(x, w))), int(math.floor(_period(y, h)))
 
 
+# Pixel mode: stamps become hard footprints (no anti-aliased rim), strokes
+# step cell by cell along Bresenham lines and 1 px strokes drop L-corners.
+# Set by the canvas from the active document whenever it builds a tool
+# context, so every primitive below follows the document's Pixel toggle.
+_pixel_mode = False
+
+
+def set_pixel_mode(enabled: bool) -> None:
+    global _pixel_mode
+    _pixel_mode = bool(enabled)
+
+
+def pixel_mode() -> bool:
+    return _pixel_mode
+
+
+def pixel_width(radius: float) -> int:
+    """Pixel-mode stroke width: tools pass Size as the radius, read as whole pixels."""
+    return max(1, int(math.floor(float(radius) + 0.5)))
+
+
+@functools.lru_cache(maxsize=64)
+def pixel_footprint(width: int) -> np.ndarray:
+    """Hard round tip *width* px across as float32 0/1 coverage (3 px is a plus)."""
+    n = max(1, int(width))
+    if n <= 2:
+        return np.ones((n, n), dtype=np.float32)
+    if n == 3:
+        foot = np.ones((3, 3), dtype=np.float32)
+        foot[0, 0] = foot[0, 2] = foot[2, 0] = foot[2, 2] = 0.0
+        return foot
+    c = np.arange(n, dtype=np.float32) + 0.5 - n * 0.5
+    return ((c[:, None] ** 2 + c[None, :] ** 2) < (n * 0.5) ** 2).astype(np.float32)
+
+
+def _pixel_origin(v: float, width: int) -> int:
+    """Top/left cell of a *width* footprint centred on *v* (odd: on a cell, even: on a corner)."""
+    return int(math.floor(float(v) - width * 0.5 + 0.5))
+
+
+def bresenham(x0: int, y0: int, x1: int, y1: int) -> list[tuple[int, int]]:
+    """8-connected cells from (x0, y0) to (x1, y1), both ends included."""
+    dx = abs(x1 - x0)
+    dy = -abs(y1 - y0)
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    err = dx + dy
+    out = [(x0, y0)]
+    while (x0, y0) != (x1, y1):
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x0 += sx
+        if e2 <= dx:
+            err += dx
+            y0 += sy
+        out.append((x0, y0))
+    return out
+
+
+def _is_l_corner(a: tuple[int, int], b: tuple[int, int], c: tuple[int, int]) -> bool:
+    """*b* is the elbow of an L: a and c touch diagonally, b touches both side-on."""
+    return abs(a[0] - c[0]) == 1 and abs(a[1] - c[1]) == 1 and (
+        abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1
+    ) and (abs(c[0] - b[0]) + abs(c[1] - b[1]) == 1)
+
+
+class PixelPath:
+    """Pixel-mode stroke: joins pointer samples into connected cells and stamps each once.
+
+    Keep one per freehand stroke so pixel-perfect cleanup works across drag
+    events: a 1 px stroke that turns an L-corner gets the elbow pixel put
+    back the way it was before the stroke touched it.
+    """
+
+    def __init__(self) -> None:
+        self._cells: list[tuple[int, int]] = []
+        # Pixel values under the last few cells before they were stamped
+        self._saved: dict[tuple[int, int], np.ndarray] = {}
+
+    def _store_key(self, pixels: np.ndarray, cell: tuple[int, int], wrap: bool) -> tuple[int, int] | None:
+        h, w = pixels.shape[:2]
+        if wrap:
+            return wrap_pixel_coords(cell[0], cell[1], w, h)
+        if 0 <= cell[0] < w and 0 <= cell[1] < h:
+            return cell
+        return None
+
+    def feed(
+        self,
+        pixels: np.ndarray,
+        points: list[tuple[float, float]],
+        radius: float,
+        color: tuple[int, int, int, int],
+        **stamp_kw,
+    ) -> None:
+        perfect = pixel_width(radius) == 1
+        wrap = bool(stamp_kw.get("wrap", False))
+        for px, py in points:
+            target = (int(math.floor(px)), int(math.floor(py)))
+            if self._cells:
+                last = self._cells[-1]
+                if target == last:
+                    continue
+                cells = bresenham(last[0], last[1], target[0], target[1])[1:]
+            else:
+                cells = [target]
+            for cell in cells:
+                if perfect and len(self._cells) >= 2 and _is_l_corner(
+                    self._cells[-2], self._cells[-1], cell
+                ):
+                    elbow = self._cells.pop()
+                    key = self._store_key(pixels, elbow, wrap)
+                    before = self._saved.pop(elbow, None)
+                    if key is not None and before is not None:
+                        _damage_note(pixels, key[0], key[1], key[0] + 1, key[1] + 1)
+                        pixels[key[1], key[0]] = before
+                if perfect:
+                    key = self._store_key(pixels, cell, wrap)
+                    if key is not None:
+                        self._saved[cell] = pixels[key[1], key[0]].copy()
+                stamp_disk(pixels, cell[0] + 0.5, cell[1] + 0.5, radius, color, **stamp_kw)
+                self._cells.append(cell)
+                if len(self._cells) > 3:
+                    dropped = self._cells.pop(0)
+                    if dropped not in self._cells:
+                        self._saved.pop(dropped, None)
+
+
+def _sample_steps(length: float, radius: float) -> int:
+    """Stamps along a path of *length*; pixel mode samples every half pixel."""
+    if _pixel_mode:
+        return max(1, int(math.ceil(length * 2.0)))
+    return max(1, int(length / max(0.1, radius * 0.35)))
+
+
 def stamp_centers(
     x: float,
     y: float,
@@ -116,18 +252,28 @@ def stamp_disk(
                 wrap=False,
             )
         return
-    x0 = max(0, int(x - r - 1))
-    y0 = max(0, int(y - r - 1))
-    x1 = min(w, int(x + r + 2))
-    y1 = min(h, int(y + r + 2))
+    if _pixel_mode:
+        n = pixel_width(r)
+        fx0 = _pixel_origin(x, n)
+        fy0 = _pixel_origin(y, n)
+        x0, y0 = max(0, fx0), max(0, fy0)
+        x1, y1 = min(w, fx0 + n), min(h, fy0 + n)
+    else:
+        x0 = max(0, int(x - r - 1))
+        y0 = max(0, int(y - r - 1))
+        x1 = min(w, int(x + r + 2))
+        y1 = min(h, int(y + r + 2))
     if x0 >= x1 or y0 >= y1:
         return
     op = min(1.0, max(0.0, float(opacity)))
     if op <= 0.0:
         return
-    yy, xx = _grid(y0, y1, x0, x1)
-    dist = np.sqrt((xx + 0.5 - x) ** 2 + (yy + 0.5 - y) ** 2)
-    cov = _clip(1.0 - (dist - (r - 0.5)), 0.0, 1.0)
+    if _pixel_mode:
+        cov = pixel_footprint(n)[y0 - fy0 : y1 - fy0, x0 - fx0 : x1 - fx0]
+    else:
+        yy, xx = _grid(y0, y1, x0, x1)
+        dist = np.sqrt((xx + 0.5 - x) ** 2 + (yy + 0.5 - y) ** 2)
+        cov = _clip(1.0 - (dist - (r - 0.5)), 0.0, 1.0)
     if mask is not None:
         cov = cov * (mask[y0:y1, x0:x1] > 0).astype(np.float32)
     if not cov.any():
@@ -147,6 +293,8 @@ def stamp_disk(
             match = np.ones(cov.shape, dtype=np.float32)
         elif tol <= 0:
             match = (np.max(np.abs(patch - key), axis=2) < 0.5).astype(np.float32)
+        elif _pixel_mode:
+            match = (np.max(np.abs(patch - key), axis=2) <= tol).astype(np.float32)
         else:
             diff = np.max(np.abs(patch - key), axis=2)
             match = _clip(1.0 - diff / float(tol), 0.0, 1.0)
@@ -187,7 +335,17 @@ def stroke_segment(
     replace: bool = False,
     opacity: float = 1.0,
     wrap: bool = False,
+    path: PixelPath | None = None,
 ) -> None:
+    """Stamp a straight segment. In pixel mode it is a Bresenham line fed to
+    *path* (pass one per freehand stroke for pixel-perfect joins)."""
+    if _pixel_mode:
+        (path or PixelPath()).feed(
+            pixels, [(x0, y0), (x1, y1)], radius, color,
+            erase=erase, mask=mask, key_color=key_color, threshold=threshold,
+            replace=replace, opacity=opacity, wrap=wrap,
+        )
+        return
     dist = float(np.hypot(x1 - x0, y1 - y0))
     steps = max(1, int(dist / max(0.1, radius * 0.35)))
     for i in range(steps + 1):
@@ -232,7 +390,19 @@ def stroke_quadratic(
         np.hypot(x1 - x0, y1 - y0)
         + np.hypot(x2 - x1, y2 - y1)
     )
-    steps = max(1, int(est / max(0.1, radius * 0.35)))
+    steps = _sample_steps(est, radius)
+    if _pixel_mode:
+        pts = []
+        for i in range(steps + 1):
+            t = i / steps
+            u = 1.0 - t
+            pts.append((u * u * x0 + 2.0 * u * t * x1 + t * t * x2, u * u * y0 + 2.0 * u * t * y1 + t * t * y2))
+        PixelPath().feed(
+            pixels, pts, radius, color,
+            erase=erase, mask=mask, key_color=key_color, threshold=threshold,
+            replace=replace, opacity=opacity, wrap=wrap,
+        )
+        return
     for i in range(steps + 1):
         t = i / steps
         u = 1.0 - t
@@ -332,7 +502,18 @@ def stroke_circular_arc(
             best_sweep = sweep
 
     arc_len = abs(best_sweep) * r_circ
-    steps = max(1, int(arc_len / max(0.1, radius * 0.35)))
+    steps = _sample_steps(arc_len, radius)
+    if _pixel_mode:
+        pts = [
+            (cx + r_circ * math.cos(a0 + best_sweep * i / steps), cy + r_circ * math.sin(a0 + best_sweep * i / steps))
+            for i in range(steps + 1)
+        ]
+        PixelPath().feed(
+            pixels, pts, radius, color,
+            erase=erase, mask=mask, key_color=key_color, threshold=threshold,
+            replace=replace, opacity=opacity, wrap=wrap,
+        )
+        return
     for i in range(steps + 1):
         t = i / steps
         ang = a0 + best_sweep * t
@@ -377,7 +558,18 @@ def stroke_circle(
         )
         return
     circ = 2.0 * math.pi * r_circ
-    steps = max(1, int(circ / max(0.1, radius * 0.35)))
+    steps = _sample_steps(circ, radius)
+    if _pixel_mode:
+        pts = [
+            (cx + r_circ * math.cos(2.0 * math.pi * i / steps), cy + r_circ * math.sin(2.0 * math.pi * i / steps))
+            for i in range(steps + 1)
+        ]
+        PixelPath().feed(
+            pixels, pts, radius, color,
+            erase=erase, mask=mask, key_color=key_color, threshold=threshold,
+            replace=replace, opacity=opacity, wrap=wrap,
+        )
+        return
     for i in range(steps + 1):
         ang = (2.0 * math.pi * i) / steps
         stamp_disk(
@@ -823,10 +1015,19 @@ def stroke_segment_tapered(
     tip: np.ndarray | None = None,
     opacity: float = 1.0,
     wrap: bool = False,
+    path: PixelPath | None = None,
 ) -> None:
-    """Stamp a segment while linearly interpolating stamp radius (pressure taper)."""
+    """Stamp a segment while linearly interpolating stamp radius (pressure taper).
+
+    In pixel mode a round tip draws a hard Bresenham line at *radius1*'s width.
+    """
     r0 = max(0.1, float(radius0))
     r1 = max(0.1, float(radius1))
+    if _pixel_mode and tip is None:
+        (path or PixelPath()).feed(
+            pixels, [(x0, y0), (x1, y1)], r1, color, mask=mask, opacity=opacity, wrap=wrap,
+        )
+        return
     dist = float(np.hypot(x1 - x0, y1 - y0))
     step = max(0.1, min(r0, r1) * 0.35)
     steps = max(1, int(dist / step))

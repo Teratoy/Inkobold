@@ -20,9 +20,22 @@ Canvas defaults: pan `(40, 40)`, zoom `1.0`. Zoom clamp **0.05–32**. App start
 | Sun… | Elevation etc. | Persisted; elevation 0.15–1.5; Apply reactivates |
 | Tile Preview | `Ctrl+Shift+T` | 3×3 tiled composite |
 | Wrap Moves | `Ctrl+Shift+W` | Toroidal stamps/transforms/3D Fill emboss; follows Tile Preview by default |
+| Pixel Art | `Ctrl+Shift+P`, toolbox **Pixel** | Hard-pixel painting; see [Pixel Art](#pixel-art) |
 | Checker BG | View / settings | `checker_light` |
 | Fullscreen / Borderless / Windowed | `F11` / menu | |
 | Clear selection | `Esc`, `Ctrl+D` | |
+
+## Pixel Art
+
+Per-document toggle (saved in the document workspace) for pixel art. While on, the paint primitives that Pen, Brush (round tip), Eraser, Line, Rectangle, Curve and Replace build on change:
+
+- Stamps are hard: alpha is all or nothing, with no soft edge. 1 px is a single pixel, 2 px a 2×2 block, 3 px a plus and wider tips are round.
+- **Size** is the stroke width in whole pixels and pen pressure is ignored.
+- Strokes step cell by cell along Bresenham lines, so there are no gaps or doubled pixels.
+- 1 px freehand strokes are pixel-perfect: the elbow of an L-shaped corner is put back, leaving clean diagonals.
+- Eraser and Replace colour matching is all-or-nothing within the threshold.
+
+Custom brush tips, Bubbles, Gradient, Fill and the 3D tools are unchanged.
 
 ## Symmetry
 

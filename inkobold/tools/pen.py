@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from inkobold.tools.base import BaseTool, ToolContext
-from inkobold.tools.paint import stroke_segment
+from inkobold.tools.paint import PixelPath, stroke_segment
 
 
 class PenTool(BaseTool):
@@ -21,6 +21,7 @@ class PenTool(BaseTool):
         self._drawing = False
         self._lx = 0.0
         self._ly = 0.0
+        self._path = PixelPath()
 
     def _radius(self, ctx: ToolContext) -> float:
         return max(0.1, float(ctx.brush_size))
@@ -28,6 +29,7 @@ class PenTool(BaseTool):
     def on_press(self, ctx: ToolContext, x: float, y: float, shift: bool = False, alt: bool = False) -> None:
         self._drawing = True
         self._lx, self._ly = x, y
+        self._path = PixelPath()
         stroke_segment(
             ctx.document.active_layer.pixels,
             x, y, x, y,
@@ -36,6 +38,7 @@ class PenTool(BaseTool):
             mask=self._mask(ctx),
             opacity=self._opacity_factor(ctx),
             wrap=ctx.tile_wrap,
+            path=self._path,
         )
         ctx.document.mark_dirty()
 
@@ -50,6 +53,7 @@ class PenTool(BaseTool):
             mask=self._mask(ctx),
             opacity=self._opacity_factor(ctx),
             wrap=ctx.tile_wrap,
+            path=self._path,
         )
         self._lx, self._ly = x, y
         ctx.document.mark_dirty()

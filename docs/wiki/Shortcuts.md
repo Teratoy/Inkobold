@@ -18,6 +18,7 @@ Defaults from `inkobold/core/shortcuts.py`. Rebind under **Settings → Shortcut
 | Clear selection | `Esc`, `Ctrl+D` |
 | Tile Preview | `Ctrl+Shift+T` |
 | Wrap Moves | `Ctrl+Shift+W` |
+| Pixel Art | `Ctrl+Shift+P` |
 
 ## Layers / animation
 

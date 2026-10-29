@@ -205,6 +205,7 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         self.sun.clamp()
         self.tile_wrap = False
+        self.pixel_mode = False
         self.input_hub = InputHub()
         self.input_hub.start()
         ensure_libraries()
@@ -346,6 +347,12 @@ class MainWindow(Gtk.ApplicationWindow):
         tile_wrap.connect("change-state", self._on_tile_wrap_change)
         self.add_action(tile_wrap)
 
+        pixel_mode = Gio.SimpleAction.new_stateful(
+            "pixel_mode", None, GLib.Variant.new_boolean(False)
+        )
+        pixel_mode.connect("change-state", self._on_pixel_mode_change)
+        self.add_action(pixel_mode)
+
         checker_light = Gio.SimpleAction.new_stateful(
             "checker_light",
             None,
@@ -449,6 +456,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 "oy_norm": float(self.grid.oy_norm),
             },
             "tile_wrap": bool(self.tile_wrap),
+            "pixel": bool(self.pixel_mode),
         }
         if 0 <= self._active_tab < len(self._tabs):
             tab = self._tabs[self._active_tab]
@@ -557,6 +565,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 action.change_state(GLib.Variant.new_boolean(enabled))
             elif hasattr(self, "tile_wrap_toggle"):
                 self.tile_wrap_toggle.set_active(enabled)
+
+        action = self.lookup_action("pixel_mode")
+        if action is not None:
+            action.change_state(GLib.Variant.new_boolean(bool(workspace.get("pixel", False))))
 
         tid = workspace.get("tool_id")
         if isinstance(tid, str) and tid in self.tools:
@@ -1586,6 +1598,22 @@ class MainWindow(Gtk.ApplicationWindow):
             if current != enabled:
                 action.change_state(GLib.Variant.new_boolean(enabled))
 
+    def _on_pixel_mode_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
+        enabled = bool(value.get_boolean())
+        action.set_state(value)
+        self.pixel_mode = enabled
+        if hasattr(self, "pixel_mode_toggle") and self.pixel_mode_toggle.get_active() != enabled:
+            self.pixel_mode_toggle.set_active(enabled)
+        self._set_status()
+
+    def _on_pixel_mode_toggled(self, btn: Gtk.CheckButton) -> None:
+        enabled = bool(btn.get_active())
+        action = self.lookup_action("pixel_mode")
+        if action is not None:
+            current = bool(action.get_state().get_boolean())  # type: ignore[union-attr]
+            if current != enabled:
+                action.change_state(GLib.Variant.new_boolean(enabled))
+
     def _on_checker_light_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
         enabled = bool(value.get_boolean())
         action.set_state(value)
@@ -1856,6 +1884,7 @@ class MainWindow(Gtk.ApplicationWindow):
         view_menu.append("Sun…", "win.sun_settings")
         view_menu.append("Tile Preview", "win.tile_preview")
         view_menu.append("Wrap Moves", "win.tile_wrap")
+        view_menu.append("Pixel Art", "win.pixel_mode")
         view_menu.append("Light Transparent Background", "win.checker_light")
         view_menu.append("Fullscreen", "win.window_fullscreen")
         view_menu.append("Borderless Window", "win.window_borderless")
@@ -2461,6 +2490,16 @@ class MainWindow(Gtk.ApplicationWindow):
         self.tile_wrap_toggle.connect("toggled", self._on_tile_wrap_toggled)
         mirror_box.append(self.tile_wrap_toggle)
 
+        self.pixel_mode_toggle = Gtk.CheckButton(label="Pixel")
+        self.pixel_mode_toggle.set_tooltip_text(
+            "Pixel art: paint tools draw hard pixels with no soft edges, Size is "
+            "the stroke width in pixels, pressure is ignored and 1 px freehand "
+            "strokes skip L-shaped corners (pixel-perfect). Saved with the document."
+        )
+        self.pixel_mode_toggle.set_active(False)
+        self.pixel_mode_toggle.connect("toggled", self._on_pixel_mode_toggled)
+        mirror_box.append(self.pixel_mode_toggle)
+
         self.mirror_opts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.mirror_opts.set_visible(False)
         mirror_box.append(self.mirror_opts)
@@ -2629,6 +2668,7 @@ class MainWindow(Gtk.ApplicationWindow):
             get_grid=lambda: self.grid,
             get_sun=lambda: self.sun,
             get_tile_wrap=lambda: self.tile_wrap,
+            get_pixel_mode=lambda: self.pixel_mode,
             on_type_editing=self._on_type_editing_changed,
             on_sun_moved=self._on_sun_moved,
             get_rig_view=lambda: self.rig_view,
