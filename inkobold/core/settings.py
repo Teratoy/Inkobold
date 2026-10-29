@@ -6,6 +6,9 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from inkobold.core.autosave import DEFAULT_MINUTES as DEFAULT_AUTOSAVE_MINUTES
+from inkobold.core.autosave import MINUTES_MAX as AUTOSAVE_MINUTES_MAX
+from inkobold.core.autosave import MINUTES_MIN as AUTOSAVE_MINUTES_MIN
 from inkobold.core.history import DEFAULT_HISTORY_STEPS
 from inkobold.core.image_meta import (
     COLOR_DEPTH_CHOICES,
@@ -30,6 +33,9 @@ class AppSettings:
     use_custom_theme: bool = False
     checker_light: bool = False
     history_steps: int = DEFAULT_HISTORY_STEPS
+    # Write unsaved documents to the autosave folder every autosave_minutes (crash recovery)
+    autosave: bool = True
+    autosave_minutes: int = DEFAULT_AUTOSAVE_MINUTES
     default_dpi: int = DEFAULT_DPI
     default_color_depth: int = COLOR_DEPTH_RGBA32
     # When True, one shared color follows you across tools; when False, each tool keeps its own.
@@ -61,6 +67,10 @@ class AppSettings:
             max(0, min(255, int(b))),
         )
         self.history_steps = max(1, min(2000, int(self.history_steps)))
+        self.autosave = bool(self.autosave)
+        self.autosave_minutes = max(
+            AUTOSAVE_MINUTES_MIN, min(AUTOSAVE_MINUTES_MAX, int(self.autosave_minutes))
+        )
         self.default_dpi = max(1, min(1200, int(self.default_dpi)))
         if self.default_color_depth not in {d for d, _ in COLOR_DEPTH_CHOICES}:
             self.default_color_depth = COLOR_DEPTH_RGBA32
@@ -130,6 +140,12 @@ def load_settings() -> AppSettings:
         settings.history_steps = int(data.get("history_steps", DEFAULT_HISTORY_STEPS))
     except (TypeError, ValueError):
         settings.history_steps = DEFAULT_HISTORY_STEPS
+    if "autosave" in data:
+        settings.autosave = bool(data.get("autosave"))
+    try:
+        settings.autosave_minutes = int(data.get("autosave_minutes", DEFAULT_AUTOSAVE_MINUTES))
+    except (TypeError, ValueError):
+        settings.autosave_minutes = DEFAULT_AUTOSAVE_MINUTES
     try:
         settings.default_dpi = int(data.get("default_dpi", DEFAULT_DPI))
     except (TypeError, ValueError):
@@ -193,6 +209,8 @@ def save_settings(settings: AppSettings) -> None:
             "use_custom_theme": bool(settings.use_custom_theme),
             "checker_light": bool(settings.checker_light),
             "history_steps": int(settings.history_steps),
+            "autosave": bool(settings.autosave),
+            "autosave_minutes": int(settings.autosave_minutes),
             "default_dpi": int(settings.default_dpi),
             "default_color_depth": int(settings.default_color_depth),
             "color_follows_tools": bool(settings.color_follows_tools),

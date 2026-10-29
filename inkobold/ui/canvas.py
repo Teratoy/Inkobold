@@ -894,6 +894,11 @@ class Canvas(Gtk.Overlay):
         cr.stroke()
         cr.restore()
 
+    @property
+    def stroke_active(self) -> bool:
+        """A tool is between press and release (pixels mid-edit)."""
+        return self._drawing
+
     def refresh_guides(self) -> None:
         self._catcher.queue_draw()
 

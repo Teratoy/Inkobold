@@ -34,6 +34,27 @@ def config_dir() -> Path:
     return Path.home() / ".config" / flavor.config_name
 
 
+def state_dir() -> Path:
+    """Directory for machine-local state such as autosaves; one per flavor.
+
+    Not the temp dir (Blender's choice): /tmp is often wiped on reboot, which
+    is exactly when a crash autosave is needed.
+    """
+    flavor = current()
+    override = os.environ.get(f"{flavor.env_prefix}_STATE_HOME")
+    if override:
+        return Path(override)
+    if is_windows():
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        if base:
+            return Path(base) / flavor.win_config_name
+        return Path.home() / "AppData" / "Local" / flavor.win_config_name
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg:
+        return Path(xdg) / flavor.config_name
+    return Path.home() / ".local" / "state" / flavor.config_name
+
+
 def data_dir() -> Path:
     """Directory for libraries and other user data (shared by all flavors)."""
     override = os.environ.get("INKOBOLD_DATA_HOME")

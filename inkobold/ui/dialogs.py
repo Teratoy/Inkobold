@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -8,7 +9,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, GObject, Gtk  # noqa: E402
 
 from inkobold.core.flavor import current as current_flavor
 from inkobold.core.image_meta import COLOR_DEPTH_CHOICES, DEFAULT_DPI
@@ -82,9 +83,10 @@ def _attach_shortcut_focus_guard(parent: Gtk.Window, window: Gtk.Window) -> None
 
 
 class StartupDialog(Gtk.Window):
-    """Ask Open or New at launch. YES=new, NO=open, APPLY=open character, CANCEL=quit."""
+    """Ask Open or New at launch. YES=new, NO=open, APPLY=open character,
+    ACCEPT=recover autosaves (offered when *recoverable* > 0), CANCEL=quit."""
 
-    def __init__(self, parent: Gtk.Window) -> None:
+    def __init__(self, parent: Gtk.Window, recoverable: int = 0) -> None:
         super().__init__(title=current_flavor().display_name, transient_for=parent, modal=True)
         _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(360, 140)
@@ -105,6 +107,24 @@ class StartupDialog(Gtk.Window):
             xalign=0,
             wrap=True,
         ))
+        if recoverable > 0:
+            # A previous session ended without quitting (crash / kill): offer its autosaves.
+            recover_row = Gtk.Box(spacing=8)
+            root.append(recover_row)
+            recover_row.append(Gtk.Label(
+                label=(
+                    "1 autosaved document from a session that did not quit normally."
+                    if recoverable == 1
+                    else f"{recoverable} autosaved documents from sessions that did not quit normally."
+                ),
+                xalign=0,
+                wrap=True,
+                hexpand=True,
+            ))
+            recover_btn = Gtk.Button(label="Recover…")
+            recover_btn.set_valign(Gtk.Align.CENTER)
+            recover_btn.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.ACCEPT))
+            recover_row.append(recover_btn)
 
         actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=8)
         root.append(actions)
@@ -541,6 +561,253 @@ class HistoryStepsDialog(Gtk.Window):
     def _on_close(self, *_a) -> bool:
         self._emit(Gtk.ResponseType.CANCEL)
         return True
+
+
+class AutosaveDialog(Gtk.Window):
+    """Turn autosave on / off and choose how often it runs."""
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        enabled: bool,
+        minutes: int,
+        *,
+        minutes_range: tuple[int, int],
+        folder: Path,
+        on_open_folder: Callable[[], None],
+    ) -> None:
+        super().__init__(title="Autosave", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
+        self.set_default_size(380, 200)
+        self.set_resizable(False)
+        self._callback = None
+
+        root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=16,
+            margin_bottom=16,
+            margin_start=16,
+            margin_end=16,
+        )
+        self.set_child(root)
+        root.append(Gtk.Label(
+            label=(
+                "Writes a copy of every document with unsaved changes to the autosave "
+                "folder; your files are not touched. After a crash, File → Recover "
+                "Autosave… brings them back. Quitting normally deletes the copies."
+            ),
+            xalign=0,
+            wrap=True,
+            max_width_chars=48,
+        ))
+        self.enabled_check = Gtk.CheckButton(label="Autosave")
+        self.enabled_check.set_active(bool(enabled))
+        root.append(self.enabled_check)
+
+        row = Gtk.Box(spacing=8)
+        root.append(row)
+        row.append(Gtk.Label(label="Every (minutes)", xalign=0, hexpand=True))
+        lo, hi = minutes_range
+        self.minutes_spin = Gtk.SpinButton.new_with_range(lo, hi, 1)
+        configure_numeric_spin(self.minutes_spin, digits=0)
+        self.minutes_spin.set_value(minutes)
+        self.minutes_spin.set_hexpand(True)
+        row.append(self.minutes_spin)
+        self.enabled_check.bind_property(
+            "active", row, "sensitive", GObject.BindingFlags.SYNC_CREATE
+        )
+
+        actions = Gtk.Box(spacing=8, margin_top=8)
+        root.append(actions)
+        folder_btn = Gtk.Button(label="Open Folder")
+        folder_btn.set_tooltip_text(str(folder))
+        folder_btn.connect("clicked", lambda *_: on_open_folder())
+        actions.append(folder_btn)
+        actions.append(Gtk.Box(hexpand=True))
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
+        apply = Gtk.Button(label="Apply")
+        apply.add_css_class("suggested-action")
+        apply.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.OK))
+        actions.append(cancel)
+        actions.append(apply)
+        self.connect("close-request", self._on_close)
+
+    def enabled(self) -> bool:
+        return bool(self.enabled_check.get_active())
+
+    def minutes(self) -> int:
+        return int(self.minutes_spin.get_value())
+
+    def connect_response(self, callback) -> None:
+        self._callback = callback
+
+    def _emit(self, response: Gtk.ResponseType) -> None:
+        if self._callback:
+            self._callback(self, response)
+        self.destroy()
+
+    def _on_close(self, *_a) -> bool:
+        self._emit(Gtk.ResponseType.CANCEL)
+        return True
+
+
+def _format_size(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{max(1, round(size / 1024))} KB"
+
+
+class RecoverAutosaveDialog(Gtk.Window):
+    """List autosaves left by sessions that did not quit; open or delete them.
+
+    *items* are ``core.autosave.Recoverable``. ``on_open(item) -> bool`` opens one
+    in a tab (True removes its row); ``on_delete(item)`` deletes its file.
+    ``on_closed()`` runs once the dialog is gone.
+    """
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        items: list,
+        *,
+        on_open: Callable[[Any], bool],
+        on_delete: Callable[[Any], None],
+        on_open_folder: Callable[[], None],
+        on_closed: Optional[Callable[[], None]] = None,
+    ) -> None:
+        super().__init__(title="Recover Autosave", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
+        self.set_default_size(560, 360)
+        self._on_open = on_open
+        self._on_delete = on_delete
+        self._on_closed = on_closed
+        self._rows: dict[int, Gtk.Widget] = {}
+        self._items = list(items)
+
+        root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=16,
+            margin_bottom=16,
+            margin_start=16,
+            margin_end=16,
+        )
+        self.set_child(root)
+        root.append(Gtk.Label(
+            label=(
+                "These documents were autosaved by a session that did not quit normally. "
+                "Open one to keep working on it; saving writes to its original file."
+            ),
+            xalign=0,
+            wrap=True,
+        ))
+
+        self._list = Gtk.ListBox()
+        self._list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._list.add_css_class("boxed-list")
+        self._list.set_placeholder(Gtk.Label(label="Nothing to recover.", margin_top=24, margin_bottom=24))
+        scroller = Gtk.ScrolledWindow(vexpand=True)
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_child(self._list)
+        root.append(scroller)
+        for item in self._items:
+            self._add_row(item)
+
+        actions = Gtk.Box(spacing=8)
+        root.append(actions)
+        folder_btn = Gtk.Button(label="Open Folder")
+        folder_btn.connect("clicked", lambda *_: on_open_folder())
+        actions.append(folder_btn)
+        self._delete_all_btn = Gtk.Button(label="Delete All…")
+        self._delete_all_btn.add_css_class("destructive-action")
+        self._delete_all_btn.connect("clicked", self._on_delete_all)
+        actions.append(self._delete_all_btn)
+        actions.append(Gtk.Box(hexpand=True))
+        close = Gtk.Button(label="Close")
+        close.connect("clicked", lambda *_: self.close())
+        actions.append(close)
+        self._sync_buttons()
+        self.connect("close-request", self._on_close)
+
+    def _add_row(self, item) -> None:
+        row = Gtk.Box(spacing=8, margin_top=6, margin_bottom=6, margin_start=8, margin_end=8)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+        title = Gtk.Label(label=item.title, xalign=0)
+        title.add_css_class("heading")
+        title.set_ellipsize(3)  # Pango.EllipsizeMode.END
+        text.append(title)
+        where = str(item.source) if item.source is not None else "Never saved"
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(item.saved_at))
+        detail = Gtk.Label(label=f"{when} · {_format_size(item.size)}", xalign=0)
+        detail.add_css_class("dim-label")
+        text.append(detail)
+        source = Gtk.Label(label=where, xalign=0)
+        source.add_css_class("dim-label")
+        source.set_ellipsize(1)  # Pango.EllipsizeMode.START keeps the file name visible
+        source.set_tooltip_text(where)
+        text.append(source)
+        row.append(text)
+        open_btn = Gtk.Button(label="Open")
+        open_btn.add_css_class("suggested-action")
+        open_btn.set_valign(Gtk.Align.CENTER)
+        open_btn.connect("clicked", lambda *_: self._open(item))
+        delete_btn = Gtk.Button(label="Delete")
+        delete_btn.set_valign(Gtk.Align.CENTER)
+        delete_btn.set_tooltip_text("Delete this autosave for good")
+        delete_btn.connect("clicked", lambda *_: self._delete(item))
+        row.append(delete_btn)
+        row.append(open_btn)
+        self._list.append(row)
+        self._rows[id(item)] = row.get_parent()
+
+    def _remove_row(self, item) -> None:
+        row = self._rows.pop(id(item), None)
+        if row is not None:
+            self._list.remove(row)
+        self._items = [i for i in self._items if i is not item]
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        self._delete_all_btn.set_sensitive(bool(self._items))
+
+    def _open(self, item) -> None:
+        if self._on_open(item):
+            self._remove_row(item)
+            if not self._items:
+                self.close()
+
+    def _delete(self, item) -> None:
+        self._on_delete(item)
+        self._remove_row(item)
+
+    def _on_delete_all(self, *_a) -> None:
+        alert = Gtk.AlertDialog()
+        n = len(self._items)
+        alert.set_message(f"Delete {n} autosave{'s' if n != 1 else ''}?")
+        alert.set_detail("The copies are removed for good. Your own files are not affected.")
+        alert.set_buttons(["Cancel", "Delete All"])
+        alert.set_cancel_button(0)
+        alert.set_default_button(0)
+
+        def done(dlg, result) -> None:
+            try:
+                choice = dlg.choose_finish(result)
+            except GLib.Error:
+                return
+            if choice != 1:
+                return
+            for item in list(self._items):
+                self._delete(item)
+
+        alert.choose(self, None, done)
+
+    def _on_close(self, *_a) -> bool:
+        callback, self._on_closed = self._on_closed, None
+        if callback is not None:
+            GLib.idle_add(lambda: (callback(), False)[1])
+        return False
 
 
 class VisibleToolsDialog(Gtk.Window):

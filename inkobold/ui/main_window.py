@@ -49,6 +49,7 @@ from inkobold.core.effects import (
     threshold,
 )
 from inkobold.core.assets import asset_root, export_folder
+from inkobold.core import autosave
 from inkobold.core import character as ch
 from inkobold.core.flavor import current as current_flavor
 from inkobold.core.grid import GridOverlay
@@ -88,6 +89,7 @@ from inkobold.ui.canvas import Canvas
 from inkobold.ui.color_picker import ColorSelectButton, rgba_to_tuple, tuple_to_rgba
 from inkobold.ui.palette_panel import PalettePanel
 from inkobold.ui.dialogs import (
+    AutosaveDialog,
     NewCharacterDialog,
     CaptureShortcutDialog,
     ColorDepthDialog,
@@ -101,6 +103,7 @@ from inkobold.ui.dialogs import (
     HistoryStepsDialog,
     NewFileDialog,
     QuitConfirmDialog,
+    RecoverAutosaveDialog,
     SunSettingsDialog,
     ShortcutsDialog,
     StartupDialog,
@@ -149,6 +152,9 @@ class _DocTab:
     # "active" CSS class — avoids redundant GTK property sets on every event.
     shown: Optional[tuple[str, str]] = field(default=None, repr=False)
     shown_active: Optional[bool] = field(default=None, repr=False)
+    # This tab's crash-recovery copy (core.autosave) and the document state it holds
+    autosave_path: Optional[Path] = field(default=None, repr=False)
+    autosave_mark: Optional[tuple] = field(default=None, repr=False)
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -183,6 +189,15 @@ class MainWindow(Gtk.ApplicationWindow):
         # requested (a later save can never be overwritten by an earlier one).
         self._save_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inkobold-save")
         self._save_futures: list[Future] = []
+        # Crash-recovery copies of unsaved documents (core.autosave); None if the
+        # autosave folder can't be created.
+        try:
+            self._autosave: Optional[autosave.Session] = autosave.Session.start()
+        except OSError as exc:
+            print(f"autosave disabled: {exc}", file=sys.stderr)
+            self._autosave = None
+        self._autosave_timer_id: Optional[int] = None
+        self._autosave_warned = False
         self._window_mode = "borderless"
         self._anim_playing = False
         self._anim_timer_id: Optional[int] = None
@@ -226,6 +241,7 @@ class MainWindow(Gtk.ApplicationWindow):
         GLib.idle_add(self._maybe_prompt_startup)
 
         GLib.timeout_add_seconds(2, self._refresh_status)
+        self._schedule_autosave()
 
     def _build_actions(self) -> None:
         mapping = {
@@ -235,6 +251,8 @@ class MainWindow(Gtk.ApplicationWindow):
             "save_as": self.action_save_as,
             "new_character": self.action_new_character,
             "open_character": self.action_open_character,
+            "recover_autosave": self.action_recover_autosave,
+            "memory_autosave": self.action_memory_autosave,
             "import_image": self.action_import_image,
             "export": self.action_export,
             "export_layer": self.action_export_layer,
@@ -664,6 +682,8 @@ class MainWindow(Gtk.ApplicationWindow):
                     doc.path = old_path
                 doc.dirty = True
                 self._alert("Save failed", f"{job.target}\n{error}\n\nThe existing file was not changed.")
+            elif not doc.dirty:
+                self._drop_autosave_for(doc)
             self._set_status()
             if on_done is not None:
                 on_done(error is None)
@@ -1797,6 +1817,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if current_flavor().character_rig:
             file_menu.append("New Character…", "win.new_character")
             file_menu.append("Open Character…", "win.open_character")
+        file_menu.append("Recover Autosave…", "win.recover_autosave")
         file_menu.append("Export…", "win.export")
         file_menu.append("Export Selected Layer…", "win.export_layer")
         file_menu.append("Export Separated Layers…", "win.export_layers")
@@ -1928,6 +1949,7 @@ class MainWindow(Gtk.ApplicationWindow):
         settings_menu.append_submenu("Theme", theme_menu)
         memory_menu = Gio.Menu()
         memory_menu.append("Undo/Redo Steps…", "win.memory_steps")
+        memory_menu.append("Autosave…", "win.memory_autosave")
         settings_menu.append_submenu("Memory", memory_menu)
 
         image_menu = Gio.Menu()
@@ -4053,6 +4075,7 @@ class MainWindow(Gtk.ApplicationWindow):
         was_active = index == self._active_tab
         if was_active:
             self._stash_active_view()
+        self._drop_autosave(self._tabs[index])
         self._tabs.pop(index)
         if not self._tabs:
             self._active_tab = -1
@@ -4799,6 +4822,163 @@ class MainWindow(Gtk.ApplicationWindow):
             tab.history.set_max_steps(steps)
         self._persist_settings()
 
+    def action_memory_autosave(self, *_a) -> None:
+        dlg = AutosaveDialog(
+            self,
+            self.app_settings.autosave,
+            self.app_settings.autosave_minutes,
+            minutes_range=(autosave.MINUTES_MIN, autosave.MINUTES_MAX),
+            folder=autosave.autosave_root(),
+            on_open_folder=lambda: open_in_file_manager(autosave.autosave_root()),
+        )
+        dlg.connect_response(self._on_memory_autosave_response)
+        dlg.present()
+
+    def _on_memory_autosave_response(self, dlg: AutosaveDialog, response: int) -> None:
+        if response != Gtk.ResponseType.OK:
+            return
+        self.app_settings.autosave = dlg.enabled()
+        self.app_settings.autosave_minutes = dlg.minutes()
+        self._persist_settings()
+        self._schedule_autosave()
+
+    # --- autosave (core.autosave; modelled on Blender's Auto Save) ---
+    def _schedule_autosave(self, seconds: Optional[int] = None) -> None:
+        """(Re)start the autosave timer: the set interval, or *seconds* for a retry."""
+        if self._autosave_timer_id is not None:
+            GLib.source_remove(self._autosave_timer_id)
+            self._autosave_timer_id = None
+        if self._autosave is None or not self.app_settings.autosave:
+            return
+        if seconds is None:
+            seconds = int(self.app_settings.autosave_minutes) * 60
+        self._autosave_timer_id = GLib.timeout_add_seconds(seconds, self._on_autosave_timer)
+
+    def _autosave_busy(self) -> bool:
+        """Mid-stroke or previewing an effect: the pixels are not a state worth keeping."""
+        return self.canvas.stroke_active or self._effect_session is not None
+
+    def _on_autosave_timer(self) -> bool:
+        self._autosave_timer_id = None
+        if self._autosave_busy():
+            # Like Blender during a modal operator: try again shortly.
+            self._schedule_autosave(autosave.BUSY_RETRY_SECONDS)
+            return False
+        self._autosave_now()
+        self._schedule_autosave()
+        return False
+
+    def _autosave_now(self) -> None:
+        """Queue an autosave of every tab whose document changed since its last one."""
+        session = self._autosave
+        if session is None:
+            return
+        for tab in list(self._tabs):
+            doc = tab.document
+            if not doc.dirty:
+                self._drop_autosave(tab)  # saved since the last autosave
+                continue
+            mark = autosave.fingerprint(doc)
+            if mark == tab.autosave_mark:
+                continue
+            title = self._tab_display_name(doc)
+            if tab.autosave_path is None:
+                tab.autosave_path = session.new_path(title)
+            if doc is self.document:
+                doc.workspace = self._capture_workspace()
+            try:
+                job = autosave.prepare(doc, tab.autosave_path, title)
+            except Exception as exc:
+                self._autosave_failed(exc)
+                continue
+            self._submit_autosave(tab, job, mark)
+
+    def _submit_autosave(self, tab: _DocTab, job, mark: tuple) -> None:
+        def finish(error: Optional[BaseException]) -> bool:
+            self._save_futures = [f for f in self._save_futures if not f.done()]
+            if not any(t is tab for t in self._tabs) or not tab.document.dirty:
+                # Closed or saved while the copy was being written.
+                self._drop_autosave(tab)
+            elif error is not None:
+                self._autosave_failed(error)
+            else:
+                tab.autosave_mark = mark
+            return False
+
+        def work() -> None:
+            error: Optional[BaseException] = None
+            try:
+                job.write()
+            except Exception as exc:  # reported on the main thread
+                error = exc
+            GLib.idle_add(finish, error)
+
+        # Same single writer as real saves, so the two never interleave.
+        self._save_futures.append(self._save_executor.submit(work))
+
+    def _autosave_failed(self, error: BaseException) -> None:
+        print(f"autosave failed: {error}", file=sys.stderr)
+        if self._autosave_warned:
+            return
+        self._autosave_warned = True
+        self._alert(
+            "Autosave failed",
+            f"{error}\n\nAutosave keeps trying. Your documents and files are not affected.",
+        )
+
+    def _drop_autosave(self, tab: _DocTab) -> None:
+        autosave.discard(tab.autosave_path)
+        tab.autosave_path = None
+        tab.autosave_mark = None
+
+    def _drop_autosave_for(self, doc: Document) -> None:
+        idx = self._tab_index_of(doc)
+        if idx is not None:
+            self._drop_autosave(self._tabs[idx])
+
+    def action_recover_autosave(self, *_a) -> None:
+        self._show_recover_dialog()
+
+    def _show_recover_dialog(self, from_startup: bool = False) -> None:
+        def closed() -> None:
+            if from_startup and not self._tabs:
+                self._prompt_startup()
+
+        dlg = RecoverAutosaveDialog(
+            self,
+            autosave.find_recoverable(),
+            on_open=self._recover_autosave,
+            on_delete=autosave.delete_recoverable,
+            on_open_folder=lambda: open_in_file_manager(autosave.autosave_root()),
+            on_closed=closed,
+        )
+        dlg.present()
+
+    def _recover_autosave(self, item: autosave.Recoverable) -> bool:
+        """Open a crashed session's autosave as an unsaved tab; True when it opened."""
+        try:
+            doc = autosave.open_recoverable(item.path, item.info)
+        except Exception as exc:
+            self._alert("Could not recover the autosave", f"{item.path}\n{exc}")
+            return False
+        try:
+            # Keep the copy (now this session's) until the document is saved or closed.
+            path: Optional[Path] = autosave.adopt(item, self._autosave)
+        except OSError:
+            path = None
+        self._startup_pending = False
+        self._open_at_startup = False
+        if doc.character is not None:
+            self.rig_view.show = True
+        has_view = isinstance((doc.workspace or {}).get("view"), dict)
+        self._add_tab(doc, History(max_steps=self.app_settings.history_steps), fit=not has_view)
+        self._apply_workspace(doc.workspace, restore_view=has_view)
+        if path is not None and self._autosave is not None and path.parent == self._autosave.folder:
+            tab = self._tabs[self._active_tab]
+            tab.autosave_path = path
+            tab.autosave_mark = autosave.fingerprint(doc)
+        return True
+
     def _rebuild_shortcuts_submenu(self) -> None:
         menu = getattr(self, "_shortcuts_menu", None)
         if menu is None:
@@ -4968,7 +5148,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _prompt_startup(self) -> bool:
         self._startup_pending = False
-        dlg = StartupDialog(self)
+        dlg = StartupDialog(self, recoverable=len(autosave.find_recoverable()))
         dlg.connect_response(self._on_startup_response)
         dlg.present()
         return False
@@ -4986,6 +5166,9 @@ class MainWindow(Gtk.ApplicationWindow):
         if response == Gtk.ResponseType.APPLY:
             self._open_at_startup = True
             self.action_open_character()
+            return
+        if response == Gtk.ResponseType.ACCEPT:
+            self._show_recover_dialog(from_startup=True)
             return
         self._do_quit()
 
@@ -5072,6 +5255,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if notes:
             self._alert(f"Saved {doc.character.name}", "\n".join(notes))
+        self._drop_autosave_for(doc)
         self._set_status()
         self._sync_rig_panel()
         if on_done is not None:
@@ -5343,6 +5527,10 @@ class MainWindow(Gtk.ApplicationWindow):
     def _do_quit(self) -> None:
         # Never exit with a save half-written (the atomic rename would be lost).
         self._wait_for_saves()
+        if self._autosave is not None:
+            # A normal quit: every document was saved or deliberately discarded.
+            self._autosave.close(remove=True)
+            self._autosave = None
         self._allow_close = True
         self.shutdown_input()
         app = self.get_application()
@@ -5354,6 +5542,13 @@ class MainWindow(Gtk.ApplicationWindow):
     def request_reload(self, *_a) -> None:
         """Restart the process so code changes take effect; debug_mode stays in settings."""
         self._persist_settings()
+        if self._autosave is not None:
+            # Reload doesn't ask about unsaved work: autosave it now so the restarted
+            # process can recover it.
+            self._autosave_now()
+            self._wait_for_saves()
+            self._autosave.close(remove=not any(t.document.dirty for t in self._tabs))
+            self._autosave = None
         self.shutdown_input()
         argv = [sys.executable, "-m", current_flavor().module, *sys.argv[1:]]
         if sys.platform == "win32":

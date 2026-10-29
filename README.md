@@ -6,7 +6,7 @@ Version **0.1.0** · Python **≥3.11** · App id `trinkets.inkobold`
 
 ## Features
 
-- **File** — Multi-document tabs; New File (pixel size), Open, Save (`.inkobold` multilayer ZIP), Export, Export Selected Layer, Export Separated Layers, Import Image as Layer
+- **File** — Multi-document tabs; New File (pixel size), Open, Save (`.inkobold` multilayer ZIP), Export, Export Selected Layer, Export Separated Layers, Import Image as Layer; Autosave (every 2 min by default, to a separate folder) with Recover Autosave after a crash
 - **Layers** — RGBA layers (8 or 16 bpc), visibility, opacity, offsets, GPU composite; add / duplicate / rename / delete / merge down / merge visible / merge all
 - **Animation** — Frames with FPS playback; onion-skin of the previous frame; export GIF or PNG sequence
 - **Colors** — Primary / secondary color pair (`X` swaps; Gradient end, maze corridors and puzzle pieces use the secondary), shared across tools or per tool; palette swatches from Libraries → Palettes in the side panel and the color picker
@@ -16,7 +16,7 @@ Version **0.1.0** · Python **≥3.11** · App id `trinkets.inkobold`
 - **Input** — GDK drawing path; on Linux, optional libinput poll + libwacom tablet identification
 - **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid, Use / Show / Deactivate Sun (draggable light for 3D / Metal / Milk; deactivate restores classic lighting), Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
 - **Edit** — Undo / Redo; stroke Symmetry (Mirror or Radial, 1–16, movable hub, H / V / diagonal; Linear Array with free spacing and direction); Flip / Rotate layer; Crop Canvas (live size; optional selection bounds)
-- **Settings** — Theme, Memory (undo steps), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (rebind), Debug Mode
+- **Settings** — Theme, Memory (undo steps, autosave), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (rebind), Debug Mode
 
 ## Documentation
 

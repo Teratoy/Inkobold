@@ -704,6 +704,13 @@ class Document:
         target = Path(path or self.path or "untitled.inkobold")
         if target.suffix.lower() not in {".inkobold", ".scribbler", ".zip"}:
             target = target.with_suffix(".inkobold")
+        job = self.snapshot(target)
+        self.path = target
+        self.dirty = False
+        return job
+
+    def snapshot(self, target: Path) -> SaveJob:
+        """A SaveJob writing the document to *target* exactly; ``path`` / ``dirty`` untouched."""
         self._sync_frame_from_layers()
         use_u16 = storage_dtype(self.color_depth) == np.dtype(np.uint16)
         ext = "npy" if use_u16 else "png"
@@ -747,9 +754,7 @@ class Document:
                 if fi == self.current_frame_index:
                     meta["layers"].append(dict(entry))
             meta["frames"].append(frame_meta)
-        self.path = target
-        self.dirty = False
-        return SaveJob(target, meta, files)
+        return SaveJob(Path(target), meta, files)
 
     def save(self, path: Path | None = None) -> Path:
         """Save synchronously (atomic). On failure the document stays dirty."""
