@@ -46,6 +46,7 @@ class Canvas(Gtk.Overlay):
         on_sun_moved: Callable[[], None] | None = None,
         get_rig_view: Callable[[], RigView] | None = None,
         on_rig_changed: Callable[[], None] | None = None,
+        on_mirror_changed: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self.set_hexpand(True)
@@ -66,6 +67,7 @@ class Canvas(Gtk.Overlay):
         self._on_sun_moved = on_sun_moved
         self._get_rig_view = get_rig_view or (lambda: RigView(show=False))
         self._on_rig_changed = on_rig_changed
+        self._on_mirror_changed = on_mirror_changed
         self.renderer = GpuRenderer()
         self._needs_fit = True
         self._panning = False
@@ -75,7 +77,7 @@ class Canvas(Gtk.Overlay):
         self._pan_oy = 0.0
         self._drawing = False
         self._dragging_sun = False
-        self._dragging_mirror: str | None = None  # "center" | "rotate"
+        self._dragging_mirror: str | None = None  # "center" | "rotate" | "step"
         self._mirror_angle0 = 0.0
         self._mirror_pointer_angle0 = 0.0
         self._dragging_grid: str | None = None  # "x" | "y" | "both"
@@ -382,13 +384,18 @@ class Canvas(Gtk.Overlay):
         return self.renderer.doc_to_screen(cx, cy)
 
     def _hit_mirror_guides(self, screen_x: float, screen_y: float) -> str | None:
-        """Return ``center``, ``rotate``, or None for a symmetry-guide hit."""
+        """Return ``center``, ``rotate``, ``step``, or None for a symmetry-guide hit."""
         mod = self._get_mirror()
         if not mod.enabled:
             return None
         doc = self._get_document()
         if doc is None:
             return None
+        if mod.mode == "linear":
+            # Step handle wins over the hub so a tiny spacing stays editable.
+            ax, ay = self.renderer.doc_to_screen(*mod.array_handle(doc.width, doc.height))
+            if (screen_x - ax) ** 2 + (screen_y - ay) ** 2 <= 10.0 ** 2:
+                return "step"
         hx, hy = self._mirror_center_screen(doc)
         if (screen_x - hx) ** 2 + (screen_y - hy) ** 2 <= 14.0 ** 2:
             return "center"
@@ -409,8 +416,11 @@ class Canvas(Gtk.Overlay):
         if kind == "center":
             self._move_mirror_center_to_screen(screen_x, screen_y)
             return
+        if kind == "step":
+            self._set_mirror_step_to_screen(screen_x, screen_y)
+            return
         hx, hy = self._mirror_center_screen(doc)
-        self._mirror_angle0 = float(mod.angle)
+        self._mirror_angle0 = mod.guide_angle
         self._mirror_pointer_angle0 = math.atan2(screen_y - hy, screen_x - hx)
         self.refresh_guides()
 
@@ -429,10 +439,21 @@ class Canvas(Gtk.Overlay):
         hx, hy = self._mirror_center_screen(doc)
         ang = math.atan2(screen_y - hy, screen_x - hx)
         delta = ang - self._mirror_pointer_angle0
-        mod = self._get_mirror()
-        mod.angle = self._mirror_angle0 + delta
-        mod.clamp()
+        self._get_mirror().guide_angle = self._mirror_angle0 + delta
         self.refresh_guides()
+        if self._on_mirror_changed is not None:
+            self._on_mirror_changed()
+
+    def _set_mirror_step_to_screen(self, screen_x: float, screen_y: float) -> None:
+        """Linear Array: one interval ends under the pointer (free distance + direction)."""
+        doc = self._get_document()
+        if doc is None:
+            return
+        dx, dy = self.renderer.screen_to_doc(screen_x, screen_y)
+        self._get_mirror().set_array_step_to(dx, dy, float(doc.width), float(doc.height))
+        self.refresh_guides()
+        if self._on_mirror_changed is not None:
+            self._on_mirror_changed()
 
     def _update_mirror_drag(self, screen_x: float, screen_y: float) -> None:
         kind = self._dragging_mirror
@@ -440,6 +461,8 @@ class Canvas(Gtk.Overlay):
             self._move_mirror_center_to_screen(screen_x, screen_y)
         elif kind == "rotate":
             self._rotate_mirror_to_screen(screen_x, screen_y)
+        elif kind == "step":
+            self._set_mirror_step_to_screen(screen_x, screen_y)
 
     def _end_mirror_drag(self) -> None:
         self._dragging_mirror = None
@@ -840,6 +863,21 @@ class Canvas(Gtk.Overlay):
         # Hub handle — Alt-drag to move the symmetry center.
         hx, hy = self._mirror_center_screen(doc)
         cr.set_dash([])
+        if mod.mode == "linear":
+            # Ticks at every copy offset; the first interval is the step handle.
+            stx, sty = mod.array_step()
+            cr.set_source_rgba(0.75, 0.85, 1.0, 0.7)
+            for k in range(2, mod.array_count):
+                tx, ty = self.renderer.doc_to_screen(
+                    mod.cx_norm * doc.width + stx * k, mod.cy_norm * doc.height + sty * k
+                )
+                cr.arc(tx, ty, 2.5, 0, math.tau)
+                cr.fill()
+            ax, ay = self.renderer.doc_to_screen(*mod.array_handle(doc.width, doc.height))
+            cr.set_source_rgba(0.85, 0.92, 1.0, 0.95)
+            cr.set_line_width(1.5)
+            cr.rectangle(ax - 4.5, ay - 4.5, 9.0, 9.0)
+            cr.stroke()
         cr.set_source_rgba(0.75, 0.85, 1.0, 0.35)
         cr.arc(hx, hy, 7.0, 0, math.tau)
         cr.fill()

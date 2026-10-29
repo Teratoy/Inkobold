@@ -39,7 +39,7 @@ Effects: CPU (NumPy). Flora: GPU attempt then CPU.
 | `core/shortcuts.py` | Defaults + rebinds |
 | `core/settings.py` | Persistence |
 | `core/paths.py` | XDG / APPDATA resolution |
-| `core/mirror.py` | Stroke Symmetry (Mirror / Radial) |
+| `core/mirror.py` | Stroke Symmetry (Mirror / Radial / Linear Array) |
 | `core/damage.py` | Dirty-rect tracking: freehand tools report the rectangle they paint so only that part of the layer texture is re-uploaded (`INKOBOLD_VERIFY_DAMAGE=1` checks it) |
 | `gpu/renderer.py` | OpenGL composite |
 | `ui/canvas.py` | GLArea + input routing; sun / symmetry guide drag |

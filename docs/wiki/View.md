@@ -32,8 +32,11 @@ Live stroke symmetry around a movable hub (defaults to canvas center). Toggle **
 |------|----------|-------|
 | **Mirror** | Reflect across equally spaced axes (dihedral / kaleidoscope). Odd branches flip handedness. | **Axes** 1–16 |
 | **Radial** | Rotate same-facing copies (cyclic / pinwheel). No flips. | **Copies** 1–16 |
+| **Linear Array** | Repeat same-facing copies of the stroke at regular intervals along a free direction. No flips. | **Copies** 1–64 |
 
-**Orientation** (horizontal / vertical / diagonal) snaps the first-axis / first-ray angle. **Alt-drag** the hub to move the center; **Alt-drag** a guide line to rotate freely. **Reset Guides** restores hub to center and Horizontal. Hub position and angle persist in the document workspace.
+**Linear Array** replaces Orientation / Axes with **Copies** (instances, the drawn stroke included), **Spacing (px)** and **Direction (°)** (0° = right, 90° = up). Copies follow the pointer; the hub only anchors the guide. **Alt-drag** the square step handle (one interval from the hub) to set distance and direction together, or the guide line to rotate the heading.
+
+**Orientation** (horizontal / vertical / diagonal) snaps the first-axis / first-ray angle. **Alt-drag** the hub to move the center; **Alt-drag** a guide line to rotate freely. **Reset Guides** restores hub to center and Horizontal. Hub position, angle and array settings persist in the document workspace.
 
 ## Sun
 

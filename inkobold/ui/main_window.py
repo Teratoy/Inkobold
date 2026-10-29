@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import sys
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -68,7 +69,7 @@ from inkobold.core.libraries import (
     list_system_fonts,
     open_in_file_manager,
 )
-from inkobold.core.mirror import MODES, ORIENTATIONS, MirrorModifier
+from inkobold.core.mirror import ARRAY_COUNT_MAX, ARRAY_SPACING_MAX, MODES, ORIENTATIONS, MirrorModifier
 from inkobold.core.settings import default_theme_rgb, load_settings, save_settings
 from inkobold.core.shortcuts import (
     DEFAULT_SHORTCUTS,
@@ -436,6 +437,9 @@ class MainWindow(Gtk.ApplicationWindow):
                 "angle": float(self.mirror.angle),
                 "cx_norm": float(self.mirror.cx_norm),
                 "cy_norm": float(self.mirror.cy_norm),
+                "array_count": int(self.mirror.array_count),
+                "array_spacing": float(self.mirror.array_spacing),
+                "array_direction": float(self.mirror.array_direction),
             },
             "grid": {
                 "enabled": bool(self.grid.enabled),
@@ -495,6 +499,12 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.mirror.cy_norm = float(mirror["cy_norm"])
             except (TypeError, ValueError):
                 pass
+            for key in ("array_count", "array_spacing", "array_direction"):
+                if key in mirror:
+                    try:
+                        setattr(self.mirror, key, float(mirror[key]))
+                    except (TypeError, ValueError):
+                        pass
             self.mirror.clamp()
             if hasattr(self, "mirror_toggle"):
                 self.mirror_toggle.set_active(self.mirror.enabled)
@@ -514,6 +524,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.mirror_orient_dropdown.set_selected(idx)
             if hasattr(self, "mirror_axes_spin"):
                 self.mirror_axes_spin.set_value(self.mirror.axes)
+            self._sync_mirror_array_ui()
             self._update_mirror_mode_ui()
             if hasattr(self, "canvas"):
                 self.canvas.refresh_guides()
@@ -1378,6 +1389,18 @@ class MainWindow(Gtk.ApplicationWindow):
         if not hasattr(self, "mirror_axes_label"):
             return
         radial = self.mirror.mode == "radial"
+        linear = self.mirror.mode == "linear"
+        # Linear Array has its own Copies / Spacing / Direction block.
+        for widget in (
+            getattr(self, "mirror_orient_label", None),
+            getattr(self, "mirror_orient_dropdown", None),
+            self.mirror_axes_label,
+            getattr(self, "mirror_axes_spin", None),
+        ):
+            if widget is not None:
+                widget.set_visible(not linear)
+        if hasattr(self, "mirror_array_opts"):
+            self.mirror_array_opts.set_visible(linear)
         self.mirror_axes_label.set_text("Copies" if radial else "Axes")
         if hasattr(self, "mirror_axes_spin"):
             if radial:
@@ -1423,9 +1446,35 @@ class MainWindow(Gtk.ApplicationWindow):
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()
 
+    def _sync_mirror_array_ui(self) -> None:
+        """Push Linear Array values into the panel (after a canvas drag or load)."""
+        if not hasattr(self, "mirror_array_count_spin"):
+            return
+        self._syncing_mirror_ui = True
+        try:
+            self.mirror_array_count_spin.set_value(self.mirror.array_count)
+            self.mirror_array_spacing_spin.set_value(self.mirror.array_spacing)
+            # Panel shows math-style degrees: 0° = right, 90° = up (screen Y is down).
+            deg = -math.degrees(self.mirror.array_direction)
+            deg = (deg + 180.0) % 360.0 - 180.0
+            self.mirror_array_direction_spin.set_value(deg)
+        finally:
+            self._syncing_mirror_ui = False
+
+    def _on_mirror_array_changed(self, *_a) -> None:
+        if getattr(self, "_syncing_mirror_ui", False):
+            return
+        self.mirror.array_count = int(self.mirror_array_count_spin.get_value())
+        self.mirror.array_spacing = float(self.mirror_array_spacing_spin.get_value())
+        self.mirror.array_direction = -math.radians(self.mirror_array_direction_spin.get_value())
+        self.mirror.clamp()
+        if hasattr(self, "canvas"):
+            self.canvas.refresh_guides()
+
     def _on_mirror_reset(self, *_a) -> None:
-        """Reset hub to center and angle to Horizontal (Mirror and Radial)."""
+        """Reset hub to center and angle to Horizontal (all modes)."""
         self.mirror.reset_guides()
+        self._sync_mirror_array_ui()
         if hasattr(self, "mirror_orient_dropdown"):
             idx = next(
                 (i for i, (k, _) in enumerate(ORIENTATIONS) if k == self.mirror.orientation),
@@ -2396,7 +2445,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mirror_toggle = Gtk.CheckButton(label="Symmetry")
         self.mirror_toggle.set_tooltip_text(
             "Live symmetry while drawing. Alt-drag the hub to move the center; "
-            "Alt-drag a guide line to rotate. Mirror reflects; Radial rotates copies."
+            "Alt-drag a guide line to rotate. Mirror reflects; Radial rotates copies; "
+            "Linear Array repeats the stroke at a set distance and direction."
         )
         self.mirror_toggle.connect("toggled", self._on_mirror_toggled)
         mirror_box.append(self.mirror_toggle)
@@ -2421,12 +2471,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mirror_mode_dropdown.set_hexpand(True)
         self.mirror_mode_dropdown.set_tooltip_text(
             "Mirror: reflect across axes (kaleidoscope). "
-            "Radial: rotate same-facing copies (pinwheel)."
+            "Radial: rotate same-facing copies (pinwheel). "
+            "Linear Array: repeat copies at regular intervals along a direction."
         )
         self.mirror_mode_dropdown.connect("notify::selected", self._on_mirror_mode_changed)
         self.mirror_opts.append(self.mirror_mode_dropdown)
 
-        self.mirror_opts.append(Gtk.Label(label="Orientation", xalign=0))
+        self.mirror_orient_label = Gtk.Label(label="Orientation", xalign=0)
+        self.mirror_opts.append(self.mirror_orient_label)
         orient_labels = [label for _key, label in ORIENTATIONS]
         self.mirror_orient_dropdown = Gtk.DropDown(model=Gtk.StringList.new(orient_labels))
         self.mirror_orient_dropdown.set_hexpand(True)
@@ -2450,10 +2502,48 @@ class MainWindow(Gtk.ApplicationWindow):
         self.mirror_axes_spin.connect("value-changed", self._on_mirror_axes_changed)
         self.mirror_opts.append(self.mirror_axes_spin)
 
+        self.mirror_array_opts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.mirror_array_opts.set_visible(False)
+        self.mirror_opts.append(self.mirror_array_opts)
+        self.mirror_array_opts.append(Gtk.Label(label="Copies", xalign=0))
+        self.mirror_array_count_spin = Gtk.SpinButton.new_with_range(1, ARRAY_COUNT_MAX, 1)
+        configure_numeric_spin(self.mirror_array_count_spin, digits=0)
+        self.mirror_array_count_spin.set_hexpand(True)
+        self.mirror_array_count_spin.set_tooltip_text(
+            "Total instances along the array, the stroke you draw included."
+        )
+        self.mirror_array_opts.append(self.mirror_array_count_spin)
+        self.mirror_array_opts.append(Gtk.Label(label="Spacing (px)", xalign=0))
+        self.mirror_array_spacing_spin = Gtk.SpinButton.new_with_range(0.0, ARRAY_SPACING_MAX, 1.0)
+        configure_numeric_spin(self.mirror_array_spacing_spin, digits=1)
+        self.mirror_array_spacing_spin.set_hexpand(True)
+        self.mirror_array_spacing_spin.set_tooltip_text(
+            "Distance between neighboring copies, in document pixels. "
+            "Alt-drag the square handle on the canvas to set distance and direction together."
+        )
+        self.mirror_array_opts.append(self.mirror_array_spacing_spin)
+        self.mirror_array_opts.append(Gtk.Label(label="Direction (°)", xalign=0))
+        self.mirror_array_direction_spin = Gtk.SpinButton.new_with_range(-180.0, 180.0, 1.0)
+        configure_numeric_spin(self.mirror_array_direction_spin, digits=1)
+        self.mirror_array_direction_spin.set_wrap(True)
+        self.mirror_array_direction_spin.set_hexpand(True)
+        self.mirror_array_direction_spin.set_tooltip_text(
+            "Heading of the array: 0° = right, 90° = up, -90° = down. "
+            "Alt-drag the guide line to rotate it."
+        )
+        self.mirror_array_opts.append(self.mirror_array_direction_spin)
+        self._sync_mirror_array_ui()
+        for spin in (
+            self.mirror_array_count_spin,
+            self.mirror_array_spacing_spin,
+            self.mirror_array_direction_spin,
+        ):
+            spin.connect("value-changed", self._on_mirror_array_changed)
+
         reset_btn = Gtk.Button(label="Reset Guides")
         reset_btn.set_tooltip_text(
-            "Move the hub back to the canvas center and snap rotation to Horizontal. "
-            "Works for Mirror and Radial."
+            "Move the hub back to the canvas center and snap rotation to Horizontal "
+            "(Linear Array: heading back to 0°). Works in every mode."
         )
         reset_btn.connect("clicked", self._on_mirror_reset)
         self.mirror_opts.append(reset_btn)
@@ -2543,6 +2633,7 @@ class MainWindow(Gtk.ApplicationWindow):
             on_sun_moved=self._on_sun_moved,
             get_rig_view=lambda: self.rig_view,
             on_rig_changed=self._on_rig_changed,
+            on_mirror_changed=self._sync_mirror_array_ui,
         )
         type_tool = self.tools.get("type")
         if type_tool is not None and hasattr(type_tool, "set_editing_changed_callback"):
