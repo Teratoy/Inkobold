@@ -82,7 +82,7 @@ def _attach_shortcut_focus_guard(parent: Gtk.Window, window: Gtk.Window) -> None
 
 
 class StartupDialog(Gtk.Window):
-    """Ask Open or New at launch. YES=new, NO=open, CANCEL=quit."""
+    """Ask Open or New at launch. YES=new, NO=open, APPLY=open character, CANCEL=quit."""
 
     def __init__(self, parent: Gtk.Window) -> None:
         super().__init__(title=current_flavor().display_name, transient_for=parent, modal=True)
@@ -112,11 +112,17 @@ class StartupDialog(Gtk.Window):
         quit_btn.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
         open_btn = Gtk.Button(label="Open File…")
         open_btn.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.NO))
+        character_btn = None
+        if current_flavor().character_rig:
+            character_btn = Gtk.Button(label="Open Character…")
+            character_btn.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.APPLY))
         new_btn = Gtk.Button(label="New File…")
         new_btn.add_css_class("suggested-action")
         new_btn.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.YES))
         actions.append(quit_btn)
         actions.append(open_btn)
+        if character_btn is not None:
+            actions.append(character_btn)
         actions.append(new_btn)
         self.connect("close-request", self._on_close)
 

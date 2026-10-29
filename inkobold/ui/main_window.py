@@ -4983,6 +4983,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self._open_at_startup = True
             self.action_open()
             return
+        if response == Gtk.ResponseType.APPLY:
+            self._open_at_startup = True
+            self.action_open_character()
+            return
         self._do_quit()
 
     def _on_startup_new_response(self, dlg: NewFileDialog, response: int) -> None:
@@ -5005,6 +5009,13 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def open_path(self, path: Path) -> bool:
         """Open *path* in a new tab. Returns False on failure."""
+        if current_flavor().character_rig:
+            # A character folder, or its rig.json, opens as a character
+            path = Path(path)
+            if path.is_dir() or path.name == ch.FILE_NAME:
+                folder = ch.character_folder_for(path)
+                if folder is not None:
+                    return self.open_character_path(folder)
         self._startup_pending = False
         self._open_at_startup = False
         try:
@@ -5143,10 +5154,13 @@ class MainWindow(Gtk.ApplicationWindow):
         try:
             folder = dialog.select_folder_finish(result)
         except GLib.Error:
-            return
+            folder = None
         path = self._gfile_path(folder, "folder") if folder is not None else None
-        if path is not None:
-            self.open_character_path(path)
+        if path is None or not self.open_character_path(path):
+            if self._open_at_startup and not self._tabs:
+                # Cancelled (or failed) from the launch prompt: ask again
+                self._open_at_startup = False
+                GLib.idle_add(self._prompt_startup)
 
     def open_character_path(self, folder: Path) -> bool:
         """Open a character folder in a new tab (or switch to it if already open)."""
@@ -5183,6 +5197,9 @@ class MainWindow(Gtk.ApplicationWindow):
         filt.add_pattern("*.webp")
         filt.add_pattern("*.bmp")
         filt.add_pattern("*.gif")
+        if current_flavor().character_rig:
+            filt.set_name("Inkobold / Images / Characters")
+            filt.add_pattern(ch.FILE_NAME)
         dialog.set_default_filter(filt)
         dialog.open(self, None, self._on_open_done)
 
