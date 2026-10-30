@@ -13,7 +13,7 @@ from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 from inkobold.core.character import RigView
 from inkobold.core.document import Document
-from inkobold.core.grid import GridOverlay
+from inkobold.core.grid import PIXEL_GRID_MIN_ZOOM, GridOverlay, grid_lines, pixel_zoom_floor, pixel_zoom_step
 from inkobold.core import damage
 from inkobold.core.image_meta import constrain_pixels, is_gray
 from inkobold.core.mirror import MirrorModifier, segment_distance_sq
@@ -22,7 +22,13 @@ from inkobold.gpu.renderer import GpuRenderer
 from inkobold.input import InputHub
 from inkobold.tools.base import ToolContext
 from inkobold.tools.brush import MAX_STROKE_BUBBLES
-from inkobold.tools.paint import render_bubbles_list, set_pixel_mode
+from inkobold.tools.paint import (
+    pixel_footprint_outline,
+    pixel_tip_origin,
+    pixel_width,
+    render_bubbles_list,
+    set_pixel_mode,
+)
 from inkobold.ui import rig_overlay
 
 
@@ -92,6 +98,8 @@ class Canvas(Gtk.Overlay):
         self._btn1 = False
         self._pointer_x = 0.0
         self._pointer_y = 0.0
+        # Pixel mode: document cell under the pointer (None when outside the canvas)
+        self._hover_cell: tuple[int, int] | None = None
         self._pressure = 1.0
         self._stroke_tools: list[object] | None = None
         self.animation_playing = False
@@ -164,6 +172,7 @@ class Canvas(Gtk.Overlay):
         motion = Gtk.EventControllerMotion.new()
         motion.connect("enter", lambda *_: self._catcher.grab_focus())
         motion.connect("motion", self._on_pointer_motion)
+        motion.connect("leave", self._on_pointer_leave)
         self._catcher.add_controller(motion)
 
         GLib.timeout_add(16, self._tick)
@@ -710,6 +719,67 @@ class Canvas(Gtk.Overlay):
         self.refresh_guides()
         self._on_changed()
 
+    # Tools whose pixel-mode stamps are hard round tips Size px wide
+    _PIXEL_TIP_TOOLS = frozenset({"pen", "brush", "eraser", "line", "rectangle", "curve", "replace"})
+
+    def _draw_pixel_grid(self, cr, doc: Document, grid: GridOverlay) -> None:
+        """Pixel Art mode: per-pixel lines when zoomed in, plus the tile grid under Show Grid."""
+        r = self.renderer
+        z = float(r.zoom)
+        vx0, vy0 = r.screen_to_doc(0.0, 0.0)
+        vx1, vy1 = r.screen_to_doc(float(r.view_w), float(r.view_h))
+        x0, x1 = max(0.0, vx0), min(float(doc.width), vx1)
+        y0, y1 = max(0.0, vy0), min(float(doc.height), vy1)
+        if x0 >= x1 or y0 >= y1:
+            return
+
+        def lines(step: int) -> None:
+            # Half-pixel offset puts each 1 px line on whole device pixels.
+            for gx in grid_lines(x0, x1, step, doc.width):
+                sx = round(r.doc_to_screen(gx, 0.0)[0]) + 0.5
+                cr.move_to(sx, r.doc_to_screen(0.0, y0)[1])
+                cr.line_to(sx, r.doc_to_screen(0.0, y1)[1])
+            for gy in grid_lines(y0, y1, step, doc.height):
+                sy = round(r.doc_to_screen(0.0, gy)[1]) + 0.5
+                cr.move_to(r.doc_to_screen(x0, 0.0)[0], sy)
+                cr.line_to(r.doc_to_screen(x1, 0.0)[0], sy)
+            cr.stroke()
+
+        cr.save()
+        cr.set_line_width(1.0)
+        if z >= PIXEL_GRID_MIN_ZOOM:
+            cr.set_source_rgba(0.5, 0.5, 0.5, 0.35)
+            lines(1)
+        if grid.enabled and grid.tile > 0 and grid.tile * z >= 4.0:
+            cr.set_source_rgba(0.35, 0.75, 1.0, 0.75)
+            lines(grid.tile)
+        cr.restore()
+
+    def _draw_pixel_cursor(self, cr) -> None:
+        """Outline the cells the active tool would paint at the hovered pixel."""
+        cell = self._hover_cell
+        if cell is None or self._panning:
+            return
+        tool = self._get_tool()
+        n = 1
+        if (
+            getattr(tool, "id", None) in self._PIXEL_TIP_TOOLS
+            and getattr(tool, "brush_mode", "round") == "round"
+        ):
+            n = pixel_width(float(getattr(tool, "brush_size", 1.0)))
+        ox, oy = pixel_tip_origin(cell[0] + 0.5, cell[1] + 0.5, n)
+        z = float(self.renderer.zoom)
+        sx0, sy0 = self.renderer.doc_to_screen(float(ox), float(oy))
+        cr.save()
+        for width, rgba in ((3.0, (0.0, 0.0, 0.0, 0.55)), (1.0, (1.0, 1.0, 1.0, 0.95))):
+            cr.set_line_width(width)
+            cr.set_source_rgba(*rgba)
+            for ex0, ey0, ex1, ey1 in pixel_footprint_outline(n):
+                cr.move_to(sx0 + ex0 * z, sy0 + ey0 * z)
+                cr.line_to(sx0 + ex1 * z, sy0 + ey1 * z)
+            cr.stroke()
+        cr.restore()
+
     def _draw_guides(self, _area, cr, _width: int, _height: int) -> None:
         doc = self._get_document()
         if doc is None:
@@ -726,6 +796,8 @@ class Canvas(Gtk.Overlay):
             cr.restore()
 
         grid = self._get_grid()
+        if self._get_pixel_mode():
+            self._draw_pixel_grid(cr, doc, grid)
         if grid.enabled:
             segs = grid.guide_segments(doc.width, doc.height)
             if segs:
@@ -772,6 +844,9 @@ class Canvas(Gtk.Overlay):
             cr.arc(sx, sy, 8.0, 0, math.tau)
             cr.stroke()
             cr.restore()
+
+        if self._get_pixel_mode():
+            self._draw_pixel_cursor(cr)
 
         tool = self._get_tool()
         points = getattr(tool, "points", None) if tool is not None else None
@@ -1080,8 +1155,7 @@ class Canvas(Gtk.Overlay):
             self._update_grid_drag(x, y)
             return
         if self._panning:
-            self.renderer.pan_x = self._pan_ox + (x - self._pan_sx)
-            self.renderer.pan_y = self._pan_oy + (y - self._pan_sy)
+            self._set_pan(self._pan_ox + (x - self._pan_sx), self._pan_oy + (y - self._pan_sy))
             self.queue_render()
             self.refresh_guides()
             return
@@ -1155,6 +1229,32 @@ class Canvas(Gtk.Overlay):
         self._pan_sx, self._pan_sy = x, y
         self._pan_ox, self._pan_oy = self.renderer.pan_x, self.renderer.pan_y
 
+    def _set_pan(self, pan_x: float, pan_y: float) -> None:
+        # Pixel mode keeps the canvas on whole screen pixels so pixels stay even squares.
+        if self._get_pixel_mode():
+            pan_x, pan_y = float(round(pan_x)), float(round(pan_y))
+        self.renderer.pan_x = pan_x
+        self.renderer.pan_y = pan_y
+
+    def snap_pixel_view(self) -> None:
+        """Settle the view on a pixel-ladder zoom around the view center (Pixel Art on)."""
+        cx = self.renderer.view_w * 0.5
+        cy = self.renderer.view_h * 0.5
+        self._zoom_about(cx, cy, pixel_zoom_floor(self.renderer.zoom))
+
+    def _zoom_about(self, cx: float, cy: float, zoom: float) -> None:
+        """Set *zoom* keeping the document point under screen (cx, cy) fixed."""
+        before = self.renderer.screen_to_doc(cx, cy)
+        self.renderer.zoom = zoom
+        after = self.renderer.screen_to_doc(cx, cy)
+        self._set_pan(
+            self.renderer.pan_x + (after[0] - before[0]) * zoom,
+            self.renderer.pan_y + (after[1] - before[1]) * zoom,
+        )
+        self.queue_render()
+        self.refresh_guides()
+        self._on_changed()
+
     def _on_pan_begin(self, _g: Gtk.GestureDrag, x: float, y: float) -> None:
         self._start_pan(x, y)
 
@@ -1165,17 +1265,32 @@ class Canvas(Gtk.Overlay):
         if not ok:
             return
         x, y = sx + offset_x, sy + offset_y
-        self.renderer.pan_x = self._pan_ox + (x - self._pan_sx)
-        self.renderer.pan_y = self._pan_oy + (y - self._pan_sy)
+        self._set_pan(self._pan_ox + (x - self._pan_sx), self._pan_oy + (y - self._pan_sy))
         self.queue_render()
         self.refresh_guides()
 
     def _on_pan_end(self, *_a) -> None:
         self._panning = False
 
+    def _on_pointer_leave(self, *_a) -> None:
+        if self._hover_cell is not None:
+            self._hover_cell = None
+            self.refresh_guides()
+
+    def _update_hover_cell(self, x: float, y: float) -> None:
+        cell = None
+        doc = self._get_document()
+        if doc is not None and self._get_pixel_mode():
+            dx, dy = self.renderer.screen_to_doc(x, y)
+            cell = (math.floor(dx), math.floor(dy))
+        if cell != self._hover_cell:
+            self._hover_cell = cell
+            self.refresh_guides()
+
     def _on_pointer_motion(self, controller, x: float, y: float) -> None:
         self._pointer_x = x
         self._pointer_y = y
+        self._update_hover_cell(x, y)
         _doc, rig = self._rig()
         if rig is None:
             return
@@ -1207,15 +1322,12 @@ class Canvas(Gtk.Overlay):
             cx = self.renderer.view_w * 0.5
             cy = self.renderer.view_h * 0.5
 
-        before = self.renderer.screen_to_doc(cx, cy)
-        factor = 1.1 if dy < 0 else (1 / 1.1)
-        self.renderer.zoom = max(0.05, min(32.0, self.renderer.zoom * factor))
-        after = self.renderer.screen_to_doc(cx, cy)
-        self.renderer.pan_x += (after[0] - before[0]) * self.renderer.zoom
-        self.renderer.pan_y += (after[1] - before[1]) * self.renderer.zoom
-        self.queue_render()
-        self.refresh_guides()
-        self._on_changed()
+        if self._get_pixel_mode():
+            zoom = pixel_zoom_step(self.renderer.zoom, dy < 0)
+        else:
+            factor = 1.1 if dy < 0 else (1 / 1.1)
+            zoom = max(0.05, min(32.0, self.renderer.zoom * factor))
+        self._zoom_about(cx, cy, zoom)
         return True
 
     def _on_key_pressed(self, _c, keyval, _keycode, state) -> bool:
@@ -1257,7 +1369,7 @@ class Canvas(Gtk.Overlay):
         if self.renderer.view_w <= 32 or self.renderer.view_h <= 32:
             self._needs_fit = True
             return
-        self.renderer.fit_canvas(doc)
+        self.renderer.fit_canvas(doc, pixel=bool(self._get_pixel_mode()))
         self._needs_fit = False
         self.queue_render()
         self.refresh_guides()

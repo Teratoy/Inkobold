@@ -912,7 +912,7 @@ class VisibleToolsDialog(Gtk.Window):
 class GridOverlayDialog(Gtk.Window):
     """Choose how many interior row/column guides the canvas grid overlay uses."""
 
-    def __init__(self, parent: Gtk.Window, rows: int = 8, columns: int = 8) -> None:
+    def __init__(self, parent: Gtk.Window, rows: int = 8, columns: int = 8, tile: int = 16) -> None:
         super().__init__(title="Grid Overlay", transient_for=parent, modal=True)
         _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(340, 220)
@@ -952,6 +952,15 @@ class GridOverlayDialog(Gtk.Window):
         grid.attach(self.rows_spin, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="Columns", xalign=0), 0, 1, 1, 1)
         grid.attach(self.columns_spin, 1, 1, 1, 1)
+        self.tile_spin = Gtk.SpinButton.new_with_range(0, 1024, 1)
+        configure_numeric_spin(self.tile_spin, digits=0)
+        self.tile_spin.set_value(tile)
+        self.tile_spin.set_hexpand(True)
+        self.tile_spin.set_tooltip_text(
+            "Pixel Art mode: a tile line every this many pixels while Show Grid is on (0 = none)."
+        )
+        grid.attach(Gtk.Label(label="Pixel tile", xalign=0), 0, 2, 1, 1)
+        grid.attach(self.tile_spin, 1, 2, 1, 1)
 
         actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=8)
         root.append(actions)
@@ -975,6 +984,9 @@ class GridOverlayDialog(Gtk.Window):
 
     def columns(self) -> int:
         return int(self.columns_spin.get_value())
+
+    def tile(self) -> int:
+        return int(self.tile_spin.get_value())
 
     def connect_response(self, callback) -> None:
         self._callback = callback

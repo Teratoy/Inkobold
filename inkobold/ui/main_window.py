@@ -470,6 +470,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 "enabled": bool(self.grid.enabled),
                 "rows": int(self.grid.rows),
                 "columns": int(self.grid.columns),
+                "tile": int(self.grid.tile),
                 "ox_norm": float(self.grid.ox_norm),
                 "oy_norm": float(self.grid.oy_norm),
             },
@@ -561,6 +562,7 @@ class MainWindow(Gtk.ApplicationWindow):
             try:
                 self.grid.rows = int(grid.get("rows", self.grid.rows))
                 self.grid.columns = int(grid.get("columns", self.grid.columns))
+                self.grid.tile = int(grid.get("tile", self.grid.tile))
             except (TypeError, ValueError):
                 pass
             try:
@@ -1620,10 +1622,16 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _on_pixel_mode_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
         enabled = bool(value.get_boolean())
+        changed = enabled != self.pixel_mode
         action.set_state(value)
         self.pixel_mode = enabled
         if hasattr(self, "pixel_mode_toggle") and self.pixel_mode_toggle.get_active() != enabled:
             self.pixel_mode_toggle.set_active(enabled)
+        if hasattr(self, "canvas"):
+            if enabled and changed:
+                self.canvas.snap_pixel_view()
+            else:
+                self.canvas.refresh_guides()
         self._set_status()
 
     def _on_pixel_mode_toggled(self, btn: Gtk.CheckButton) -> None:
@@ -1719,7 +1727,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._apply_tool_visibility()
 
     def action_grid_settings(self, *_a) -> None:
-        dlg = GridOverlayDialog(self, self.grid.rows, self.grid.columns)
+        dlg = GridOverlayDialog(self, self.grid.rows, self.grid.columns, self.grid.tile)
         dlg.connect_response(self._on_grid_settings_response)
         dlg.connect_reset_offset(self._on_grid_reset_offset)
         dlg.present()
@@ -1734,6 +1742,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self.grid.rows = dlg.rows()
         self.grid.columns = dlg.columns()
+        self.grid.tile = dlg.tile()
         self.grid.clamp()
         if hasattr(self, "canvas"):
             self.canvas.refresh_guides()

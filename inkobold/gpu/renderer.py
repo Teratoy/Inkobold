@@ -8,6 +8,7 @@ import numpy as np
 from OpenGL import GL
 
 from inkobold.core.document import Document
+from inkobold.core.grid import pixel_zoom_floor
 from inkobold.core.image_meta import to_display_u8
 
 VERT_BODY = """
@@ -374,7 +375,9 @@ class GpuRenderer:
         z = self.zoom if self.zoom else 1.0
         return (dx * z + self.pan_x, dy * z + self.pan_y)
 
-    def fit_canvas(self, doc: Document) -> None:
+    def fit_canvas(self, doc: Document, *, pixel: bool = False) -> None:
+        """Center *doc* in the view. *pixel* picks a pixel-ladder zoom (up to 64×)
+        and whole-pixel pan so document pixels stay crisp squares."""
         margin = 48
         vw = max(1, self.view_w)
         vh = max(1, self.view_h)
@@ -388,6 +391,11 @@ class GpuRenderer:
         span = 3 if self.tile_preview else 1
         zx = (vw - margin * 2) / max(1, doc.width * span)
         zy = (vh - margin * 2) / max(1, doc.height * span)
+        if pixel:
+            self.zoom = pixel_zoom_floor(min(zx, zy))
+            self.pan_x = float(round((vw - doc.width * self.zoom) * 0.5))
+            self.pan_y = float(round((vh - doc.height * self.zoom) * 0.5))
+            return
         self.zoom = max(0.05, min(zx, zy, 8.0))
         self.pan_x = (vw - doc.width * self.zoom) * 0.5
         self.pan_y = (vh - doc.height * self.zoom) * 0.5

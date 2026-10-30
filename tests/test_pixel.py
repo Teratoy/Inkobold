@@ -14,6 +14,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from inkobold.core import Document  # noqa: E402
+from inkobold.core.grid import (  # noqa: E402
+    PIXEL_ZOOM_LEVELS,
+    GridOverlay,
+    grid_lines,
+    pixel_zoom_floor,
+    pixel_zoom_step,
+)
 from inkobold.tools import ToolContext, default_tools  # noqa: E402
 from inkobold.tools import paint  # noqa: E402
 
@@ -155,6 +162,60 @@ def test_rectangle_and_curve_are_hard():
 
 def test_soft_mode_unchanged_by_default():
     assert paint.pixel_mode() is False
+
+
+
+# --- canvas helpers ----------------------------------------------------------
+
+
+def test_zoom_ladder_steps_and_clamps():
+    assert pixel_zoom_step(1.0, True) == 2.0
+    assert pixel_zoom_step(2.0, False) == 1.0
+    # Off-ladder zooms land on the next level in that direction
+    assert pixel_zoom_step(2.4, True) == 3.0
+    assert pixel_zoom_step(2.4, False) == 2.0
+    assert pixel_zoom_step(64.0, True) == 64.0
+    assert pixel_zoom_step(PIXEL_ZOOM_LEVELS[0], False) == PIXEL_ZOOM_LEVELS[0]
+    assert all(z == int(z) for z in PIXEL_ZOOM_LEVELS if z >= 1)
+    assert pixel_zoom_floor(13.7) == 12.0
+    assert pixel_zoom_floor(0.01) == PIXEL_ZOOM_LEVELS[0]
+
+
+def test_grid_lines_visible_range():
+    assert grid_lines(0, 64, 16, 64) == [0, 16, 32, 48, 64]
+    assert grid_lines(-10, 20.5, 8, 64) == [0, 8, 16]
+    assert grid_lines(17, 31, 16, 64) == []
+    assert grid_lines(3.2, 6.9, 1, 64) == [4, 5, 6]
+
+
+def test_grid_tile_clamps():
+    g = GridOverlay(tile=-3)
+    g.clamp()
+    assert g.tile == 0
+    g.tile = 5000
+    g.clamp()
+    assert g.tile == 1024
+
+
+def test_tip_outline_encloses_footprint():
+    for n in (1, 2, 3, 4, 7):
+        edges = paint.pixel_footprint_outline(n)
+        # Outline length equals the footprint perimeter in cell edges
+        foot = np.pad(paint.pixel_footprint(n) > 0, 1)
+        perimeter = int((foot[1:] != foot[:-1]).sum() + (foot[:, 1:] != foot[:, :-1]).sum())
+        assert len(edges) == perimeter
+
+
+def test_hover_outline_matches_painted_cells():
+    # The cursor outline sits exactly where a click paints
+    for n in (1, 2, 3, 5, 6):
+        px = _blank()
+        with _pixel():
+            paint.stroke_segment(px, 13.3, 9.8, 13.3, 9.8, float(n), RED)
+        ox, oy = paint.pixel_tip_origin(13.3, 9.8, n)
+        foot = paint.pixel_footprint(n) > 0
+        expected = {(ox + int(x), oy + int(y)) for y, x in zip(*np.nonzero(foot))}
+        assert _painted(px) == expected, n
 
 
 if __name__ == "__main__":

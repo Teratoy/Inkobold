@@ -12,7 +12,7 @@ Canvas defaults: pan `(40, 40)`, zoom `1.0`. Zoom clamp **0.05–32**. App start
 | Zoom | Scroll wheel | |
 | Fit Canvas | `Ctrl+0`, `Ctrl+F` | |
 | Show Grid | View menu | Visual only; default 8×8 interior guides (0–64), equal parts; no snap |
-| Grid… | Settings | rows / columns; **Reset Offset** restores default centering |
+| Grid… | Settings | rows / columns, **Pixel tile** (Pixel Art tile grid, default 16, 0 = none); **Reset Offset** restores default centering |
 | Move Grid | Alt-drag a grid line | Vertical line → shift X; horizontal → Y; crossing → both |
 | Show Sun | View + drag glyph | Shows/drags the sun glyph; also turns Use Sun Light on |
 | Use Sun Light | View | When off, classic fixed key light (pre-sun) |
@@ -36,6 +36,13 @@ Per-document toggle (saved in the document workspace) for pixel art. While on, t
 - Eraser and Replace colour matching is all-or-nothing within the threshold.
 
 Custom brush tips, Bubbles, Gradient, Fill and the 3D tools are unchanged.
+
+The view changes too:
+
+- Scroll zoom steps through 1/8×, 1/4×, 1/2×, 1×, 2×, 3×, 4×, 6×, 8×, 12×, 16×, 24×, 32×, 48× and 64×, and the canvas pans in whole screen pixels, so every document pixel is an even square. Turning Pixel Art on settles the current zoom on that ladder; **Fit Canvas** picks the largest step that fits (small sprites can fit at up to 64×).
+- From 8× up a one-pixel grid is drawn over the canvas.
+- With **Show Grid** on, a blue tile grid is drawn every **Pixel tile** pixels (set in **Grid…**), alongside the row/column guides.
+- The cells the current tool would paint are outlined under the pointer: the tip shape for Pen, Brush, Eraser, Line, Rectangle, Curve and Replace, a single pixel for other tools.
 
 ## Symmetry
 

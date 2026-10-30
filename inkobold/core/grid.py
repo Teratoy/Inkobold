@@ -2,7 +2,48 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+
+# Pixel-art zoom ladder: whole multiples above 1×, halvings below, so every
+# document pixel covers the same number of screen pixels.
+PIXEL_ZOOM_LEVELS: tuple[float, ...] = (
+    0.125, 0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0, 48.0, 64.0,
+)
+# Per-pixel lines appear from this zoom up (pixel mode only).
+PIXEL_GRID_MIN_ZOOM = 8.0
+
+
+def pixel_zoom_step(zoom: float, zoom_in: bool) -> float:
+    """Next pixel-ladder zoom above (or below) *zoom*; clamps at the ends."""
+    z = float(zoom)
+    if zoom_in:
+        for level in PIXEL_ZOOM_LEVELS:
+            if level > z * 1.001:
+                return level
+        return PIXEL_ZOOM_LEVELS[-1]
+    for level in reversed(PIXEL_ZOOM_LEVELS):
+        if level < z * 0.999:
+            return level
+    return PIXEL_ZOOM_LEVELS[0]
+
+
+def pixel_zoom_floor(zoom: float) -> float:
+    """Largest pixel-ladder zoom not above *zoom* (the smallest level at least)."""
+    z = float(zoom)
+    best = PIXEL_ZOOM_LEVELS[0]
+    for level in PIXEL_ZOOM_LEVELS:
+        if level <= z * 1.001:
+            best = level
+    return best
+
+
+def grid_lines(lo: float, hi: float, step: int, limit: int) -> list[int]:
+    """Multiples of *step* inside [lo, hi] clamped to [0, limit] (visible lines only)."""
+    s = max(1, int(step))
+    start = max(0, int(math.ceil(max(0.0, float(lo)) / s)) * s)
+    end = min(int(limit), int(math.floor(float(hi))))
+    return list(range(start, end + 1, s))
 
 
 @dataclass
@@ -15,6 +56,9 @@ class GridOverlay:
     centered crosshair. *ox_norm* / *oy_norm* phase-shift the whole grid
     (document fractions, wrapped). The overlay never snaps tools or alters
     pixels.
+
+    In Pixel Art mode Show Grid also draws a tile grid every *tile* pixels
+    (0 = none); the per-pixel grid shows on its own when zoomed in.
     """
 
     enabled: bool = False
@@ -22,10 +66,12 @@ class GridOverlay:
     columns: int = 8
     ox_norm: float = 0.0
     oy_norm: float = 0.0
+    tile: int = 16
 
     def clamp(self) -> None:
         self.rows = max(0, min(64, int(self.rows)))
         self.columns = max(0, min(64, int(self.columns)))
+        self.tile = max(0, min(1024, int(self.tile)))
         self.ox_norm = float(self.ox_norm) % 1.0
         self.oy_norm = float(self.oy_norm) % 1.0
 

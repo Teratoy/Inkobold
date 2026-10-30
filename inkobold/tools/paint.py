@@ -91,6 +91,28 @@ def pixel_footprint(width: int) -> np.ndarray:
     return ((c[:, None] ** 2 + c[None, :] ** 2) < (n * 0.5) ** 2).astype(np.float32)
 
 
+@functools.lru_cache(maxsize=64)
+def pixel_footprint_outline(width: int) -> tuple[tuple[int, int, int, int], ...]:
+    """Border of :func:`pixel_footprint` as (x0, y0, x1, y1) unit edges in tip cells."""
+    foot = np.pad(pixel_footprint(width) > 0, 1)
+    edges: list[tuple[int, int, int, int]] = []
+    # Horizontal edges: a cell differs from the one above it
+    for y, x in zip(*np.nonzero(foot[1:, 1:-1] != foot[:-1, 1:-1])):
+        edges.append((int(x), int(y), int(x) + 1, int(y)))
+    # Vertical edges: a cell differs from the one to its left
+    for y, x in zip(*np.nonzero(foot[1:-1, 1:] != foot[1:-1, :-1])):
+        edges.append((int(x), int(y), int(x), int(y) + 1))
+    return tuple(edges)
+
+
+def pixel_tip_origin(x: float, y: float, width: int) -> tuple[int, int]:
+    """Top-left cell of the *width* tip a pixel-mode stroke stamps for pointer (x, y)."""
+    return (
+        _pixel_origin(math.floor(x) + 0.5, width),
+        _pixel_origin(math.floor(y) + 0.5, width),
+    )
+
+
 def _pixel_origin(v: float, width: int) -> int:
     """Top/left cell of a *width* footprint centred on *v* (odd: on a cell, even: on a corner)."""
     return int(math.floor(float(v) - width * 0.5 + 0.5))
