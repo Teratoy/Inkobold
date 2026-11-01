@@ -44,6 +44,10 @@ Requires system **PyGObject** + **GTK4** (distro packages; use a venv with `--sy
 
 A flavor for the Goblin Engineering asset pipeline: export dialogs open in `visual assets/`, and an **Assets** tab shows the whole folder as a live file tree. Run it with `./scripts/run-green.sh` or `python -m inkobold.green`.
 
+## Inkimp
+
+A flavor for pixel art: **Pixel Art** mode is on from the start (hard pixels, pixel-perfect 1 px strokes, whole-number zoom, pixel grid), New File offers sprite sizes (32×32 by default) and the toolbox hides the soft tools (Lay, Weld Brush, Gradient, 3D Pen/Fill, Smear, Liquify, Type), which **Visible Tools** can bring back. Run it with `./scripts/run-imp.sh` or `python -m inkobold.imp`; desktop entry `scripts/inkimp.desktop`.
+
 ## Run / package (Windows)
 
 See **[docs/WINDOWS.md](docs/WINDOWS.md)** (MSYS2 MINGW64 recommended) and `scripts/run.ps1`.

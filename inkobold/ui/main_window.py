@@ -220,7 +220,7 @@ class MainWindow(Gtk.ApplicationWindow):
         )
         self.sun.clamp()
         self.tile_wrap = False
-        self.pixel_mode = False
+        self.pixel_mode = current_flavor().pixel_default
         self.input_hub = InputHub()
         self.input_hub.start()
         ensure_libraries()
@@ -366,7 +366,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.add_action(tile_wrap)
 
         pixel_mode = Gio.SimpleAction.new_stateful(
-            "pixel_mode", None, GLib.Variant.new_boolean(False)
+            "pixel_mode", None, GLib.Variant.new_boolean(self.pixel_mode)
         )
         pixel_mode.connect("change-state", self._on_pixel_mode_change)
         self.add_action(pixel_mode)
@@ -588,7 +588,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         action = self.lookup_action("pixel_mode")
         if action is not None:
-            action.change_state(GLib.Variant.new_boolean(bool(workspace.get("pixel", False))))
+            pixel = workspace.get("pixel", current_flavor().pixel_default)
+            action.change_state(GLib.Variant.new_boolean(bool(pixel)))
 
         tid = workspace.get("tool_id")
         if isinstance(tid, str) and tid in self.tools:
@@ -1682,11 +1683,16 @@ class MainWindow(Gtk.ApplicationWindow):
                 tool.color = self._shared_color
                 tool.secondary_color = self._shared_secondary
 
+    @staticmethod
+    def _default_visible_tools() -> list[str]:
+        """Toolbox when the user has not picked tools: everything the flavor does not hide."""
+        hidden = set(current_flavor().hidden_tools)
+        return [tid for tid, *_ in TOOL_ORDER if tid not in hidden]
+
     def _resolved_visible_tools(self) -> list[str]:
-        all_ids = [tid for tid, *_ in TOOL_ORDER]
         chosen = [tid for tid in self.app_settings.visible_tools if tid in self.tools]
         if not chosen:
-            return all_ids
+            return self._default_visible_tools()
         return chosen
 
     def _apply_tool_visibility(self) -> None:
@@ -1717,9 +1723,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if response != Gtk.ResponseType.OK:
             return
         chosen = dlg.visible_ids()
-        all_ids = [tid for tid, *_ in TOOL_ORDER]
-        # Store empty when everything is shown so new tools appear by default
-        if set(chosen) == set(all_ids):
+        # Store empty when it matches the default so new tools appear by default
+        if set(chosen) == set(self._default_visible_tools()):
             self.app_settings.visible_tools = []
         else:
             self.app_settings.visible_tools = [tid for tid, *_ in TOOL_ORDER if tid in chosen]
@@ -2527,7 +2532,7 @@ class MainWindow(Gtk.ApplicationWindow):
             "the stroke width in pixels, pressure is ignored and 1 px freehand "
             "strokes skip L-shaped corners (pixel-perfect). Saved with the document."
         )
-        self.pixel_mode_toggle.set_active(False)
+        self.pixel_mode_toggle.set_active(self.pixel_mode)
         self.pixel_mode_toggle.connect("toggled", self._on_pixel_mode_toggled)
         mirror_box.append(self.pixel_mode_toggle)
 

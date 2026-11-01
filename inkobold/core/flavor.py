@@ -37,6 +37,10 @@ class Flavor:
     layer_export_index: bool = True
     # Goblin-rig characters (core.character): Rig tab, Open / New Character
     character_rig: bool = False
+    # Pixel Art mode (hard pixels, pixel zoom/grid) for new windows and files saved without it
+    pixel_default: bool = False
+    # Tool ids left out of the toolbox until the user picks them in Visible Tools
+    hidden_tools: tuple[str, ...] = ()
     # New File size buttons as (label, width, height); the first one is the default size
     new_file_presets: tuple[tuple[str, int, int], ...] = (
         ("HD", 1920, 1080),
@@ -83,6 +87,35 @@ GREEN_INKOBOLD = Flavor(
         ("Fauna 70×50", 70, 50),
         ("Title 1000×500", 1000, 500),
         ("Screen 1920×1080", 1920, 1080),
+    ),
+)
+
+INKIMP = Flavor(
+    display_name="Inkimp",
+    app_id="trinkets.inkimp",
+    prgname="trinkets-inkimp",
+    config_name="inkimp",
+    win_config_name="Inkimp",
+    env_prefix="INKIMP",
+    icon_file="inkimp.png",
+    module="inkobold.imp",
+    theme_rgb=(214, 72, 62),
+    pixel_default=True,
+    # Soft, smudging or anti-aliased tools that fight a pixel grid
+    hidden_tools=(
+        "lay", "weld_brush", "gradient", "pen3d", "fill3d", "smear", "liquify", "type",
+    ),
+    # Sprite and tile sizes; 32×32 first so it is the default
+    new_file_presets=(
+        ("32×32", 32, 32),
+        ("16×16", 16, 16),
+        ("24×24", 24, 24),
+        ("48×48", 48, 48),
+        ("64×64", 64, 64),
+        ("128×128", 128, 128),
+        ("256×256", 256, 256),
+        ("Screen 320×180", 320, 180),
+        ("Screen 640×360", 640, 360),
     ),
 )
 

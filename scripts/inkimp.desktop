@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Inkimp
+GenericName=Pixel Art
+Comment=Inkobold set up for pixel art
+Exec=/home/aki/Trinkets/Inkobold/scripts/run-imp.sh %F
+Path=/home/aki/Trinkets/Inkobold
+Icon=trinkets-inkimp
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=pixel;sprite;pixelart;draw;paint;tiles;
+MimeType=application/x-inkobold;image/png;
+Terminal=false
+StartupNotify=true
+StartupWMClass=trinkets-inkimp
+TryExec=/home/aki/Trinkets/Inkobold/scripts/run-imp.sh
+DBusActivatable=false

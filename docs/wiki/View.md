@@ -44,6 +44,8 @@ The view changes too:
 - With **Show Grid** on, a blue tile grid is drawn every **Pixel tile** pixels (set in **Grid…**), alongside the row/column guides.
 - The cells the current tool would paint are outlined under the pointer: the tip shape for Pen, Brush, Eraser, Line, Rectangle, Curve and Replace, a single pixel for other tools.
 
+The **Inkimp** flavor (`python -m inkobold.imp`, `scripts/run-imp.sh`) starts with Pixel Art on, and files opened without a saved setting open with it on. Its New File sizes are sprite sizes, and its toolbox hides Lay, Weld Brush, Gradient, 3D Pen, 3D Fill, Smear, Liquify and Type until they are picked in **Visible Tools**. It keeps its own settings, like any flavor, and shares libraries and palettes with the others.
+
 ## Symmetry
 
 Live stroke symmetry around a movable hub (defaults to canvas center). Toggle **Symmetry** in the toolbox. Applies to tools with `supports_mirror` (not Transform / Lasso).

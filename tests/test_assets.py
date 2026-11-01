@@ -102,6 +102,23 @@ def test_flavors_keep_separate_config():
                 os.environ[k] = v
 
 
+
+def test_inkimp_flavor():
+    imp = flavor.INKIMP
+    assert imp.pixel_default and not flavor.INKOBOLD.pixel_default
+    assert imp.asset_root is None and not imp.character_rig
+    # Hidden tools name real tools and keep the pixel tools
+    from inkobold.tools import default_tools
+
+    ids = set(default_tools())
+    assert set(imp.hidden_tools) <= ids
+    assert {"pen", "brush", "eraser", "line", "rectangle", "fill"}.isdisjoint(imp.hidden_tools)
+    assert imp.new_file_presets[0][1:] == (32, 32)
+    assert len({f.app_id for f in (flavor.INKOBOLD, flavor.GREEN_INKOBOLD, imp)}) == 3
+    assert len({f.config_name for f in (flavor.INKOBOLD, flavor.GREEN_INKOBOLD, imp)}) == 3
+    assert (Path(__file__).resolve().parents[1] / "scripts" / imp.icon_file).is_file()
+
+
 def test_asset_root_setting_round_trips():
     cfg = Path(tempfile.mkdtemp())
     old = os.environ.get("GREENINKOBOLD_CONFIG_HOME")

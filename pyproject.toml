@@ -13,6 +13,7 @@ dependencies = [
 [project.scripts]
 inkobold = "inkobold.__main__:main"
 greeninkobold = "inkobold.green.__main__:main"
+inkimp = "inkobold.imp.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["inkobold*"]
