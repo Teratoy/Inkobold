@@ -5,7 +5,9 @@ Run with ``python -m pytest tests`` or, without pytest, ``python tests/test_pixe
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -14,6 +16,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from inkobold.core import Document  # noqa: E402
+from inkobold.core.document import upscale_nearest  # noqa: E402
 from inkobold.core.grid import (  # noqa: E402
     PIXEL_ZOOM_LEVELS,
     GridOverlay,
@@ -216,6 +219,81 @@ def test_hover_outline_matches_painted_cells():
         foot = paint.pixel_footprint(n) > 0
         expected = {(ox + int(x), oy + int(y)) for y, x in zip(*np.nonzero(foot))}
         assert _painted(px) == expected, n
+
+
+
+# --- export ------------------------------------------------------------------
+
+
+def _sprite_doc() -> Document:
+    """4×3 sprite, three frames each with one coloured pixel at a different x."""
+    doc = Document.blank(4, 3)
+    doc.active_layer.pixels[...] = 0
+    doc.active_layer.pixels[1, 0] = RED
+    doc.active_layer.bump()
+    for x in (1, 2):
+        doc.add_frame(duplicate=False)
+        doc.active_layer.pixels[...] = 0
+        doc.active_layer.pixels[1, x] = (20, 200, 40, 255)
+        doc.active_layer.bump()
+    return doc
+
+
+def test_upscale_nearest_is_exact_blocks():
+    src = np.arange(2 * 3 * 4, dtype=np.uint8).reshape(2, 3, 4)
+    big = upscale_nearest(src, 3)
+    assert big.shape == (6, 9, 4)
+    assert (big[3:6, 6:9] == src[1, 2]).all()
+    assert upscale_nearest(src, 1) is src
+
+
+def test_export_image_scale_keeps_hard_pixels():
+    from PIL import Image
+
+    doc = Document.blank(4, 3)
+    doc.active_layer.pixels[...] = 0
+    doc.active_layer.pixels[1, 2] = RED
+    doc.active_layer.bump()
+    out = Path(tempfile.mkdtemp()) / "sprite.png"
+    doc.export_image(out, scale=4)
+    arr = np.array(Image.open(out).convert("RGBA"))
+    assert arr.shape == (12, 16, 4)
+    assert (arr[4:8, 8:12] == RED).all()
+    assert set(np.unique(arr[..., 3])) == {0, 255}
+
+
+def test_sprite_sheet_row_and_json():
+    from PIL import Image
+
+    doc = _sprite_doc()
+    folder = Path(tempfile.mkdtemp())
+    path = doc.export_sprite_sheet(folder / "walk", scale=2)
+    assert path.name == "walk.png"
+    sheet = np.array(Image.open(path).convert("RGBA"))
+    assert sheet.shape == (6, 24, 4)
+    meta = json.loads((folder / "walk.json").read_text())
+    assert meta["image"] == "walk.png"
+    assert (meta["frame_width"], meta["frame_height"], meta["columns"], meta["rows"]) == (8, 6, 3, 1)
+    assert [f["x"] for f in meta["frames"]] == [0, 8, 16]
+    # Frame i has its pixel at x = i → sheet x = i*8 + i*2 (scaled block)
+    for i, f in enumerate(meta["frames"]):
+        block = sheet[2:4, f["x"] + i * 2 : f["x"] + i * 2 + 2]
+        assert (block[..., 3] == 255).all(), i
+    assert int((sheet[..., 3] > 0).sum()) == 3 * 4
+
+
+def test_animation_exports_scale():
+    from PIL import Image
+
+    doc = _sprite_doc()
+    folder = Path(tempfile.mkdtemp())
+    gif = doc.export_animation_gif(folder / "a.gif", scale=3)
+    assert Image.open(gif).size == (12, 9)
+    seq = doc.export_animation_png_sequence(folder / "seq", scale=2)
+    assert sorted(p.name for p in seq.iterdir()) == ["frame_1.png", "frame_2.png", "frame_3.png"]
+    assert Image.open(seq / "frame_2.png").size == (8, 6)
+    layers = doc.export_layers_png(folder / "layers", scale=2)
+    assert all(Image.open(p).size == (8, 6) for p in layers.iterdir())
 
 
 if __name__ == "__main__":

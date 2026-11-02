@@ -18,7 +18,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango  # noqa: E402
 
-from inkobold.core.document import Document
+from inkobold.core.document import EXPORT_SCALES, Document
 from inkobold.core.effects import (
     DITHER_MODES,
     EDGE_STYLES,
@@ -221,6 +221,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.sun.clamp()
         self.tile_wrap = False
         self.pixel_mode = current_flavor().pixel_default
+        # Whole-number enlargement for every export (nearest neighbour)
+        self.export_scale = 1
         self.input_hub = InputHub()
         self.input_hub.start()
         ensure_libraries()
@@ -259,6 +261,7 @@ class MainWindow(Gtk.ApplicationWindow):
             "export_layers": self.action_export_layers,
             "export_anim_gif": self.action_export_anim_gif,
             "export_anim_png": self.action_export_anim_png,
+            "export_anim_sheet": self.action_export_anim_sheet,
             "fit": lambda *_a: self.canvas.request_fit(),
             "window_fullscreen": lambda *_a: self.apply_window_mode("fullscreen"),
             "window_borderless": lambda *_a: self.apply_window_mode("borderless"),
@@ -371,6 +374,12 @@ class MainWindow(Gtk.ApplicationWindow):
         pixel_mode.connect("change-state", self._on_pixel_mode_change)
         self.add_action(pixel_mode)
 
+        export_scale = Gio.SimpleAction.new_stateful(
+            "export_scale", GLib.VariantType.new("s"), GLib.Variant.new_string("1")
+        )
+        export_scale.connect("change-state", self._on_export_scale_change)
+        self.add_action(export_scale)
+
         checker_light = Gio.SimpleAction.new_stateful(
             "checker_light",
             None,
@@ -476,6 +485,7 @@ class MainWindow(Gtk.ApplicationWindow):
             },
             "tile_wrap": bool(self.tile_wrap),
             "pixel": bool(self.pixel_mode),
+            "export_scale": int(self.export_scale),
         }
         if 0 <= self._active_tab < len(self._tabs):
             tab = self._tabs[self._active_tab]
@@ -590,6 +600,14 @@ class MainWindow(Gtk.ApplicationWindow):
         if action is not None:
             pixel = workspace.get("pixel", current_flavor().pixel_default)
             action.change_state(GLib.Variant.new_boolean(bool(pixel)))
+
+        action = self.lookup_action("export_scale")
+        if action is not None:
+            try:
+                scale = int(workspace.get("export_scale", 1))
+            except (TypeError, ValueError):
+                scale = 1
+            action.change_state(GLib.Variant.new_string(str(scale if scale in EXPORT_SCALES else 1)))
 
         tid = workspace.get("tool_id")
         if isinstance(tid, str) and tid in self.tools:
@@ -1643,6 +1661,20 @@ class MainWindow(Gtk.ApplicationWindow):
             if current != enabled:
                 action.change_state(GLib.Variant.new_boolean(enabled))
 
+    def _on_export_scale_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
+        try:
+            scale = int(value.get_string())
+        except ValueError:
+            return
+        if scale not in EXPORT_SCALES:
+            return
+        action.set_state(value)
+        self.export_scale = scale
+
+    def _export_title(self, title: str) -> str:
+        """File dialog title, noting the Export Scale when it enlarges."""
+        return f"{title} (×{self.export_scale})" if self.export_scale > 1 else title
+
     def _on_checker_light_change(self, action: Gio.SimpleAction, value: GLib.Variant) -> None:
         enabled = bool(value.get_boolean())
         action.set_state(value)
@@ -1838,7 +1870,14 @@ class MainWindow(Gtk.ApplicationWindow):
         export_anim_menu = Gio.Menu()
         export_anim_menu.append("As GIF…", "win.export_anim_gif")
         export_anim_menu.append("As PNG Folder…", "win.export_anim_png")
+        export_anim_menu.append("As Sprite Sheet…", "win.export_anim_sheet")
         file_menu.append_submenu("Export Animation", export_anim_menu)
+        scale_menu = Gio.Menu()
+        for scale in EXPORT_SCALES:
+            item = Gio.MenuItem.new(f"{scale}×", None)
+            item.set_action_and_target_value("win.export_scale", GLib.Variant.new_string(str(scale)))
+            scale_menu.append_item(item)
+        file_menu.append_submenu("Export Scale", scale_menu)
         file_menu.append("Import Image as Layer…", "win.import_image")
         file_btn.set_menu_model(file_menu)
         menubar.append(file_btn)
@@ -1951,6 +1990,7 @@ class MainWindow(Gtk.ApplicationWindow):
         export_anim_menu = Gio.Menu()
         export_anim_menu.append("As GIF…", "win.export_anim_gif")
         export_anim_menu.append("As PNG Folder…", "win.export_anim_png")
+        export_anim_menu.append("As Sprite Sheet…", "win.export_anim_sheet")
         anim_menu.append_submenu("Export", export_anim_menu)
         anim_btn.set_menu_model(anim_menu)
         menubar.append(anim_btn)
@@ -5577,7 +5617,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def action_export(self, *_a) -> None:
         if not self.document:
             return
-        dialog = Gtk.FileDialog(title="Export Image")
+        dialog = Gtk.FileDialog(title=self._export_title("Export Image"))
         filters = Gio.ListStore.new(Gtk.FileFilter)
         for name, patterns in (
             ("PNG image", ("*.png",)),
@@ -5617,7 +5657,7 @@ class MainWindow(Gtk.ApplicationWindow):
             else:
                 path = path.with_suffix(".png")
         try:
-            self.document.export_image(path)
+            self.document.export_image(path, scale=self.export_scale)
         except Exception as exc:
             err = Gtk.AlertDialog()
             err.set_message("Export failed")
@@ -5629,7 +5669,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def action_export_anim_gif(self, *_a) -> None:
         if not self.document:
             return
-        dialog = Gtk.FileDialog(title="Export Animation as GIF")
+        dialog = Gtk.FileDialog(title=self._export_title("Export Animation as GIF"))
         filt = Gtk.FileFilter()
         filt.set_name("GIF animation")
         filt.add_pattern("*.gif")
@@ -5655,7 +5695,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if path.suffix.lower() != ".gif":
             path = path.with_suffix(".gif")
         try:
-            self.document.export_animation_gif(path)
+            self.document.export_animation_gif(path, scale=self.export_scale)
         except Exception as exc:
             err = Gtk.AlertDialog()
             err.set_message("GIF export failed")
@@ -5667,7 +5707,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def action_export_anim_png(self, *_a) -> None:
         if not self.document:
             return
-        dialog = Gtk.FileDialog(title="Export Animation as PNG Folder")
+        dialog = Gtk.FileDialog(title=self._export_title("Export Animation as PNG Folder"))
         self._start_in_asset_folder(dialog)
         dialog.select_folder(self, None, self._on_export_anim_png_done)
 
@@ -5682,7 +5722,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if path is None:
             return
         try:
-            self.document.export_animation_png_sequence(path)
+            self.document.export_animation_png_sequence(path, scale=self.export_scale)
         except Exception as exc:
             err = Gtk.AlertDialog()
             err.set_message("PNG sequence export failed")
@@ -5691,10 +5731,46 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self._set_status()
 
+    def action_export_anim_sheet(self, *_a) -> None:
+        if not self.document:
+            return
+        dialog = Gtk.FileDialog(title=self._export_title("Export Animation as Sprite Sheet"))
+        filt = Gtk.FileFilter()
+        filt.set_name("PNG image")
+        filt.add_pattern("*.png")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filters.append(filt)
+        dialog.set_filters(filters)
+        dialog.set_default_filter(filt)
+        stem = self.document.path.stem if self.document.path else "animation"
+        dialog.set_initial_name(f"{stem}_sheet.png")
+        self._start_in_asset_folder(dialog)
+        dialog.save(self, None, self._on_export_anim_sheet_done)
+
+    def _on_export_anim_sheet_done(self, dialog: Gtk.FileDialog, result) -> None:
+        try:
+            file = dialog.save_finish(result)
+        except GLib.Error:
+            return
+        if not file or not self.document:
+            return
+        path = self._gfile_path(file)
+        if path is None:
+            return
+        try:
+            self.document.export_sprite_sheet(path, scale=self.export_scale)
+        except Exception as exc:
+            err = Gtk.AlertDialog()
+            err.set_message("Sprite sheet export failed")
+            err.set_detail(str(exc))
+            err.show(self)
+            return
+        self._set_status()
+
     def action_export_layer(self, *_a) -> None:
         if not self.document or not self.document.layers:
             return
-        dialog = Gtk.FileDialog(title="Export Selected Layer")
+        dialog = Gtk.FileDialog(title=self._export_title("Export Selected Layer"))
         filt = Gtk.FileFilter()
         filt.set_name("PNG image")
         filt.add_pattern("*.png")
@@ -5720,7 +5796,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if path.suffix.lower() != ".png":
             path = path.with_suffix(".png")
         try:
-            self.document.export_layer_png(path)
+            self.document.export_layer_png(path, scale=self.export_scale)
         except Exception as exc:
             err = Gtk.AlertDialog()
             err.set_message("Layer export failed")
@@ -5732,7 +5808,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def action_export_layers(self, *_a) -> None:
         if not self.document:
             return
-        dialog = Gtk.FileDialog(title="Export Separated Layers")
+        dialog = Gtk.FileDialog(title=self._export_title("Export Separated Layers"))
         self._start_in_asset_folder(dialog)
         dialog.select_folder(self, None, self._on_export_layers_done)
 
@@ -5748,7 +5824,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         try:
             self.document.export_layers_png(
-                path, index_prefix=current_flavor().layer_export_index
+                path, index_prefix=current_flavor().layer_export_index, scale=self.export_scale
             )
         except Exception as exc:
             err = Gtk.AlertDialog()

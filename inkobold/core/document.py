@@ -145,6 +145,18 @@ class SaveJob:
         return target
 
 
+# Export Scale choices: whole multiples so pixel art enlarges without blur
+EXPORT_SCALES: tuple[int, ...] = (1, 2, 3, 4, 6, 8)
+
+
+def upscale_nearest(rgba: np.ndarray, scale: int) -> np.ndarray:
+    """Enlarge an image by a whole factor, each pixel becoming a scale×scale block."""
+    n = max(1, int(scale))
+    if n == 1:
+        return rgba
+    return np.repeat(np.repeat(rgba, n, axis=0), n, axis=1)
+
+
 def _read_umask() -> int:
     # Read once at import: os.umask() is process-wide, so toggling it from a
     # save worker thread could race with files created elsewhere.
@@ -946,8 +958,8 @@ class Document:
         for fr in self._animation_frames():
             yield self.flat_rgba(background, layers=fr.layers)
 
-    def export_animation_gif(self, path: Path) -> Path:
-        """Flatten all frames into an animated GIF at document fps.
+    def export_animation_gif(self, path: Path, scale: int = 1) -> Path:
+        """Flatten all frames into an animated GIF at document fps, enlarged by *scale*.
 
         Keeps transparent pixels (GIF binary transparency). Leave frames as
         RGBA so Pillow can assign a transparency index when quantizing.
@@ -958,7 +970,8 @@ class Document:
         fps = max(1.0, float(self.fps))
         duration_ms = max(1, int(round(1000.0 / fps)))
         pil_frames: list[Image.Image] = [
-            Image.fromarray(rgba, mode="RGBA") for rgba in self.iter_frame_rgba()
+            Image.fromarray(upscale_nearest(rgba, scale), mode="RGBA")
+            for rgba in self.iter_frame_rgba()
         ]
         if not pil_frames:
             raise ValueError("no frames to export")
@@ -974,7 +987,7 @@ class Document:
         )
         return path
 
-    def export_animation_png_sequence(self, folder: Path) -> Path:
+    def export_animation_png_sequence(self, folder: Path, scale: int = 1) -> Path:
         """Write each frame as a separate PNG into ``folder`` (created if needed)."""
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
@@ -982,7 +995,7 @@ class Document:
         frames = self._animation_frames()
         width = max(1, len(str(len(frames))))
         for i, fr in enumerate(frames):
-            rgba = self.flat_rgba(layers=fr.layers)
+            rgba = upscale_nearest(self.flat_rgba(layers=fr.layers), scale)
             name = f"frame_{i + 1:0{width}d}.png"
             Image.fromarray(rgba, mode="RGBA").save(
                 folder / name,
@@ -991,6 +1004,50 @@ class Document:
                 dpi=dpi,
             )
         return folder
+
+    def export_sprite_sheet(self, path: Path, scale: int = 1) -> Path:
+        """Write every animation frame side by side in one PNG, plus a ``.json`` beside it.
+
+        Frames run left to right in one row (Godot ``hframes`` = frame count).
+        The JSON lists each frame's rectangle in the sheet and its duration so
+        engines and scripts can slice the sheet without guessing.
+        """
+        path = Path(path)
+        if path.suffix.lower() != ".png":
+            path = path.with_suffix(".png")
+        n = max(1, int(scale))
+        frames = self._animation_frames()
+        if not frames:
+            raise ValueError("no frames to export")
+        fw, fh = self.width * n, self.height * n
+        sheet = np.zeros((fh, fw * len(frames), 4), dtype=np.uint8)
+        fps = max(1.0, float(self.fps))
+        duration_ms = max(1, int(round(1000.0 / fps)))
+        entries = []
+        for i, fr in enumerate(frames):
+            sheet[:, i * fw : (i + 1) * fw] = upscale_nearest(self.flat_rgba(layers=fr.layers), n)
+            entries.append({
+                "name": fr.name,
+                "x": i * fw,
+                "y": 0,
+                "w": fw,
+                "h": fh,
+                "duration_ms": duration_ms,
+            })
+        dpi = (max(1, int(self.dpi)), max(1, int(self.dpi)))
+        Image.fromarray(sheet, mode="RGBA").save(path, format="PNG", optimize=True, dpi=dpi)
+        meta = {
+            "image": path.name,
+            "frame_width": fw,
+            "frame_height": fh,
+            "columns": len(frames),
+            "rows": 1,
+            "scale": n,
+            "fps": fps,
+            "frames": entries,
+        }
+        path.with_suffix(".json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        return path
 
     def _layer_rgba_u8(self, ly: Layer, *, bake_opacity: bool = True) -> np.ndarray:
         """Document-sized RGBA uint8 for one layer (offset applied, opacity baked unless off)."""
@@ -1025,7 +1082,7 @@ class Document:
         safe = safe.strip("._")
         return safe or "layer"
 
-    def export_layers_png(self, folder: Path, index_prefix: bool = True) -> Path:
+    def export_layers_png(self, folder: Path, index_prefix: bool = True, scale: int = 1) -> Path:
         """Write each layer of the current frame as a document-sized PNG into ``folder``.
 
         Files are named ``<index>_<layer name>.png``, or just ``<layer name>.png``
@@ -1045,7 +1102,7 @@ class Document:
             if name in used:
                 name = f"{stem}_{ly.id}.png"
             used.add(name)
-            rgba = self._layer_rgba_u8(ly)
+            rgba = upscale_nearest(self._layer_rgba_u8(ly), scale)
             Image.fromarray(rgba, mode="RGBA").save(
                 folder / name,
                 format="PNG",
@@ -1054,7 +1111,7 @@ class Document:
             )
         return folder
 
-    def export_layer_png(self, path: Path, index: int | None = None) -> Path:
+    def export_layer_png(self, path: Path, index: int | None = None, scale: int = 1) -> Path:
         """Write one layer as a document-sized PNG (offset + opacity baked).
 
         ``index`` defaults to the active layer. Always writes PNG.
@@ -1068,7 +1125,7 @@ class Document:
         if idx < 0 or idx >= len(self.layers):
             raise IndexError(f"layer index out of range: {idx}")
         dpi = (max(1, int(self.dpi)), max(1, int(self.dpi)))
-        rgba = self._layer_rgba_u8(self.layers[idx])
+        rgba = upscale_nearest(self._layer_rgba_u8(self.layers[idx]), scale)
         Image.fromarray(rgba, mode="RGBA").save(
             path,
             format="PNG",
@@ -1077,8 +1134,11 @@ class Document:
         )
         return path
 
-    def export_image(self, path: Path) -> Path:
-        """Flatten and write PNG / JPEG / WebP, honoring dpi and color_depth."""
+    def export_image(self, path: Path, scale: int = 1) -> Path:
+        """Flatten and write PNG / JPEG / WebP, honoring dpi and color_depth.
+
+        *scale* enlarges the result by a whole factor without smoothing.
+        """
         path = Path(path)
         suffix = path.suffix.lower()
         if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
@@ -1089,7 +1149,7 @@ class Document:
         depth = valid_color_depth(self.color_depth)
 
         if depth == COLOR_DEPTH_GRAY8:
-            rgba = self.flat_rgba(background=(255, 255, 255, 255))
+            rgba = upscale_nearest(self.flat_rgba(background=(255, 255, 255, 255)), scale)
             img = Image.fromarray(rgba, mode="RGBA").convert("L")
             if suffix in {".jpg", ".jpeg"}:
                 img.save(path, format="JPEG", quality=92, optimize=True, dpi=dpi)
@@ -1100,7 +1160,7 @@ class Document:
             return path
 
         if depth == COLOR_DEPTH_RGB24 or suffix in {".jpg", ".jpeg"}:
-            rgba = self.flat_rgba(background=(255, 255, 255, 255))
+            rgba = upscale_nearest(self.flat_rgba(background=(255, 255, 255, 255)), scale)
             img = Image.fromarray(rgba, mode="RGBA").convert("RGB")
             if suffix in {".jpg", ".jpeg"}:
                 img.save(path, format="JPEG", quality=92, optimize=True, dpi=dpi)
@@ -1111,7 +1171,7 @@ class Document:
             return path
 
         # RGBA32 and RGBA16 — external formats use 8-bit preview composite
-        rgba = self.flat_rgba()
+        rgba = upscale_nearest(self.flat_rgba(), scale)
         img = Image.fromarray(rgba, mode="RGBA")
         if suffix == ".webp":
             img.save(path, format="WEBP", quality=90, method=4)
