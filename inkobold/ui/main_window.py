@@ -146,6 +146,8 @@ class _DocTab:
     zoom: float = 1.0
     pan_x: float = 40.0
     pan_y: float = 40.0
+    # Pixel Art mode for this tab; the window follows it on tab switch
+    pixel: bool = field(default_factory=lambda: current_flavor().pixel_default)
     root: Optional[Gtk.Widget] = field(default=None, repr=False)
     label: Optional[Gtk.Label] = field(default=None, repr=False)
     # Last (text, tooltip) pushed to the tab widget and whether it carried the
@@ -1644,6 +1646,8 @@ class MainWindow(Gtk.ApplicationWindow):
         changed = enabled != self.pixel_mode
         action.set_state(value)
         self.pixel_mode = enabled
+        if 0 <= self._active_tab < len(self._tabs):
+            self._tabs[self._active_tab].pixel = enabled
         if hasattr(self, "pixel_mode_toggle") and self.pixel_mode_toggle.get_active() != enabled:
             self.pixel_mode_toggle.set_active(enabled)
         if hasattr(self, "canvas"):
@@ -4012,6 +4016,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self.document = tab.document
         self.history = tab.history
         self.canvas.renderer.invalidate()
+        # Before the view below, so Fit and the restored zoom use this tab's mode
+        if tab.pixel != self.pixel_mode:
+            action = self.lookup_action("pixel_mode")
+            if action is not None:
+                action.change_state(GLib.Variant.new_boolean(tab.pixel))
         if fit:
             self.canvas.request_fit()
         else:

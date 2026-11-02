@@ -27,7 +27,7 @@ Canvas defaults: pan `(40, 40)`, zoom `1.0`. Zoom clamp **0.05–32**. App start
 
 ## Pixel Art
 
-Per-document toggle (saved in the document workspace) for pixel art. While on, the paint primitives that Pen, Brush (round tip), Eraser, Line, Rectangle, Curve and Replace build on change:
+Per-document toggle for pixel art: each tab keeps its own setting (switching tabs switches the mode), it is saved in the document workspace, and new documents start with it off (on in Inkimp). While on, the paint primitives that Pen, Brush (round tip), Eraser, Line, Rectangle, Curve and Replace build on change:
 
 - Stamps are hard: alpha is all or nothing, with no soft edge. 1 px is a single pixel, 2 px a 2×2 block, 3 px a plus and wider tips are round.
 - **Size** is the stroke width in whole pixels and pen pressure is ignored.
