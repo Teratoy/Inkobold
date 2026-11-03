@@ -30,6 +30,35 @@ def build_menubar(win) -> Gtk.Box:
 
     menubar.append(win._build_toolbar_app_icon())
 
+    _add_file_menu(win, menubar)
+    _add_edit_menu(win, menubar)
+    _add_effects_menu(win, menubar)
+    _add_view_menu(win, menubar)
+    _add_layer_menu(win, menubar)
+    _add_anim_menu(win, menubar)
+    _add_settings_menu(win, menubar)
+
+    menubar.append(build_doc_tabs(win))
+
+    win.reload_btn = Gtk.Button(label="Reload")
+    win.reload_btn.set_tooltip_text(f"Reload {current_flavor().display_name} (debug)")
+    win.reload_btn.add_css_class("exit-btn")
+    win.reload_btn.set_halign(Gtk.Align.END)
+    win.reload_btn.set_visible(bool(win.app_settings.debug_mode))
+    win.reload_btn.connect("clicked", win.request_reload)
+    menubar.append(win.reload_btn)
+
+    exit_btn = Gtk.Button(label="Exit")
+    exit_btn.set_tooltip_text(f"Exit {current_flavor().display_name}")
+    exit_btn.add_css_class("exit-btn")
+    exit_btn.set_halign(Gtk.Align.END)
+    exit_btn.connect("clicked", win.request_quit)
+    menubar.append(exit_btn)
+    return menubar
+
+
+def _add_file_menu(win, menubar: Gtk.Box) -> None:
+    """File menu."""
     file_btn = Gtk.MenuButton(label="File")
     file_menu = Gio.Menu()
     file_menu.append("New File…", "win.new")
@@ -58,6 +87,9 @@ def build_menubar(win) -> Gtk.Box:
     file_btn.set_menu_model(file_menu)
     menubar.append(file_btn)
 
+
+def _add_edit_menu(win, menubar: Gtk.Box) -> None:
+    """Edit menu."""
     edit_btn = Gtk.MenuButton(label="Edit")
     edit_menu = Gio.Menu()
     edit_menu.append("Undo", "win.undo")
@@ -79,6 +111,9 @@ def build_menubar(win) -> Gtk.Box:
     edit_btn.set_menu_model(edit_menu)
     menubar.append(edit_btn)
 
+
+def _add_effects_menu(win, menubar: Gtk.Box) -> None:
+    """Effects menu."""
     effects_btn = Gtk.MenuButton(label="Effects")
     effects_menu = Gio.Menu()
 
@@ -123,6 +158,9 @@ def build_menubar(win) -> Gtk.Box:
     effects_btn.set_menu_model(effects_menu)
     menubar.append(effects_btn)
 
+
+def _add_view_menu(win, menubar: Gtk.Box) -> None:
+    """View menu."""
     view_btn = Gtk.MenuButton(label="View")
     view_menu = Gio.Menu()
     view_menu.append("Fit Canvas", "win.fit")
@@ -142,6 +180,9 @@ def build_menubar(win) -> Gtk.Box:
     view_btn.set_menu_model(view_menu)
     menubar.append(view_btn)
 
+
+def _add_layer_menu(win, menubar: Gtk.Box) -> None:
+    """Layer menu."""
     layer_btn = Gtk.MenuButton(label="Layer")
     layer_menu = Gio.Menu()
     layer_menu.append("Add Layer", "win.add_layer")
@@ -156,6 +197,9 @@ def build_menubar(win) -> Gtk.Box:
     layer_btn.set_menu_model(layer_menu)
     menubar.append(layer_btn)
 
+
+def _add_anim_menu(win, menubar: Gtk.Box) -> None:
+    """Animation menu."""
     anim_btn = Gtk.MenuButton(label="Animation")
     anim_menu = Gio.Menu()
     anim_menu.append("Add Frame", "win.add_frame")
@@ -171,6 +215,9 @@ def build_menubar(win) -> Gtk.Box:
     anim_btn.set_menu_model(anim_menu)
     menubar.append(anim_btn)
 
+
+def _add_settings_menu(win, menubar: Gtk.Box) -> None:
+    """Settings menu."""
     settings_btn = Gtk.MenuButton(label="Settings")
     settings_menu = Gio.Menu()
     theme_menu = Gio.Menu()
@@ -199,24 +246,6 @@ def build_menubar(win) -> Gtk.Box:
     settings_btn.set_menu_model(settings_menu)
     menubar.append(settings_btn)
     win._rebuild_shortcuts_submenu()
-
-    menubar.append(build_doc_tabs(win))
-
-    win.reload_btn = Gtk.Button(label="Reload")
-    win.reload_btn.set_tooltip_text(f"Reload {current_flavor().display_name} (debug)")
-    win.reload_btn.add_css_class("exit-btn")
-    win.reload_btn.set_halign(Gtk.Align.END)
-    win.reload_btn.set_visible(bool(win.app_settings.debug_mode))
-    win.reload_btn.connect("clicked", win.request_reload)
-    menubar.append(win.reload_btn)
-
-    exit_btn = Gtk.Button(label="Exit")
-    exit_btn.set_tooltip_text(f"Exit {current_flavor().display_name}")
-    exit_btn.add_css_class("exit-btn")
-    exit_btn.set_halign(Gtk.Align.END)
-    exit_btn.connect("clicked", win.request_quit)
-    menubar.append(exit_btn)
-    return menubar
 
 
 class MenusMixin:

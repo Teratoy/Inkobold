@@ -100,6 +100,19 @@ def build_toolbox_page(win) -> Gtk.Box:
 
     opts = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
     toolbox_page.append(opts)
+    _add_stroke_rows(win, opts)
+    _add_modes_rows(win, opts)
+    _add_pattern_rows(win, opts)
+    _add_type_rows(win, opts)
+    _add_color_rows(win, opts)
+    _add_shading_rows(win, opts)
+
+    _add_symmetry_box(win, toolbox_page)
+    return toolbox_page
+
+
+def _add_stroke_rows(win, opts: Gtk.Box) -> None:
+    """Size, Opacity and the Brush mode / tip / density rows."""
     win.size_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
     opts.append(win.size_row)
     win.size_label = Gtk.Label(label="Size", xalign=0)
@@ -192,6 +205,9 @@ def build_toolbox_page(win) -> Gtk.Box:
     win.brush_density_spin.connect("value-changed", win._on_brush_density_changed)
     win.brush_density_row.append(win.brush_density_spin)
 
+
+def _add_modes_rows(win, opts: Gtk.Box) -> None:
+    """Per-tool mode dropdowns (Curve, Eraser, Replace, Fill, Lay) and the arc Degrees spin."""
     win.curve_mode_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
     opts.append(win.curve_mode_row)
     win.curve_mode_row.append(Gtk.Label(label="Mode", xalign=0))
@@ -289,6 +305,9 @@ def build_toolbox_page(win) -> Gtk.Box:
     win.arc_degrees_spin.connect("value-changed", win._on_arc_degrees_changed)
     win.arc_degrees_row.append(win.arc_degrees_spin)
 
+
+def _add_pattern_rows(win, opts: Gtk.Box) -> None:
+    """Pattern picker (shared by Fill and Lay), Lay distance, Tile Scale and maze Cell Size."""
     # Shared by Fill (pattern mode) and Lay — keep as a top-level opts child
     # so it stays visible when fill_opts_row is hidden.
     win.pattern_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
@@ -370,6 +389,8 @@ def build_toolbox_page(win) -> Gtk.Box:
     win.maze_cell_row.append(win.maze_cell_spin)
 
 
+def _add_type_rows(win, opts: Gtk.Box) -> None:
+    """Type tool: font source and font picker."""
     win.type_opts_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
     opts.append(win.type_opts_row)
     win.type_opts_row.append(Gtk.Label(label="Font Source", xalign=0))
@@ -403,6 +424,9 @@ def build_toolbox_page(win) -> Gtk.Box:
     win.font_dropdown.connect("notify::selected", win._on_font_changed)
     win.type_opts_row.append(win.font_dropdown)
 
+
+def _add_color_rows(win, opts: Gtk.Box) -> None:
+    """Primary / secondary color pair, swap button and the palette panel."""
     # Primary / secondary color pair; X swaps them
     win.color_pair_row = Gtk.Grid(column_spacing=4, row_spacing=4, margin_top=4)
     opts.append(win.color_pair_row)
@@ -440,6 +464,9 @@ def build_toolbox_page(win) -> Gtk.Box:
     )
     opts.append(win.palette_panel)
 
+
+def _add_shading_rows(win, opts: Gtk.Box) -> None:
+    """Threshold, Intensity, Liquify warp, 3D Fill shading spins and 3D Pen Frequency."""
     win.threshold_row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=4)
     opts.append(win.threshold_row)
     win.threshold_row.append(Gtk.Label(label="Threshold", xalign=0))
@@ -530,6 +557,9 @@ def build_toolbox_page(win) -> Gtk.Box:
     win.frequency_spin.connect("value-changed", win._on_frequency_changed)
     win.frequency_row.append(win.frequency_spin)
 
+
+def _add_symmetry_box(win, toolbox_page: Gtk.Box) -> None:
+    """Symmetry (mirror / radial / linear array), Wrap and Pixel toggles."""
     toolbox_page.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL, margin_top=6, margin_bottom=2))
     mirror_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
     toolbox_page.append(mirror_box)
@@ -649,7 +679,6 @@ def build_toolbox_page(win) -> Gtk.Box:
     reset_btn.connect("clicked", win._on_mirror_reset)
     win.mirror_opts.append(reset_btn)
     win._update_mirror_mode_ui()
-    return toolbox_page
 
 
 class ToolOptionsMixin:
