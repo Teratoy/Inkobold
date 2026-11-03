@@ -6,16 +6,17 @@ Version **0.1.0** · Python **≥3.11** · App id `trinkets.inkobold`
 
 ## Features
 
-- **File** — Multi-document tabs; New File (pixel size), Open, Save (`.inkobold` multilayer ZIP), Export, Export Selected Layer, Export Separated Layers, Import Image as Layer
+- **File** — Multi-document tabs; New File (pixel size), Open, Save (`.inkobold` multilayer ZIP), Export, Export Selected Layer, Export Separated Layers, Export Animation (GIF, PNG folder, sprite sheet + JSON), Export Scale (1×–8×, no smoothing), Import Image as Layer; Autosave (every 2 min by default, to a separate folder) with Recover Autosave after a crash
 - **Layers** — RGBA layers (8 or 16 bpc), visibility, opacity, offsets, GPU composite; add / duplicate / rename / delete / merge down / merge visible / merge all
 - **Animation** — Frames with FPS playback; onion-skin of the previous frame; export GIF or PNG sequence
+- **Colors** — Primary / secondary color pair (`X` swaps; Gradient end, maze corridors and puzzle pieces use the secondary), shared across tools or per tool; palette swatches from Libraries → Palettes in the side panel and the color picker
 - **Tools** — Pen, Line, Rectangle, Curve (freehand / arc / circle), Lay (pattern stamps along a path), Brush (round / custom tip / bubbles), Weld Brush, Fill, Gradient, 3D Pen, 3D Fill, Eraser, Smear, Liquify, Replace (replace/erase × brush/fill/all), Transform (move / scale / rotate), Lasso, Type
 - **Effects** — Blur & Sharpen, Stylize (Pixelate, Drop Shadow, Dither, Posterize, **Flora**), Color, Distort, Edge & Depth, Materials (Metal Relief, Milk); apply to active layer or all layers
-- **Libraries** — User brushes, patterns, and fonts under the platform data dir (see Paths below)
+- **Libraries** — User brushes, patterns, fonts, and palettes (GIMP `.gpl`; import `.hex` or palette images) under the platform data dir (see Paths below)
 - **Input** — GDK drawing path; on Linux, optional libinput poll + libwacom tablet identification
 - **View** — Pan (middle mouse), scroll zoom, Fit Canvas, grid, Use / Show / Deactivate Sun (draggable light for 3D / Metal / Milk; deactivate restores classic lighting), Tile Preview, Wrap Moves, checker background, Fullscreen / Borderless / Windowed
-- **Edit** — Undo / Redo; stroke Symmetry (Mirror or Radial, 1–16, movable hub, H / V / diagonal); Flip / Rotate layer; Crop Canvas (live size; optional selection bounds)
-- **Settings** — Theme, Memory (undo steps), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (rebind), Debug Mode
+- **Edit** — Undo / Redo; stroke Symmetry (Mirror or Radial, 1–16, movable hub, H / V / diagonal; Linear Array with free spacing and direction); Flip / Rotate layer; Crop Canvas (live size; optional selection bounds)
+- **Settings** — Theme, Memory (undo steps, autosave), Image (crop / DPI / color depth), Tools (color follows tools, visible tools), Shortcuts (rebind), Debug Mode
 
 ## Documentation
 
@@ -38,6 +39,14 @@ python3 -m venv --system-site-packages .venv
 ```
 
 Requires system **PyGObject** + **GTK4** (distro packages; use a venv with `--system-site-packages`).
+
+## GreenInkobold
+
+A flavor for the Goblin Engineering asset pipeline: export dialogs open in `visual assets/`, and an **Assets** tab shows the whole folder as a live file tree. Run it with `./scripts/run-green.sh` or `python -m inkobold.green`.
+
+## Inkimp
+
+A flavor for pixel art: **Pixel Art** mode is on from the start (hard pixels, pixel-perfect 1 px strokes, whole-number zoom, pixel grid), New File offers sprite sizes (32×32 by default) and the toolbox hides the soft tools (Lay, Weld Brush, Gradient, 3D Pen/Fill, Smear, Liquify, Type), which **Visible Tools** can bring back. Run it with `./scripts/run-imp.sh` or `python -m inkobold.imp`; desktop entry `scripts/inkimp.desktop`.
 
 ## Run / package (Windows)
 
@@ -63,10 +72,11 @@ Shortcuts are rebindable under **Settings → Shortcuts**. Defaults are listed i
 ```
 document.json
 frames/FFF/layers/LLL.png   # or .npy for 16 bpc
-layers/LLL.png              # legacy mirror of the current frame
 ```
 
-Also opens PNG / JPEG / WebP / BMP / GIF (multi-frame GIF → animation). Details: [File Format](https://github.com/Teratoy/Inkobold/wiki/File-Format).
+Saves are atomic (temp file + rename), so a failed save never damages the existing file.
+
+Also opens PNG / JPEG / WebP / BMP / GIF (multi-frame GIF → animation). Pass paths on the command line (`inkobold file.inkobold`) or via the desktop entry (`%F`). Details: [File Format](https://github.com/Teratoy/Inkobold/wiki/File-Format).
 
 ## Author
 

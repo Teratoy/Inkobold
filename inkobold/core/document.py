@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
+import tempfile
 import uuid
 import zipfile
 from dataclasses import dataclass, field
@@ -26,6 +28,7 @@ from inkobold.core.image_meta import (
     DEFAULT_DPI,
     channel_max,
     constrain_pixels,
+    has_alpha,
     convert_pixels,
     storage_dtype,
     to_display_u8,
@@ -90,6 +93,90 @@ class Selection:
         return f"Selection(mask={shape}, revision={self.revision})"
 
 
+class SaveJob:
+    """A frozen snapshot of a document, ready to be written to disk.
+
+    ``Document.prepare_save`` copies every pixel buffer, so ``write()`` touches
+    no live document state and may run on a worker thread while the user keeps
+    drawing. ``write()`` is atomic: it writes a temporary file next to the
+    target and renames it into place, so a failed or interrupted save never
+    damages an existing file.
+    """
+
+    def __init__(self, target: Path, meta: dict, files: list[tuple[str, np.ndarray, bool]]) -> None:
+        self.target = target
+        self.meta = meta
+        # (zip member name, pixel copy, use .npy)
+        self.files = files
+
+    def write(self) -> Path:
+        target = self.target
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent)
+        )
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                with zipfile.ZipFile(fh, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    for fname, pixels, use_u16 in self.files:
+                        _write_layer_pixels(zf, pixels, fname, use_u16)
+                    zf.writestr("document.json", json.dumps(self.meta, indent=2))
+                fh.flush()
+                try:
+                    os.fsync(fh.fileno())
+                except OSError:
+                    pass
+            try:
+                # Keep the permissions of the file being replaced.
+                os.chmod(tmp, target.stat().st_mode & 0o7777)
+            except OSError:
+                try:
+                    os.chmod(tmp, 0o666 & ~_UMASK)
+                except OSError:
+                    pass
+            os.replace(tmp, target)
+        except BaseException:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise
+        return target
+
+
+# Export Scale choices: whole multiples so pixel art enlarges without blur
+EXPORT_SCALES: tuple[int, ...] = (1, 2, 3, 4, 6, 8)
+
+
+def upscale_nearest(rgba: np.ndarray, scale: int) -> np.ndarray:
+    """Enlarge an image by a whole factor, each pixel becoming a scale×scale block."""
+    n = max(1, int(scale))
+    if n == 1:
+        return rgba
+    return np.repeat(np.repeat(rgba, n, axis=0), n, axis=1)
+
+
+def _read_umask() -> int:
+    # Read once at import: os.umask() is process-wide, so toggling it from a
+    # save worker thread could race with files created elsewhere.
+    mask = os.umask(0o022)
+    os.umask(mask)
+    return mask
+
+
+_UMASK = _read_umask()
+
+
+def _write_layer_pixels(zf: zipfile.ZipFile, pixels: np.ndarray, fname: str, use_u16: bool) -> None:
+    buf = BytesIO()
+    if use_u16:
+        np.save(buf, np.ascontiguousarray(pixels))
+    else:
+        Image.fromarray(to_display_u8(pixels), mode="RGBA").save(buf, format="PNG")
+    zf.writestr(fname, buf.getvalue())
+
+
 @dataclass
 class Document:
     width: int
@@ -109,6 +196,9 @@ class Document:
     onion_opacity: float = DEFAULT_ONION_OPACITY
     # Document-scoped UI / tool options restored on open (see File Format).
     workspace: dict = field(default_factory=dict)
+    # GreenInkobold character (core.character.CharacterRig) when this canvas is a rig
+    # folder's parts; saved as part PNGs + rig.json instead of .inkobold.
+    character: Optional[object] = None
 
     @classmethod
     def blank(
@@ -122,6 +212,10 @@ class Document:
         depth = valid_color_depth(color_depth)
         doc = cls(width=width, height=height, dpi=dpi, color_depth=depth)
         frame = blank_frame(width, height, name="Frame 1", layer_name=name, color_depth=depth)
+        if not has_alpha(depth):
+            # RGB / grayscale documents have no transparency: start on paper white.
+            frame.layers[0].pixels.fill(channel_max(depth))
+            frame.layers[0].bump()
         doc.frames = [frame]
         doc.current_frame_index = 0
         doc.layers = frame.layers
@@ -287,6 +381,11 @@ class Document:
             return False
         below = self.layers[index - 1]
         above = self.layers[index]
+        if not below.visible or not above.visible:
+            # The composite skips hidden layers, so merging would silently
+            # discard a hidden layer's pixels. Callers should ask the user to
+            # show both layers first.
+            return False
         self._apply_composite_to_layer(below, [below, above])
         del self.layers[index]
         self.active_layer_index = index - 1
@@ -295,7 +394,11 @@ class Document:
         return True
 
     def merge_all(self) -> bool:
-        """Flatten the entire layer stack into a single layer. Returns False if already flat."""
+        """Flatten the entire layer stack into a single layer. Returns False if already flat.
+
+        Hidden layers are not part of the flattened image and are discarded;
+        the UI confirms this with the user first (see ``hidden_layer_count``).
+        """
         if len(self.layers) <= 1:
             return False
         target = self.layers[0]
@@ -306,6 +409,9 @@ class Document:
         self._sync_frame_from_layers()
         self.dirty = True
         return True
+
+    def hidden_layer_count(self) -> int:
+        return sum(1 for ly in self.layers if not ly.visible)
 
     def merge_visible(self) -> bool:
         """Merge all visible layers into the bottom-most visible one; keep hidden layers.
@@ -543,6 +649,8 @@ class Document:
         for fr in frames:
             for ly in fr.layers:
                 _convert_layer(ly)
+            if not has_alpha(new_depth) and fr.layers:
+                _flatten_onto_white(fr.layers[0], new_depth)
         self.color_depth = new_depth
         self.dirty = True
 
@@ -598,22 +706,26 @@ class Document:
             "dtype": str(ly.pixels.dtype),
         }
 
-    def _write_layer_pixels(self, zf: zipfile.ZipFile, ly: Layer, fname: str, use_u16: bool) -> None:
-        if use_u16:
-            buf = BytesIO()
-            np.save(buf, np.ascontiguousarray(ly.pixels))
-            zf.writestr(fname, buf.getvalue())
-        else:
-            buf = BytesIO()
-            Image.fromarray(to_display_u8(ly.pixels), mode="RGBA").save(buf, format="PNG")
-            zf.writestr(fname, buf.getvalue())
+    def prepare_save(self, path: Path | None = None) -> SaveJob:
+        """Snapshot the document for saving (copies pixels; cheap, main thread).
 
-    def save(self, path: Path | None = None) -> Path:
+        Also marks the document clean and points ``self.path`` at the target,
+        so edits made while the job is written in the background re-dirty it.
+        If the write fails, callers should restore ``path`` / ``dirty``.
+        """
         target = Path(path or self.path or "untitled.inkobold")
         if target.suffix.lower() not in {".inkobold", ".scribbler", ".zip"}:
             target = target.with_suffix(".inkobold")
+        job = self.snapshot(target)
+        self.path = target
+        self.dirty = False
+        return job
+
+    def snapshot(self, target: Path) -> SaveJob:
+        """A SaveJob writing the document to *target* exactly; ``path`` / ``dirty`` untouched."""
         self._sync_frame_from_layers()
         use_u16 = storage_dtype(self.color_depth) == np.dtype(np.uint16)
+        ext = "npy" if use_u16 else "png"
         frames = self.frames or [
             AnimFrame(
                 name="Frame 1",
@@ -633,36 +745,38 @@ class Document:
             "current_frame_index": int(self.current_frame_index),
             "active_layer_index": self.active_layer_index,
             "frames": [],
-            # Legacy single-frame mirror (current frame) for older readers
+            # Legacy single-frame mirror (current frame) for older readers.
+            # Entries point at the frame files, so pixels are stored once.
             "layers": [],
         }
         if self.workspace:
-            meta["workspace"] = self.workspace
-        with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for fi, fr in enumerate(frames):
-                frame_meta = {
-                    "name": fr.name,
-                    "active_layer_index": int(fr.active_layer_index),
-                    "layers": [],
-                }
-                for li, ly in enumerate(fr.layers):
-                    ext = "npy" if use_u16 else "png"
-                    fname = f"frames/{fi:03d}/layers/{li:03d}.{ext}"
-                    self._write_layer_pixels(zf, ly, fname, use_u16)
-                    frame_meta["layers"].append(self._layer_meta_entry(ly, fname))
-                meta["frames"].append(frame_meta)
-            # Also write current frame under legacy layers/ paths
-            cur = frames[self.current_frame_index] if frames else None
-            if cur is not None:
-                for li, ly in enumerate(cur.layers):
-                    ext = "npy" if use_u16 else "png"
-                    fname = f"layers/{li:03d}.{ext}"
-                    self._write_layer_pixels(zf, ly, fname, use_u16)
-                    meta["layers"].append(self._layer_meta_entry(ly, fname))
-            zf.writestr("document.json", json.dumps(meta, indent=2))
-        self.path = target
-        self.dirty = False
-        return target
+            meta["workspace"] = json.loads(json.dumps(self.workspace))
+        files: list[tuple[str, np.ndarray, bool]] = []
+        for fi, fr in enumerate(frames):
+            frame_meta = {
+                "name": fr.name,
+                "active_layer_index": int(fr.active_layer_index),
+                "layers": [],
+            }
+            for li, ly in enumerate(fr.layers):
+                fname = f"frames/{fi:03d}/layers/{li:03d}.{ext}"
+                files.append((fname, ly.pixels.copy(), use_u16))
+                entry = self._layer_meta_entry(ly, fname)
+                frame_meta["layers"].append(entry)
+                if fi == self.current_frame_index:
+                    meta["layers"].append(dict(entry))
+            meta["frames"].append(frame_meta)
+        return SaveJob(Path(target), meta, files)
+
+    def save(self, path: Path | None = None) -> Path:
+        """Save synchronously (atomic). On failure the document stays dirty."""
+        old_path, old_dirty = self.path, self.dirty
+        job = self.prepare_save(path)
+        try:
+            return job.write()
+        except BaseException:
+            self.path, self.dirty = old_path, old_dirty
+            raise
 
     @classmethod
     def _open_animated_gif(cls, path: Path, img: Image.Image) -> Document:
@@ -818,6 +932,10 @@ class Document:
         """CPU composite → uint8 RGBA (for preview / common export)."""
         src_layers = self.layers if layers is None else layers
         out = self._composite_float(src_layers, background)
+        # _composite_float accumulates associated (premultiplied) RGB; image
+        # files expect straight alpha, so divide it back out.
+        alpha = out[..., 3:4]
+        np.divide(out[..., :3], alpha, out=out[..., :3], where=alpha > 1e-6)
         return np.clip(np.rint(out * 255.0), 0, 255).astype(np.uint8)
 
     def _animation_frames(self) -> list[AnimFrame]:
@@ -840,8 +958,8 @@ class Document:
         for fr in self._animation_frames():
             yield self.flat_rgba(background, layers=fr.layers)
 
-    def export_animation_gif(self, path: Path) -> Path:
-        """Flatten all frames into an animated GIF at document fps.
+    def export_animation_gif(self, path: Path, scale: int = 1) -> Path:
+        """Flatten all frames into an animated GIF at document fps, enlarged by *scale*.
 
         Keeps transparent pixels (GIF binary transparency). Leave frames as
         RGBA so Pillow can assign a transparency index when quantizing.
@@ -852,7 +970,8 @@ class Document:
         fps = max(1.0, float(self.fps))
         duration_ms = max(1, int(round(1000.0 / fps)))
         pil_frames: list[Image.Image] = [
-            Image.fromarray(rgba, mode="RGBA") for rgba in self.iter_frame_rgba()
+            Image.fromarray(upscale_nearest(rgba, scale), mode="RGBA")
+            for rgba in self.iter_frame_rgba()
         ]
         if not pil_frames:
             raise ValueError("no frames to export")
@@ -868,7 +987,7 @@ class Document:
         )
         return path
 
-    def export_animation_png_sequence(self, folder: Path) -> Path:
+    def export_animation_png_sequence(self, folder: Path, scale: int = 1) -> Path:
         """Write each frame as a separate PNG into ``folder`` (created if needed)."""
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
@@ -876,7 +995,7 @@ class Document:
         frames = self._animation_frames()
         width = max(1, len(str(len(frames))))
         for i, fr in enumerate(frames):
-            rgba = self.flat_rgba(layers=fr.layers)
+            rgba = upscale_nearest(self.flat_rgba(layers=fr.layers), scale)
             name = f"frame_{i + 1:0{width}d}.png"
             Image.fromarray(rgba, mode="RGBA").save(
                 folder / name,
@@ -886,8 +1005,52 @@ class Document:
             )
         return folder
 
-    def _layer_rgba_u8(self, ly: Layer) -> np.ndarray:
-        """Document-sized RGBA uint8 for one layer (offset applied, opacity baked)."""
+    def export_sprite_sheet(self, path: Path, scale: int = 1) -> Path:
+        """Write every animation frame side by side in one PNG, plus a ``.json`` beside it.
+
+        Frames run left to right in one row (Godot ``hframes`` = frame count).
+        The JSON lists each frame's rectangle in the sheet and its duration so
+        engines and scripts can slice the sheet without guessing.
+        """
+        path = Path(path)
+        if path.suffix.lower() != ".png":
+            path = path.with_suffix(".png")
+        n = max(1, int(scale))
+        frames = self._animation_frames()
+        if not frames:
+            raise ValueError("no frames to export")
+        fw, fh = self.width * n, self.height * n
+        sheet = np.zeros((fh, fw * len(frames), 4), dtype=np.uint8)
+        fps = max(1.0, float(self.fps))
+        duration_ms = max(1, int(round(1000.0 / fps)))
+        entries = []
+        for i, fr in enumerate(frames):
+            sheet[:, i * fw : (i + 1) * fw] = upscale_nearest(self.flat_rgba(layers=fr.layers), n)
+            entries.append({
+                "name": fr.name,
+                "x": i * fw,
+                "y": 0,
+                "w": fw,
+                "h": fh,
+                "duration_ms": duration_ms,
+            })
+        dpi = (max(1, int(self.dpi)), max(1, int(self.dpi)))
+        Image.fromarray(sheet, mode="RGBA").save(path, format="PNG", optimize=True, dpi=dpi)
+        meta = {
+            "image": path.name,
+            "frame_width": fw,
+            "frame_height": fh,
+            "columns": len(frames),
+            "rows": 1,
+            "scale": n,
+            "fps": fps,
+            "frames": entries,
+        }
+        path.with_suffix(".json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        return path
+
+    def _layer_rgba_u8(self, ly: Layer, *, bake_opacity: bool = True) -> np.ndarray:
+        """Document-sized RGBA uint8 for one layer (offset applied, opacity baked unless off)."""
         out = np.zeros((self.height, self.width, 4), dtype=np.uint8)
         src = to_display_u8(ly.pixels)
         ox, oy = int(ly.offset_x), int(ly.offset_y)
@@ -900,7 +1063,7 @@ class Document:
         if sx1 <= sx0 or sy1 <= sy0:
             return out
         tile = src[sy0:sy1, sx0:sx1]
-        opacity = float(ly.opacity)
+        opacity = float(ly.opacity) if bake_opacity else 1.0
         if opacity <= 0.0:
             return out
         if opacity < 1.0:
@@ -919,8 +1082,12 @@ class Document:
         safe = safe.strip("._")
         return safe or "layer"
 
-    def export_layers_png(self, folder: Path) -> Path:
-        """Write each layer of the current frame as a document-sized PNG into ``folder``."""
+    def export_layers_png(self, folder: Path, index_prefix: bool = True, scale: int = 1) -> Path:
+        """Write each layer of the current frame as a document-sized PNG into ``folder``.
+
+        Files are named ``<index>_<layer name>.png``, or just ``<layer name>.png``
+        when ``index_prefix`` is False. Duplicate names get the layer id appended.
+        """
         folder = Path(folder)
         folder.mkdir(parents=True, exist_ok=True)
         dpi = (max(1, int(self.dpi)), max(1, int(self.dpi)))
@@ -929,11 +1096,13 @@ class Document:
         used: set[str] = set()
         for i, ly in enumerate(layers):
             stem = self._sanitize_layer_filename(ly.name)
-            name = f"{i:0{width}d}_{stem}.png"
+            if index_prefix:
+                stem = f"{i:0{width}d}_{stem}"
+            name = f"{stem}.png"
             if name in used:
-                name = f"{i:0{width}d}_{stem}_{ly.id}.png"
+                name = f"{stem}_{ly.id}.png"
             used.add(name)
-            rgba = self._layer_rgba_u8(ly)
+            rgba = upscale_nearest(self._layer_rgba_u8(ly), scale)
             Image.fromarray(rgba, mode="RGBA").save(
                 folder / name,
                 format="PNG",
@@ -942,7 +1111,7 @@ class Document:
             )
         return folder
 
-    def export_layer_png(self, path: Path, index: int | None = None) -> Path:
+    def export_layer_png(self, path: Path, index: int | None = None, scale: int = 1) -> Path:
         """Write one layer as a document-sized PNG (offset + opacity baked).
 
         ``index`` defaults to the active layer. Always writes PNG.
@@ -956,7 +1125,7 @@ class Document:
         if idx < 0 or idx >= len(self.layers):
             raise IndexError(f"layer index out of range: {idx}")
         dpi = (max(1, int(self.dpi)), max(1, int(self.dpi)))
-        rgba = self._layer_rgba_u8(self.layers[idx])
+        rgba = upscale_nearest(self._layer_rgba_u8(self.layers[idx]), scale)
         Image.fromarray(rgba, mode="RGBA").save(
             path,
             format="PNG",
@@ -965,8 +1134,11 @@ class Document:
         )
         return path
 
-    def export_image(self, path: Path) -> Path:
-        """Flatten and write PNG / JPEG / WebP, honoring dpi and color_depth."""
+    def export_image(self, path: Path, scale: int = 1) -> Path:
+        """Flatten and write PNG / JPEG / WebP, honoring dpi and color_depth.
+
+        *scale* enlarges the result by a whole factor without smoothing.
+        """
         path = Path(path)
         suffix = path.suffix.lower()
         if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
@@ -977,7 +1149,7 @@ class Document:
         depth = valid_color_depth(self.color_depth)
 
         if depth == COLOR_DEPTH_GRAY8:
-            rgba = self.flat_rgba(background=(255, 255, 255, 255))
+            rgba = upscale_nearest(self.flat_rgba(background=(255, 255, 255, 255)), scale)
             img = Image.fromarray(rgba, mode="RGBA").convert("L")
             if suffix in {".jpg", ".jpeg"}:
                 img.save(path, format="JPEG", quality=92, optimize=True, dpi=dpi)
@@ -988,7 +1160,7 @@ class Document:
             return path
 
         if depth == COLOR_DEPTH_RGB24 or suffix in {".jpg", ".jpeg"}:
-            rgba = self.flat_rgba(background=(255, 255, 255, 255))
+            rgba = upscale_nearest(self.flat_rgba(background=(255, 255, 255, 255)), scale)
             img = Image.fromarray(rgba, mode="RGBA").convert("RGB")
             if suffix in {".jpg", ".jpeg"}:
                 img.save(path, format="JPEG", quality=92, optimize=True, dpi=dpi)
@@ -999,10 +1171,21 @@ class Document:
             return path
 
         # RGBA32 and RGBA16 — external formats use 8-bit preview composite
-        rgba = self.flat_rgba()
+        rgba = upscale_nearest(self.flat_rgba(), scale)
         img = Image.fromarray(rgba, mode="RGBA")
         if suffix == ".webp":
             img.save(path, format="WEBP", quality=90, method=4)
         else:
             img.save(path, format="PNG", optimize=True, dpi=dpi)
         return path
+
+
+def _flatten_onto_white(ly: Layer, depth: int) -> None:
+    """Composite a layer over opaque white in place (bottom layer of RGB/gray docs)."""
+    max_v = float(channel_max(depth))
+    f = ly.pixels.astype(np.float32) / max_v
+    a = f[..., 3:4]
+    rgb = f[..., :3] * a + (1.0 - a)
+    ly.pixels[..., :3] = np.clip(np.rint(rgb * max_v), 0, max_v).astype(ly.pixels.dtype)
+    ly.pixels[..., 3] = int(max_v)
+    ly.bump()

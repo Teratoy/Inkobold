@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, GObject, Gtk  # noqa: E402
 
+from inkobold.core.flavor import current as current_flavor
 from inkobold.core.image_meta import COLOR_DEPTH_CHOICES, DEFAULT_DPI
 from inkobold.core.shortcuts import (
     DEFAULT_SHORTCUTS,
@@ -25,12 +28,24 @@ FLOAT_SPIN_DIGITS = 2
 
 
 def configure_numeric_spin(spin: Gtk.SpinButton, *, digits: int = FLOAT_SPIN_DIGITS) -> Gtk.SpinButton:
-    """Show *digits* places and allow arrow steps of 10^-digits (Page± stays coarse)."""
+    """Show *digits* places and allow arrow steps of 10^-digits (Page± stays coarse).
+
+    Stylus taps on the ± steppers must not focus the editable field: that would
+    summon the onscreen keyboard and reshape the window under GNOME/Wayland.
+    Tab still focuses the field for keyboard entry; OSK stays inhibited.
+    """
     spin.set_digits(int(digits))
     if digits > 0:
         fine = 10.0 ** (-int(digits))
         page = max(1.0, float(spin.get_adjustment().get_page_increment() or 1.0))
         spin.set_increments(fine, page)
+    spin.set_focus_on_click(False)
+    delegate = spin.get_delegate()
+    if delegate is not None and hasattr(delegate, "set_input_hints"):
+        hints = delegate.get_input_hints()
+        delegate.set_input_hints(hints | Gtk.InputHints.INHIBIT_OSK)
+        if hasattr(delegate, "set_input_purpose"):
+            delegate.set_input_purpose(Gtk.InputPurpose.NUMBER)
     return spin
 
 
@@ -68,10 +83,11 @@ def _attach_shortcut_focus_guard(parent: Gtk.Window, window: Gtk.Window) -> None
 
 
 class StartupDialog(Gtk.Window):
-    """Ask Open or New at launch. YES=new, NO=open, CANCEL=quit."""
+    """Ask Open or New at launch. YES=new, NO=open, APPLY=open character,
+    ACCEPT=recover autosaves (offered when *recoverable* > 0), CANCEL=quit."""
 
-    def __init__(self, parent: Gtk.Window) -> None:
-        super().__init__(title="Inkobold", transient_for=parent, modal=True)
+    def __init__(self, parent: Gtk.Window, recoverable: int = 0) -> None:
+        super().__init__(title=current_flavor().display_name, transient_for=parent, modal=True)
         _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(360, 140)
         self.set_resizable(False)
@@ -91,6 +107,24 @@ class StartupDialog(Gtk.Window):
             xalign=0,
             wrap=True,
         ))
+        if recoverable > 0:
+            # A previous session ended without quitting (crash / kill): offer its autosaves.
+            recover_row = Gtk.Box(spacing=8)
+            root.append(recover_row)
+            recover_row.append(Gtk.Label(
+                label=(
+                    "1 autosaved document from a session that did not quit normally."
+                    if recoverable == 1
+                    else f"{recoverable} autosaved documents from sessions that did not quit normally."
+                ),
+                xalign=0,
+                wrap=True,
+                hexpand=True,
+            ))
+            recover_btn = Gtk.Button(label="Recover…")
+            recover_btn.set_valign(Gtk.Align.CENTER)
+            recover_btn.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.ACCEPT))
+            recover_row.append(recover_btn)
 
         actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=8)
         root.append(actions)
@@ -98,11 +132,17 @@ class StartupDialog(Gtk.Window):
         quit_btn.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
         open_btn = Gtk.Button(label="Open File…")
         open_btn.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.NO))
+        character_btn = None
+        if current_flavor().character_rig:
+            character_btn = Gtk.Button(label="Open Character…")
+            character_btn.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.APPLY))
         new_btn = Gtk.Button(label="New File…")
         new_btn.add_css_class("suggested-action")
         new_btn.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.YES))
         actions.append(quit_btn)
         actions.append(open_btn)
+        if character_btn is not None:
+            actions.append(character_btn)
         actions.append(new_btn)
         self.connect("close-request", self._on_close)
 
@@ -122,8 +162,13 @@ class StartupDialog(Gtk.Window):
 class NewFileDialog(Gtk.Window):
     """New-document size prompt. Uses a plain Window so action buttons always show on GTK4."""
 
-    def __init__(self, parent: Gtk.Window, default_w: int = 1920, default_h: int = 1080) -> None:
+    def __init__(
+        self, parent: Gtk.Window, default_w: Optional[int] = None, default_h: Optional[int] = None
+    ) -> None:
         super().__init__(title="New File", transient_for=parent, modal=True)
+        size_presets = current_flavor().new_file_presets
+        if default_w is None or default_h is None:
+            _, default_w, default_h = size_presets[0]
         _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(380, 240)
         self.set_resizable(False)
@@ -144,22 +189,25 @@ class NewFileDialog(Gtk.Window):
         grid = Gtk.Grid(column_spacing=8, row_spacing=8)
         root.append(grid)
         self.width_spin = Gtk.SpinButton.new_with_range(1, 16384, 1)
+        configure_numeric_spin(self.width_spin, digits=0)
         self.width_spin.set_value(default_w)
         self.height_spin = Gtk.SpinButton.new_with_range(1, 16384, 1)
+        configure_numeric_spin(self.height_spin, digits=0)
         self.height_spin.set_value(default_h)
         grid.attach(Gtk.Label(label="Width", xalign=0), 0, 0, 1, 1)
         grid.attach(self.width_spin, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="Height", xalign=0), 0, 1, 1, 1)
         grid.attach(self.height_spin, 1, 1, 1, 1)
 
-        presets = Gtk.Box(spacing=6)
+        presets = Gtk.FlowBox(
+            selection_mode=Gtk.SelectionMode.NONE,
+            column_spacing=6,
+            row_spacing=6,
+            max_children_per_line=3,
+            homogeneous=True,
+        )
         root.append(presets)
-        for label, w, h in (
-            ("HD", 1920, 1080),
-            ("Square", 2048, 2048),
-            ("A4@150", 1240, 1754),
-            ("4K", 3840, 2160),
-        ):
+        for label, w, h in size_presets:
             btn = Gtk.Button(label=label)
             btn.connect("clicked", self._preset, w, h)
             presets.append(btn)
@@ -199,6 +247,138 @@ class NewFileDialog(Gtk.Window):
 
     def _on_create(self, *_a) -> None:
         self._emit(Gtk.ResponseType.OK)
+
+    def _on_close(self, *_a) -> bool:
+        self._emit(Gtk.ResponseType.CANCEL)
+        return True
+
+
+class NewCharacterDialog(Gtk.Window):
+    """GreenInkobold: name a new goblin-shaped character and pick what it starts from."""
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        location: Optional[Path],
+        templates: list[tuple[str, Optional[Path]]],
+    ) -> None:
+        super().__init__(title="New Character", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
+        self.set_default_size(420, 240)
+        self.set_resizable(False)
+        self._callback = None
+        self._location = location
+        self._templates = templates
+
+        root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=16,
+            margin_bottom=16,
+            margin_start=16,
+            margin_end=16,
+        )
+        self.set_child(root)
+        root.append(Gtk.Label(
+            label="A folder of the eight body parts (head, torso, arms, thighs, shins) on one canvas, "
+            "plus rig.json with the joints. The game rig animates it like the goblin.",
+            xalign=0,
+            wrap=True,
+        ))
+        grid = Gtk.Grid(column_spacing=8, row_spacing=8)
+        root.append(grid)
+        grid.attach(Gtk.Label(label="Name", xalign=0), 0, 0, 1, 1)
+        self.name_entry = Gtk.Entry(hexpand=True, placeholder_text="Guild Merchant")
+        self.name_entry.connect("changed", lambda *_: self._validate())
+        self.name_entry.connect("activate", lambda *_: self._on_create())
+        grid.attach(self.name_entry, 1, 0, 2, 1)
+        grid.attach(Gtk.Label(label="Start from", xalign=0), 0, 1, 1, 1)
+        self.template_drop = Gtk.DropDown.new_from_strings([label for label, _ in templates])
+        self.template_drop.set_hexpand(True)
+        grid.attach(self.template_drop, 1, 1, 2, 1)
+        grid.attach(Gtk.Label(label="In", xalign=0), 0, 2, 1, 1)
+        self.location_label = Gtk.Label(xalign=0, hexpand=True, ellipsize=3)  # Pango END
+        grid.attach(self.location_label, 1, 2, 1, 1)
+        change = Gtk.Button(label="Change…")
+        change.connect("clicked", self._on_change_location)
+        grid.attach(change, 2, 2, 1, 1)
+        self.problem = Gtk.Label(xalign=0, wrap=True)
+        self.problem.add_css_class("dim-label")
+        root.append(self.problem)
+
+        actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=8)
+        root.append(actions)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
+        self.create_btn = Gtk.Button(label="Create")
+        self.create_btn.add_css_class("suggested-action")
+        self.create_btn.connect("clicked", lambda *_: self._on_create())
+        actions.append(cancel)
+        actions.append(self.create_btn)
+        self.connect("close-request", self._on_close)
+        self._show_location()
+        self._validate()
+
+    def folder(self) -> Optional[Path]:
+        name = self.name_entry.get_text().strip()
+        if not name or self._location is None:
+            return None
+        return self._location / name
+
+    def template(self) -> Optional[Path]:
+        i = self.template_drop.get_selected()
+        return self._templates[i][1] if 0 <= i < len(self._templates) else None
+
+    def _show_location(self) -> None:
+        text = str(self._location) if self._location is not None else "Pick a folder"
+        self.location_label.set_text(text)
+        self.location_label.set_tooltip_text(text)
+
+    def _problem(self) -> str:
+        name = self.name_entry.get_text().strip()
+        if self._location is None:
+            return "Pick a folder to create the character in."
+        if not name:
+            return "Name the character (it becomes the folder name)."
+        if "/" in name or "\\" in name or name in (".", ".."):
+            return "The name cannot contain slashes."
+        if (self._location / name).exists():
+            return f"{self._location / name} already exists."
+        return ""
+
+    def _validate(self) -> None:
+        problem = self._problem()
+        self.problem.set_text(problem)
+        self.create_btn.set_sensitive(not problem)
+
+    def _on_change_location(self, *_a) -> None:
+        dialog = Gtk.FileDialog(title="Create Character In")
+        if self._location is not None and self._location.is_dir():
+            dialog.set_initial_folder(Gio.File.new_for_path(str(self._location)))
+        dialog.select_folder(self, None, self._on_location_done)
+
+    def _on_location_done(self, dialog: Gtk.FileDialog, result) -> None:
+        try:
+            folder = dialog.select_folder_finish(result)
+        except GLib.Error:
+            return
+        raw = folder.get_path() if folder is not None else None
+        if raw:
+            self._location = Path(raw)
+            self._show_location()
+            self._validate()
+
+    def connect_response(self, callback) -> None:
+        self._callback = callback
+
+    def _on_create(self) -> None:
+        if not self._problem():
+            self._emit(Gtk.ResponseType.OK)
+
+    def _emit(self, response: Gtk.ResponseType) -> None:
+        if self._callback:
+            self._callback(self, response)
+        self.destroy()
 
     def _on_close(self, *_a) -> bool:
         self._emit(Gtk.ResponseType.CANCEL)
@@ -344,6 +524,7 @@ class HistoryStepsDialog(Gtk.Window):
         root.append(row)
         row.append(Gtk.Label(label="Steps", xalign=0, hexpand=True))
         self.steps_spin = Gtk.SpinButton.new_with_range(1, 2000, 1)
+        configure_numeric_spin(self.steps_spin, digits=0)
         self.steps_spin.set_value(steps)
         self.steps_spin.set_hexpand(True)
         row.append(self.steps_spin)
@@ -380,6 +561,253 @@ class HistoryStepsDialog(Gtk.Window):
     def _on_close(self, *_a) -> bool:
         self._emit(Gtk.ResponseType.CANCEL)
         return True
+
+
+class AutosaveDialog(Gtk.Window):
+    """Turn autosave on / off and choose how often it runs."""
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        enabled: bool,
+        minutes: int,
+        *,
+        minutes_range: tuple[int, int],
+        folder: Path,
+        on_open_folder: Callable[[], None],
+    ) -> None:
+        super().__init__(title="Autosave", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
+        self.set_default_size(380, 200)
+        self.set_resizable(False)
+        self._callback = None
+
+        root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=16,
+            margin_bottom=16,
+            margin_start=16,
+            margin_end=16,
+        )
+        self.set_child(root)
+        root.append(Gtk.Label(
+            label=(
+                "Writes a copy of every document with unsaved changes to the autosave "
+                "folder; your files are not touched. After a crash, File → Recover "
+                "Autosave… brings them back. Quitting normally deletes the copies."
+            ),
+            xalign=0,
+            wrap=True,
+            max_width_chars=48,
+        ))
+        self.enabled_check = Gtk.CheckButton(label="Autosave")
+        self.enabled_check.set_active(bool(enabled))
+        root.append(self.enabled_check)
+
+        row = Gtk.Box(spacing=8)
+        root.append(row)
+        row.append(Gtk.Label(label="Every (minutes)", xalign=0, hexpand=True))
+        lo, hi = minutes_range
+        self.minutes_spin = Gtk.SpinButton.new_with_range(lo, hi, 1)
+        configure_numeric_spin(self.minutes_spin, digits=0)
+        self.minutes_spin.set_value(minutes)
+        self.minutes_spin.set_hexpand(True)
+        row.append(self.minutes_spin)
+        self.enabled_check.bind_property(
+            "active", row, "sensitive", GObject.BindingFlags.SYNC_CREATE
+        )
+
+        actions = Gtk.Box(spacing=8, margin_top=8)
+        root.append(actions)
+        folder_btn = Gtk.Button(label="Open Folder")
+        folder_btn.set_tooltip_text(str(folder))
+        folder_btn.connect("clicked", lambda *_: on_open_folder())
+        actions.append(folder_btn)
+        actions.append(Gtk.Box(hexpand=True))
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
+        apply = Gtk.Button(label="Apply")
+        apply.add_css_class("suggested-action")
+        apply.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.OK))
+        actions.append(cancel)
+        actions.append(apply)
+        self.connect("close-request", self._on_close)
+
+    def enabled(self) -> bool:
+        return bool(self.enabled_check.get_active())
+
+    def minutes(self) -> int:
+        return int(self.minutes_spin.get_value())
+
+    def connect_response(self, callback) -> None:
+        self._callback = callback
+
+    def _emit(self, response: Gtk.ResponseType) -> None:
+        if self._callback:
+            self._callback(self, response)
+        self.destroy()
+
+    def _on_close(self, *_a) -> bool:
+        self._emit(Gtk.ResponseType.CANCEL)
+        return True
+
+
+def _format_size(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    return f"{max(1, round(size / 1024))} KB"
+
+
+class RecoverAutosaveDialog(Gtk.Window):
+    """List autosaves left by sessions that did not quit; open or delete them.
+
+    *items* are ``core.autosave.Recoverable``. ``on_open(item) -> bool`` opens one
+    in a tab (True removes its row); ``on_delete(item)`` deletes its file.
+    ``on_closed()`` runs once the dialog is gone.
+    """
+
+    def __init__(
+        self,
+        parent: Gtk.Window,
+        items: list,
+        *,
+        on_open: Callable[[Any], bool],
+        on_delete: Callable[[Any], None],
+        on_open_folder: Callable[[], None],
+        on_closed: Optional[Callable[[], None]] = None,
+    ) -> None:
+        super().__init__(title="Recover Autosave", transient_for=parent, modal=True)
+        _attach_shortcut_focus_guard(parent, self)
+        self.set_default_size(560, 360)
+        self._on_open = on_open
+        self._on_delete = on_delete
+        self._on_closed = on_closed
+        self._rows: dict[int, Gtk.Widget] = {}
+        self._items = list(items)
+
+        root = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=16,
+            margin_bottom=16,
+            margin_start=16,
+            margin_end=16,
+        )
+        self.set_child(root)
+        root.append(Gtk.Label(
+            label=(
+                "These documents were autosaved by a session that did not quit normally. "
+                "Open one to keep working on it; saving writes to its original file."
+            ),
+            xalign=0,
+            wrap=True,
+        ))
+
+        self._list = Gtk.ListBox()
+        self._list.set_selection_mode(Gtk.SelectionMode.NONE)
+        self._list.add_css_class("boxed-list")
+        self._list.set_placeholder(Gtk.Label(label="Nothing to recover.", margin_top=24, margin_bottom=24))
+        scroller = Gtk.ScrolledWindow(vexpand=True)
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_child(self._list)
+        root.append(scroller)
+        for item in self._items:
+            self._add_row(item)
+
+        actions = Gtk.Box(spacing=8)
+        root.append(actions)
+        folder_btn = Gtk.Button(label="Open Folder")
+        folder_btn.connect("clicked", lambda *_: on_open_folder())
+        actions.append(folder_btn)
+        self._delete_all_btn = Gtk.Button(label="Delete All…")
+        self._delete_all_btn.add_css_class("destructive-action")
+        self._delete_all_btn.connect("clicked", self._on_delete_all)
+        actions.append(self._delete_all_btn)
+        actions.append(Gtk.Box(hexpand=True))
+        close = Gtk.Button(label="Close")
+        close.connect("clicked", lambda *_: self.close())
+        actions.append(close)
+        self._sync_buttons()
+        self.connect("close-request", self._on_close)
+
+    def _add_row(self, item) -> None:
+        row = Gtk.Box(spacing=8, margin_top=6, margin_bottom=6, margin_start=8, margin_end=8)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True)
+        title = Gtk.Label(label=item.title, xalign=0)
+        title.add_css_class("heading")
+        title.set_ellipsize(3)  # Pango.EllipsizeMode.END
+        text.append(title)
+        where = str(item.source) if item.source is not None else "Never saved"
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(item.saved_at))
+        detail = Gtk.Label(label=f"{when} · {_format_size(item.size)}", xalign=0)
+        detail.add_css_class("dim-label")
+        text.append(detail)
+        source = Gtk.Label(label=where, xalign=0)
+        source.add_css_class("dim-label")
+        source.set_ellipsize(1)  # Pango.EllipsizeMode.START keeps the file name visible
+        source.set_tooltip_text(where)
+        text.append(source)
+        row.append(text)
+        open_btn = Gtk.Button(label="Open")
+        open_btn.add_css_class("suggested-action")
+        open_btn.set_valign(Gtk.Align.CENTER)
+        open_btn.connect("clicked", lambda *_: self._open(item))
+        delete_btn = Gtk.Button(label="Delete")
+        delete_btn.set_valign(Gtk.Align.CENTER)
+        delete_btn.set_tooltip_text("Delete this autosave for good")
+        delete_btn.connect("clicked", lambda *_: self._delete(item))
+        row.append(delete_btn)
+        row.append(open_btn)
+        self._list.append(row)
+        self._rows[id(item)] = row.get_parent()
+
+    def _remove_row(self, item) -> None:
+        row = self._rows.pop(id(item), None)
+        if row is not None:
+            self._list.remove(row)
+        self._items = [i for i in self._items if i is not item]
+        self._sync_buttons()
+
+    def _sync_buttons(self) -> None:
+        self._delete_all_btn.set_sensitive(bool(self._items))
+
+    def _open(self, item) -> None:
+        if self._on_open(item):
+            self._remove_row(item)
+            if not self._items:
+                self.close()
+
+    def _delete(self, item) -> None:
+        self._on_delete(item)
+        self._remove_row(item)
+
+    def _on_delete_all(self, *_a) -> None:
+        alert = Gtk.AlertDialog()
+        n = len(self._items)
+        alert.set_message(f"Delete {n} autosave{'s' if n != 1 else ''}?")
+        alert.set_detail("The copies are removed for good. Your own files are not affected.")
+        alert.set_buttons(["Cancel", "Delete All"])
+        alert.set_cancel_button(0)
+        alert.set_default_button(0)
+
+        def done(dlg, result) -> None:
+            try:
+                choice = dlg.choose_finish(result)
+            except GLib.Error:
+                return
+            if choice != 1:
+                return
+            for item in list(self._items):
+                self._delete(item)
+
+        alert.choose(self, None, done)
+
+    def _on_close(self, *_a) -> bool:
+        callback, self._on_closed = self._on_closed, None
+        if callback is not None:
+            GLib.idle_add(lambda: (callback(), False)[1])
+        return False
 
 
 class VisibleToolsDialog(Gtk.Window):
@@ -482,14 +910,15 @@ class VisibleToolsDialog(Gtk.Window):
 
 
 class GridOverlayDialog(Gtk.Window):
-    """Choose how many row/column cells the canvas grid overlay uses."""
+    """Choose how many interior row/column guides the canvas grid overlay uses."""
 
-    def __init__(self, parent: Gtk.Window, rows: int = 8, columns: int = 8) -> None:
+    def __init__(self, parent: Gtk.Window, rows: int = 8, columns: int = 8, tile: int = 16) -> None:
         super().__init__(title="Grid Overlay", transient_for=parent, modal=True)
         _attach_shortcut_focus_guard(parent, self)
-        self.set_default_size(340, 200)
+        self.set_default_size(340, 220)
         self.set_resizable(False)
         self._callback = None
+        self._reset_callback = None
 
         root = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL,
@@ -502,26 +931,45 @@ class GridOverlayDialog(Gtk.Window):
         self.set_child(root)
         root.append(Gtk.Label(
             label="Visual guide only — does not snap or change drawing. "
-            "1×1 is a centered crosshair; higher values add evenly spaced guides.",
+            "Guides divide the canvas into equal parts "
+            "(2 columns → thirds). 0 omits that axis; 1×1 is a centered crosshair. "
+            "Alt-drag a grid line on the canvas to shift the overlay.",
             xalign=0,
             wrap=True,
         ))
 
         grid = Gtk.Grid(column_spacing=8, row_spacing=8)
         root.append(grid)
-        self.rows_spin = Gtk.SpinButton.new_with_range(1, 64, 1)
+        self.rows_spin = Gtk.SpinButton.new_with_range(0, 64, 1)
+        configure_numeric_spin(self.rows_spin, digits=0)
         self.rows_spin.set_value(rows)
         self.rows_spin.set_hexpand(True)
-        self.columns_spin = Gtk.SpinButton.new_with_range(1, 64, 1)
+        self.columns_spin = Gtk.SpinButton.new_with_range(0, 64, 1)
+        configure_numeric_spin(self.columns_spin, digits=0)
         self.columns_spin.set_value(columns)
         self.columns_spin.set_hexpand(True)
         grid.attach(Gtk.Label(label="Rows", xalign=0), 0, 0, 1, 1)
         grid.attach(self.rows_spin, 1, 0, 1, 1)
         grid.attach(Gtk.Label(label="Columns", xalign=0), 0, 1, 1, 1)
         grid.attach(self.columns_spin, 1, 1, 1, 1)
+        self.tile_spin = Gtk.SpinButton.new_with_range(0, 1024, 1)
+        configure_numeric_spin(self.tile_spin, digits=0)
+        self.tile_spin.set_value(tile)
+        self.tile_spin.set_hexpand(True)
+        self.tile_spin.set_tooltip_text(
+            "Pixel Art mode: a tile line every this many pixels while Show Grid is on (0 = none)."
+        )
+        grid.attach(Gtk.Label(label="Pixel tile", xalign=0), 0, 2, 1, 1)
+        grid.attach(self.tile_spin, 1, 2, 1, 1)
 
         actions = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=8)
         root.append(actions)
+        reset = Gtk.Button(label="Reset Offset")
+        reset.set_tooltip_text("Restore the default equal-division grid layout.")
+        reset.set_hexpand(True)
+        reset.set_halign(Gtk.Align.START)
+        reset.connect("clicked", self._on_reset_offset)
+        actions.append(reset)
         cancel = Gtk.Button(label="Cancel")
         cancel.connect("clicked", lambda *_: self._emit(Gtk.ResponseType.CANCEL))
         apply = Gtk.Button(label="Apply")
@@ -537,8 +985,18 @@ class GridOverlayDialog(Gtk.Window):
     def columns(self) -> int:
         return int(self.columns_spin.get_value())
 
+    def tile(self) -> int:
+        return int(self.tile_spin.get_value())
+
     def connect_response(self, callback) -> None:
         self._callback = callback
+
+    def connect_reset_offset(self, callback) -> None:
+        self._reset_callback = callback
+
+    def _on_reset_offset(self, *_a) -> None:
+        if self._reset_callback is not None:
+            self._reset_callback()
 
     def _emit(self, response: Gtk.ResponseType) -> None:
         if self._callback:
@@ -621,7 +1079,7 @@ class QuitConfirmDialog(Gtk.Window):
     """Ask whether to save before quitting. YES=save, NO=discard, CANCEL=stay."""
 
     def __init__(self, parent: Gtk.Window, filename: str = "untitled") -> None:
-        super().__init__(title="Exit Inkobold", transient_for=parent, modal=True)
+        super().__init__(title=f"Exit {current_flavor().display_name}", transient_for=parent, modal=True)
         _attach_shortcut_focus_guard(parent, self)
         self.set_default_size(420, 140)
         self.set_resizable(False)
@@ -698,6 +1156,7 @@ class DpiDialog(Gtk.Window):
         root.append(row)
         row.append(Gtk.Label(label="DPI", xalign=0, hexpand=True))
         self.dpi_spin = Gtk.SpinButton.new_with_range(1, 1200, 1)
+        configure_numeric_spin(self.dpi_spin, digits=0)
         self.dpi_spin.set_value(dpi)
         self.dpi_spin.set_hexpand(True)
         row.append(self.dpi_spin)
@@ -845,6 +1304,15 @@ class CropDialog(Gtk.Window):
         self.bottom_spin = Gtk.SpinButton.new_with_range(0, self._doc_h - 1, 1)
         self.width_spin = Gtk.SpinButton.new_with_range(1, self._doc_w, 1)
         self.height_spin = Gtk.SpinButton.new_with_range(1, self._doc_h, 1)
+        for spin in (
+            self.left_spin,
+            self.top_spin,
+            self.right_spin,
+            self.bottom_spin,
+            self.width_spin,
+            self.height_spin,
+        ):
+            configure_numeric_spin(spin, digits=0)
         self.width_spin.set_value(self._doc_w)
         self.height_spin.set_value(self._doc_h)
 

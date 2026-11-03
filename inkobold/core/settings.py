@@ -6,23 +6,36 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from inkobold.core.autosave import DEFAULT_MINUTES as DEFAULT_AUTOSAVE_MINUTES
+from inkobold.core.autosave import MINUTES_MAX as AUTOSAVE_MINUTES_MAX
+from inkobold.core.autosave import MINUTES_MIN as AUTOSAVE_MINUTES_MIN
 from inkobold.core.history import DEFAULT_HISTORY_STEPS
 from inkobold.core.image_meta import (
     COLOR_DEPTH_CHOICES,
     COLOR_DEPTH_RGBA32,
     DEFAULT_DPI,
 )
+from inkobold.core.flavor import current
 from inkobold.core.paths import config_dir
 
 # DaemonDomain default: white accent on black glass chrome
 DEFAULT_THEME_RGB: tuple[int, int, int] = (255, 255, 255)
 
+
+def default_theme_rgb() -> tuple[int, int, int]:
+    """Accent the active flavor starts from (white for plain Inkobold)."""
+    return current().theme_rgb or DEFAULT_THEME_RGB
+
+
 @dataclass
 class AppSettings:
-    theme_rgb: tuple[int, int, int] = DEFAULT_THEME_RGB
+    theme_rgb: tuple[int, int, int] = field(default_factory=default_theme_rgb)
     use_custom_theme: bool = False
     checker_light: bool = False
     history_steps: int = DEFAULT_HISTORY_STEPS
+    # Write unsaved documents to the autosave folder every autosave_minutes (crash recovery)
+    autosave: bool = True
+    autosave_minutes: int = DEFAULT_AUTOSAVE_MINUTES
     default_dpi: int = DEFAULT_DPI
     default_color_depth: int = COLOR_DEPTH_RGBA32
     # When True, one shared color follows you across tools; when False, each tool keeps its own.
@@ -41,6 +54,10 @@ class AppSettings:
     sun_x_norm: float = 0.18
     sun_y_norm: float = 0.18
     sun_elevation: float = 0.70
+    # Visual-asset folder override (GreenInkobold); empty means the flavor default
+    asset_root: str = ""
+    # File name of the active palette in Libraries → Palettes; empty means the first one
+    active_palette: str = ""
 
     def clamp(self) -> None:
         r, g, b = self.theme_rgb
@@ -50,6 +67,10 @@ class AppSettings:
             max(0, min(255, int(b))),
         )
         self.history_steps = max(1, min(2000, int(self.history_steps)))
+        self.autosave = bool(self.autosave)
+        self.autosave_minutes = max(
+            AUTOSAVE_MINUTES_MIN, min(AUTOSAVE_MINUTES_MAX, int(self.autosave_minutes))
+        )
         self.default_dpi = max(1, min(1200, int(self.default_dpi)))
         if self.default_color_depth not in {d for d, _ in COLOR_DEPTH_CHOICES}:
             self.default_color_depth = COLOR_DEPTH_RGBA32
@@ -90,6 +111,8 @@ class AppSettings:
         self.sun_x_norm = max(0.0, min(1.0, float(self.sun_x_norm)))
         self.sun_y_norm = max(0.0, min(1.0, float(self.sun_y_norm)))
         self.sun_elevation = max(0.15, min(1.5, float(self.sun_elevation)))
+        self.asset_root = self.asset_root if isinstance(self.asset_root, str) else ""
+        self.active_palette = self.active_palette if isinstance(self.active_palette, str) else ""
 
 
 def config_path() -> Path:
@@ -117,6 +140,12 @@ def load_settings() -> AppSettings:
         settings.history_steps = int(data.get("history_steps", DEFAULT_HISTORY_STEPS))
     except (TypeError, ValueError):
         settings.history_steps = DEFAULT_HISTORY_STEPS
+    if "autosave" in data:
+        settings.autosave = bool(data.get("autosave"))
+    try:
+        settings.autosave_minutes = int(data.get("autosave_minutes", DEFAULT_AUTOSAVE_MINUTES))
+    except (TypeError, ValueError):
+        settings.autosave_minutes = DEFAULT_AUTOSAVE_MINUTES
     try:
         settings.default_dpi = int(data.get("default_dpi", DEFAULT_DPI))
     except (TypeError, ValueError):
@@ -160,6 +189,12 @@ def load_settings() -> AppSettings:
         settings.sun_elevation = float(data.get("sun_elevation", 0.70))
     except (TypeError, ValueError):
         settings.sun_elevation = 0.70
+    raw_assets = data.get("asset_root")
+    if isinstance(raw_assets, str):
+        settings.asset_root = raw_assets
+    raw_palette = data.get("active_palette")
+    if isinstance(raw_palette, str):
+        settings.active_palette = raw_palette
     settings.clamp()
     return settings
 
@@ -174,6 +209,8 @@ def save_settings(settings: AppSettings) -> None:
             "use_custom_theme": bool(settings.use_custom_theme),
             "checker_light": bool(settings.checker_light),
             "history_steps": int(settings.history_steps),
+            "autosave": bool(settings.autosave),
+            "autosave_minutes": int(settings.autosave_minutes),
             "default_dpi": int(settings.default_dpi),
             "default_color_depth": int(settings.default_color_depth),
             "color_follows_tools": bool(settings.color_follows_tools),
@@ -188,6 +225,8 @@ def save_settings(settings: AppSettings) -> None:
             "sun_x_norm": float(settings.sun_x_norm),
             "sun_y_norm": float(settings.sun_y_norm),
             "sun_elevation": float(settings.sun_elevation),
+            "asset_root": settings.asset_root,
+            "active_palette": settings.active_palette,
         }
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     except OSError:

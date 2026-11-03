@@ -6,9 +6,11 @@ from typing import Optional
 import numpy as np
 from PIL import Image
 
+from inkobold.core.damage import note as _damage_note
 from inkobold.tools.base import BaseTool, ToolContext
 from inkobold.core.sun import DEFAULT_MILK_LIGHT_DIR
 from inkobold.tools.paint import (
+    PixelPath,
     bubble_influence_bbox,
     collect_bubbles_along_segment,
     render_bubbles_list,
@@ -62,6 +64,7 @@ def render_bubbles_incremental(
     x0, y0, x1, y1 = max(0, x0), max(0, y0), min(w, x1), min(h, y1)
     if x0 >= x1 or y0 >= y1:
         return
+    _damage_note(pixels, x0, y0, x1, y1)
     pixels[y0:y1, x0:x1] = base[y0:y1, x0:x1]
     render_bubbles_list(
         pixels,
@@ -91,6 +94,9 @@ class BrushTool(BaseTool):
     uses_opacity = True
     uses_brush_options = True
 
+    def damage_tracked(self) -> bool:
+        return True
+
     def __init__(self) -> None:
         super().__init__()
         self.brush_mode: str = "round"  # "round" | "custom" | "bubbles"
@@ -102,6 +108,7 @@ class BrushTool(BaseTool):
         self._lx = 0.0
         self._ly = 0.0
         self._lr = 0.5
+        self._path = PixelPath()
         # Bubbles stroke accumulate — blended together on release.
         self._bubble_placed: list[tuple[float, float, float, float]] = []
         self._bubble_base: Optional[np.ndarray] = None
@@ -274,12 +281,14 @@ class BrushTool(BaseTool):
         stroke_segment_tapered(
             pixels, x0, y0, x1, y1, r0, r1, color,
             mask=mask,
+            path=self._path,
             **self._stamp_kwargs(ctx),
         )
 
     def on_press(self, ctx: ToolContext, x: float, y: float, shift: bool = False, alt: bool = False) -> None:
         self._drawing = True
         self._lx, self._ly = x, y
+        self._path = PixelPath()
         self._lr = self._pressure_radius(ctx)
         self._paint_segment(ctx, x, y, x, y, self._lr, self._lr, force=True)
         ctx.document.mark_dirty()

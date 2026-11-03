@@ -41,8 +41,8 @@ class InputHub:
             tablet_names = ", ".join(t.name for t in self.tablets) or "none"
             if n == 0:
                 self.status = (
-                    f"libinput ready (0 /dev/input nodes readable — add user to 'input' group "
-                    f"for raw tablet axes); libwacom tablets=[{tablet_names}]; drawing via GDK"
+                    f"libinput: no /dev/input access (optional; see wiki Input page); "
+                    f"libwacom tablets=[{tablet_names}]; drawing via GDK"
                 )
             else:
                 self.status = f"libinput devices={n}; libwacom tablets=[{tablet_names}]"

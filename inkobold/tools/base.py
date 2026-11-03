@@ -24,8 +24,7 @@ _SETTING_KEYS = (
     "fill_mode",
     "tile_scale",
     "maze_cell_size",
-    "corridor_color",
-    "end_color",
+    "secondary_color",
     "replace_action",
     "apply_mode",
     "brush_mode",
@@ -84,11 +83,10 @@ class ToolContext:
     fill_mode: str = "color"
     tile_scale: float = 1.0
     maze_cell_size: float = 8.0
-    corridor_color: tuple[int, int, int, int] = (255, 255, 255, 255)
+    # Secondary color: Gradient end, Fill maze corridor / puzzle piece
+    secondary_color: tuple[int, int, int, int] = (255, 255, 255, 255)
     # Lay tool: spacing between pattern elements along the path
     lay_spacing: float = 40.0
-    # Gradient tool end color
-    end_color: tuple[int, int, int, int] = (255, 255, 255, 255)
     # Replace tool: "replace" | "erase"
     replace_action: str = "replace"
     # Replace tool scope: "brush" | "fill" | "all"
@@ -118,9 +116,17 @@ class Tool(Protocol):
 
 
 class BaseTool:
+
+    def damage_tracked(self) -> bool:
+        """True if every pixel write this tool makes during press/drag goes
+        through ``core.damage.note`` (lets the canvas upload only the changed
+        rectangle). Leave False unless that is verified — see tests."""
+        return False
+
     name = "Tool"
     id = "tool"
     default_color: tuple[int, int, int, int] = (0, 0, 0, 255)
+    default_secondary_color: tuple[int, int, int, int] = (255, 255, 255, 255)
     default_size: float = 8.0
     default_threshold: int = 28
     uses_size: bool = True
@@ -135,7 +141,8 @@ class BaseTool:
     uses_replace_modes: bool = False
     uses_intensity: bool = False
     uses_opacity: bool = False
-    uses_end_color: bool = False
+    # Side-panel labels for the primary / secondary color pair
+    color_labels: tuple[str, str] = ("Color", "Secondary")
     uses_curve_modes: bool = False
     uses_eraser_modes: bool = False
     uses_liquify_modes: bool = False
@@ -163,6 +170,7 @@ class BaseTool:
 
     def __init__(self) -> None:
         self.color: tuple[int, int, int, int] = self.default_color
+        self.secondary_color: tuple[int, int, int, int] = self.default_secondary_color
         self.brush_size: float = self.default_size
         self.threshold: int = self.default_threshold
         self.depth: float = self.default_depth
@@ -195,6 +203,11 @@ class BaseTool:
         """Restore options previously produced by ``to_settings_dict``."""
         if not isinstance(data, dict):
             return
+        if "secondary_color" not in data:
+            # Workspaces from before the color pair: Gradient end / Fill corridor
+            legacy = data.get("end_color", data.get("corridor_color"))
+            if legacy is not None:
+                data = {**data, "secondary_color": legacy}
         for key in _SETTING_KEYS:
             if key not in data or not hasattr(self, key):
                 continue
@@ -251,6 +264,12 @@ class BaseTool:
     def _paint_color(self, ctx: ToolContext) -> tuple[int, int, int, int]:
         """Tool color scaled to document depth, with opacity on alpha."""
         r, g, b, a = ctx.color
+        color = (r, g, b, int(round(a * self._opacity_factor(ctx))))
+        return prepare_paint_color(color, ctx.document.color_depth)
+
+    def _secondary_paint_color(self, ctx: ToolContext) -> tuple[int, int, int, int]:
+        """Secondary color scaled to document depth, with opacity on alpha."""
+        r, g, b, a = ctx.secondary_color
         color = (r, g, b, int(round(a * self._opacity_factor(ctx))))
         return prepare_paint_color(color, ctx.document.color_depth)
 

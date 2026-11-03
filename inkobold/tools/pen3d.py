@@ -37,6 +37,9 @@ class Pen3DTool(BaseTool):
     default_bevel = 45.0
     default_frequency = 80.0
 
+    def damage_tracked(self) -> bool:
+        return True
+
     def __init__(self) -> None:
         super().__init__()
         self._drawing = False

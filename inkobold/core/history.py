@@ -50,6 +50,8 @@ class _DocSnap:
     fps: float = DEFAULT_FPS
     onion_skin: bool = True
     onion_opacity: float = DEFAULT_ONION_OPACITY
+    # CharacterRig.to_dict() of a character canvas (joints are undoable too)
+    character: Optional[dict] = None
 
 
 @dataclass
@@ -58,6 +60,9 @@ class History:
     _undo: list[_DocSnap] = field(default_factory=list)
     _redo: list[_DocSnap] = field(default_factory=list)
     _busy: bool = False  # suppress pushes while restoring
+    # Redo stack cleared by the newest push, kept so discard_last_push() can
+    # put it back (e.g. a cancelled effect dialog shouldn't wipe redo).
+    _redo_before_push: Optional[list[_DocSnap]] = field(default=None, repr=False)
     # (layer.id, layer.revision) -> compressed snapshot. Layer revisions are
     # process-unique (see Layer.bump), so a hit means the pixels are unchanged
     # since that snapshot was taken and the zlib work can be skipped. Pruned to
@@ -77,6 +82,7 @@ class History:
     def clear(self) -> None:
         self._undo.clear()
         self._redo.clear()
+        self._redo_before_push = None
         self._layer_cache.clear()
         self._sel_cache = None
 
@@ -93,18 +99,23 @@ class History:
         self._undo.append(self._snapshot(doc))
         if len(self._undo) > self.max_steps:
             del self._undo[: len(self._undo) - self.max_steps]
-        self._redo.clear()
+        self._redo_before_push = self._redo
+        self._redo = []
 
     def discard_last_push(self) -> bool:
         """Drop the newest undo snapshot without restoring (e.g. cancelled preview)."""
         if not self._undo:
             return False
         self._undo.pop()
+        if self._redo_before_push is not None and not self._redo:
+            self._redo = self._redo_before_push
+        self._redo_before_push = None
         return True
 
     def undo(self, doc: Document) -> bool:
         if not self._undo:
             return False
+        self._redo_before_push = None
         self._redo.append(self._snapshot(doc))
         snap = self._undo.pop()
         self._restore(doc, snap)
@@ -113,6 +124,7 @@ class History:
     def redo(self, doc: Document) -> bool:
         if not self._redo:
             return False
+        self._redo_before_push = None
         self._undo.append(self._snapshot(doc))
         snap = self._redo.pop()
         self._restore(doc, snap)
@@ -226,6 +238,7 @@ class History:
             fps=float(doc.fps),
             onion_skin=bool(doc.onion_skin),
             onion_opacity=float(doc.onion_opacity),
+            character=doc.character.to_dict() if doc.character is not None else None,
         )
 
     def _restore(self, doc: Document, snap: _DocSnap) -> None:
@@ -238,6 +251,9 @@ class History:
             doc.fps = float(getattr(snap, "fps", DEFAULT_FPS))
             doc.onion_skin = bool(getattr(snap, "onion_skin", True))
             doc.onion_opacity = float(getattr(snap, "onion_opacity", DEFAULT_ONION_OPACITY))
+            rig_data = getattr(snap, "character", None)
+            if doc.character is not None and rig_data is not None:
+                doc.character.apply_dict(rig_data)
 
             frame_snaps = getattr(snap, "frames", None) or []
             if not frame_snaps and snap.layers:

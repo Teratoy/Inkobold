@@ -18,6 +18,7 @@ Defaults from `inkobold/core/shortcuts.py`. Rebind under **Settings → Shortcut
 | Clear selection | `Esc`, `Ctrl+D` |
 | Tile Preview | `Ctrl+Shift+T` |
 | Wrap Moves | `Ctrl+Shift+W` |
+| Pixel Art | `Ctrl+Shift+P` |
 
 ## Layers / animation
 
@@ -29,6 +30,7 @@ Defaults from `inkobold/core/shortcuts.py`. Rebind under **Settings → Shortcut
 | Play / pause | `Space` or `F5` |
 | Stop | `F6` |
 | Brush size | `[` `]` (range **0.1–256**) |
+| Swap primary / secondary color | `X` |
 
 ## Tools
 
@@ -56,7 +58,7 @@ Defaults from `inkobold/core/shortcuts.py`. Rebind under **Settings → Shortcut
 ## Unbound by default (menu only)
 
 `export_layer`, `export_layers`, `export_anim_gif`, `export_anim_png`, `merge_visible_layers`,
-`merge_all_layers`, `move_layer_to_top`, `move_layer_to_bottom`.
+`merge_all_layers`, `move_layer_to_top`, `move_layer_to_bottom`, `reset_colors` (black / white).
 
 ## Pointer
 

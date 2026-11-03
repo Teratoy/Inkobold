@@ -1,4 +1,4 @@
-"""Color select: hue editor + recent colors (no preset palette)."""
+"""Color select: hue editor + recent colors + the active Libraries palette."""
 
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _draw_swatch(rgba: Gdk.RGBA, use_alpha: bool):
         cr.set_source_rgba(rgba.red, rgba.green, rgba.blue, rgba.alpha if use_alpha else 1.0)
         cr.rectangle(0, 0, width, height)
         cr.fill()
-        cr.set_source_rgba(0, 0, 0, 0.35)
+        cr.set_source_rgba(0.5, 0.5, 0.5, 0.6)
         cr.set_line_width(1)
         cr.rectangle(0.5, 0.5, width - 1, height - 1)
         cr.stroke()
@@ -69,7 +69,7 @@ def _draw_swatch(rgba: Gdk.RGBA, use_alpha: bool):
 
 
 class ColorPickerDialog(Gtk.Window):
-    """Modal picker: recent swatches + hue/SV editor (no preset palette)."""
+    """Modal picker: recent swatches, active palette swatches + hue/SV editor."""
 
     def __init__(
         self,
@@ -78,6 +78,7 @@ class ColorPickerDialog(Gtk.Window):
         *,
         use_alpha: bool = True,
         recent: Optional[Sequence[RgbaTuple]] = None,
+        palette: Optional[Sequence[tuple[int, int, int]]] = None,
         title: str = "Color",
     ) -> None:
         super().__init__(title=title, transient_for=parent, modal=True)
@@ -107,6 +108,30 @@ class ColorPickerDialog(Gtk.Window):
         self._recent_row.set_halign(Gtk.Align.START)
         root.append(self._recent_row)
         self._rebuild_recent_row()
+
+        if palette:
+            # Palette swatches are opaque RGB; picking one keeps the current alpha
+            root.append(Gtk.Label(label="Palette", xalign=0))
+            flow = Gtk.FlowBox(
+                selection_mode=Gtk.SelectionMode.NONE,
+                homogeneous=True,
+                column_spacing=2,
+                row_spacing=2,
+                min_children_per_line=8,
+                max_children_per_line=18,
+            )
+            for r, g, b in palette:
+                swatch = Gtk.DrawingArea()
+                swatch.set_content_width(18)
+                swatch.set_content_height(18)
+                swatch.set_tooltip_text(f"#{r:02x}{g:02x}{b:02x}")
+                swatch.set_cursor(Gdk.Cursor.new_from_name("pointer"))
+                swatch.set_draw_func(_draw_swatch(tuple_to_rgba((r, g, b, 255)), False))
+                click = Gtk.GestureClick()
+                click.connect("released", lambda *_a, rgb=(r, g, b): self._on_palette_clicked(rgb))
+                swatch.add_controller(click)
+                flow.append(swatch)
+            root.append(flow)
 
         self.chooser = Gtk.ColorChooserWidget()
         configure_hue_chooser(self.chooser, use_alpha=use_alpha)
@@ -161,6 +186,10 @@ class ColorPickerDialog(Gtk.Window):
     def _on_recent_clicked(self, _btn: Gtk.Button, color: RgbaTuple) -> None:
         self.chooser.set_rgba(tuple_to_rgba(color))
 
+    def _on_palette_clicked(self, rgb: tuple[int, int, int]) -> None:
+        alpha = rgba_to_tuple(self.chooser.get_rgba(), use_alpha=self._use_alpha)[3]
+        self.chooser.set_rgba(tuple_to_rgba((*rgb, alpha)))
+
     def _emit(self, response: Gtk.ResponseType) -> None:
         if response == Gtk.ResponseType.OK:
             self._recent = push_recent(
@@ -188,6 +217,7 @@ class ColorSelectButton(Gtk.Button):
         self._use_alpha = use_alpha
         self._rgba = Gdk.RGBA(red=0.0, green=0.0, blue=0.0, alpha=1.0)
         self._recent: list[RgbaTuple] = []
+        self._palette: list[tuple[int, int, int]] = []
         self._picker: Optional[ColorPickerDialog] = None
 
         self._preview = Gtk.DrawingArea()
@@ -222,6 +252,10 @@ class ColorSelectButton(Gtk.Button):
     def set_recent_colors(self, colors: Sequence[RgbaTuple]) -> None:
         self._recent = list(colors)[:MAX_RECENT_COLORS]
 
+    def set_palette_colors(self, colors: Sequence[tuple[int, int, int]]) -> None:
+        """Swatches offered in the picker dialog (the active palette)."""
+        self._palette = list(colors)
+
     def _draw_preview(
         self,
         _area: Gtk.DrawingArea,
@@ -243,6 +277,7 @@ class ColorSelectButton(Gtk.Button):
             self.get_rgba(),
             use_alpha=self._use_alpha,
             recent=self._recent,
+            palette=self._palette,
             title="Color",
         )
         self._picker = dialog

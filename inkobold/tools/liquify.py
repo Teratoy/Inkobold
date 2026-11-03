@@ -22,6 +22,9 @@ class LiquifyTool(BaseTool):
     uses_liquify_modes = True
     default_liquify_mode = "Push"
 
+    def damage_tracked(self) -> bool:
+        return True
+
     def __init__(self) -> None:
         super().__init__()
         self.liquify_mode: str = self.default_liquify_mode

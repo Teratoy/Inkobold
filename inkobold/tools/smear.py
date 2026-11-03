@@ -18,6 +18,9 @@ class SmearTool(BaseTool):
     uses_color = False
     uses_intensity = True
 
+    def damage_tracked(self) -> bool:
+        return True
+
     def __init__(self) -> None:
         super().__init__()
         self._drawing = False

@@ -20,6 +20,13 @@ tags: [inkobold, wiki]
 ./scripts/run.sh
 ```
 
+Open a file from the shell (skips the startup Open/New dialog):
+
+```bash
+./scripts/run.sh path/to/drawing.inkobold
+# or: python -m inkobold path/to/image.png
+```
+
 Or manually:
 
 ```bash
@@ -30,7 +37,17 @@ python3 -m venv --system-site-packages .venv
 
 Console entry after install: `inkobold` → `inkobold.__main__:main`.
 
-Tablet enrichment (libinput) usually needs membership in the `input` group so `/dev/input` is readable. See [[Input]].
+### Desktop “Open with”
+
+`scripts/inkobold.desktop` passes file paths (`%F`). Optional MIME for `.inkobold` / `.scribbler`:
+
+```bash
+xdg-mime install --novendor scripts/inkobold.xml
+# install/update the .desktop into ~/.local/share/applications/ as usual
+update-desktop-database ~/.local/share/applications
+```
+
+Tablet enrichment (libinput) usually needs membership in the `input` group so `/dev/input` is readable. This is optional and has a security cost (any program you run can then read your keyboard); see [[Input]].
 
 ## Windows
 

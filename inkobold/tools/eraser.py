@@ -6,7 +6,7 @@ from typing import Optional
 import numpy as np
 
 from inkobold.tools.base import BaseTool, ToolContext
-from inkobold.tools.paint import stroke_segment, wrap_pixel_coords
+from inkobold.tools.paint import PixelPath, pixel_mode, stroke_segment, wrap_pixel_coords
 
 
 class EraserTool(BaseTool):
@@ -24,6 +24,10 @@ class EraserTool(BaseTool):
     uses_eraser_modes = True
     default_eraser_mode = "freehand"
 
+    def damage_tracked(self) -> bool:
+        # Line mode restores a full-layer snapshot on every drag.
+        return self._mode() == "freehand"
+
     # Shared across mirror clones so only one branch restores the snapshot
     # before every clone redraws its segment on the same layer.
     _active_master: EraserTool | None = None
@@ -39,6 +43,7 @@ class EraserTool(BaseTool):
         self._r = 0.5
         self._key: Optional[tuple[int, int, int, int]] = None
         self._snapshot: np.ndarray | None = None
+        self._path = PixelPath()
 
     @staticmethod
     def _snap_end(sx: float, sy: float, x: float, y: float, shift: bool) -> tuple[float, float]:
@@ -56,6 +61,10 @@ class EraserTool(BaseTool):
     def _mode(self) -> str:
         mode = str(getattr(self, "eraser_mode", self.default_eraser_mode)).strip().lower()
         return mode if mode in ("freehand", "line") else self.default_eraser_mode
+
+    def _erase_radius(self, ctx: ToolContext) -> float:
+        # A touch wider than the brush, except in pixel mode where Size is the exact width.
+        return self._radius(ctx) if pixel_mode() else self._radius(ctx) * 1.2
 
     def _sample_key(self, ctx: ToolContext, x: float, y: float) -> tuple[int, int, int, int]:
         ly = ctx.document.active_layer
@@ -87,12 +96,14 @@ class EraserTool(BaseTool):
         x1: float,
         y1: float,
         radius: float,
+        path: PixelPath | None = None,
     ) -> None:
         stroke_segment(
             ctx.document.active_layer.pixels,
             x0, y0, x1, y1,
             radius,
             (0, 0, 0, 0),
+            path=path,
             **self._erase_kwargs(ctx),
         )
 
@@ -100,7 +111,7 @@ class EraserTool(BaseTool):
         self._drawing = True
         self._key = self._sample_key(ctx, x, y)
         # threshold max → erase all under brush; lower → only similar colors
-        r = self._radius(ctx) * 1.2
+        r = self._erase_radius(ctx)
         if self._mode() == "line":
             pixels = ctx.document.active_layer.pixels
             self._sx, self._sy = x, y
@@ -111,7 +122,8 @@ class EraserTool(BaseTool):
             self._erase_segment(ctx, x, y, x, y, self._r)
         else:
             self._lx, self._ly = x, y
-            self._erase_segment(ctx, x, y, x, y, r)
+            self._path = PixelPath()
+            self._erase_segment(ctx, x, y, x, y, r, self._path)
         ctx.document.mark_dirty()
 
     def on_drag(self, ctx: ToolContext, x: float, y: float, shift: bool = False, alt: bool = False) -> None:
@@ -125,7 +137,7 @@ class EraserTool(BaseTool):
             self._erase_segment(ctx, self._sx, self._sy, ex, ey, self._r)
         else:
             self._erase_segment(
-                ctx, self._lx, self._ly, x, y, self._radius(ctx) * 1.2,
+                ctx, self._lx, self._ly, x, y, self._erase_radius(ctx), self._path,
             )
             self._lx, self._ly = x, y
         ctx.document.mark_dirty()

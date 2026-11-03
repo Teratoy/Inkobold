@@ -23,18 +23,18 @@ GPU-accelerated layered drawing for Linux and Windows. GTK4 UI, OpenGL composite
 5. [[Shortcuts]]
 
 ### Drawing
-6. [[Tools]]
-7. [[Effects]]
-8. [[Layers]]
-9. [[Animation]]
-10. [[View]]
-11. [[Libraries]]
-12. [[Input]]
+7. [[Tools]]
+8. [[Effects]]
+9. [[Layers]]
+10. [[Animation]]
+11. [[View]]
+12. [[Libraries]]
+13. [[Input]]
 
 ### Internals
-13. [[File Format]]
-14. [[Architecture]]
-15. [[Changelog Notes]]
+14. [[File Format]]
+15. [[Architecture]]
+16. [[Changelog Notes]]
 
 ## Quick links
 

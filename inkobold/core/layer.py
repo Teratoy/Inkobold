@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from inkobold.core.damage import FULL
 from inkobold.core.image_meta import COLOR_DEPTH_RGBA32, storage_dtype, valid_color_depth
 
 # Process-wide monotonic revision source. Every bump() yields a value never
@@ -33,6 +34,10 @@ class Layer:
     color_depth: int = COLOR_DEPTH_RGBA32
     # Straight RGBA — uint8 for 8 bpc modes, uint16 for 16 bpc
     pixels: np.ndarray = field(init=False, repr=False)
+    # Region changed since the renderer last uploaded this layer: FULL, None
+    # (clean) or an (x0, y0, x1, y1) rect. bump() always widens it to FULL;
+    # core.damage.track() narrows it for tools that report their writes.
+    damage: object = field(default=FULL, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         self.color_depth = valid_color_depth(self.color_depth)
@@ -41,6 +46,7 @@ class Layer:
             dtype=storage_dtype(self.color_depth),
         )
         self.revision = next_revision()
+        self.damage = FULL
 
     def clear(self) -> None:
         self.pixels.fill(0)
@@ -48,6 +54,13 @@ class Layer:
 
     def bump(self) -> None:
         self.revision = next_revision()
+        self.damage = FULL
+
+    def take_damage(self):
+        """Return the pending damage and mark the layer clean (renderer use)."""
+        d = self.damage
+        self.damage = None
+        return d
 
     def resize_canvas(self, width: int, height: int) -> None:
         """Top-left crop or pad to a new document size."""

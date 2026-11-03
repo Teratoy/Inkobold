@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=GreenInkobold
+GenericName=Drawing
+Comment=Inkobold for the Goblin Engineering visual-asset pipeline
+Exec=/home/aki/Trinkets/Inkobold/scripts/run-green.sh %F
+Path=/home/aki/Trinkets/Inkobold
+Icon=trinkets-greeninkobold
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=draw;paint;tablet;layers;goblin;sprites;assets;
+MimeType=application/x-inkobold;image/png;
+Terminal=false
+StartupNotify=true
+StartupWMClass=trinkets-greeninkobold
+TryExec=/home/aki/Trinkets/Inkobold/scripts/run-green.sh
+DBusActivatable=false
