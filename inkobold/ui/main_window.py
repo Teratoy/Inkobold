@@ -41,7 +41,25 @@ from inkobold.ui.tool_options import ToolOptionsMixin, build_toolbox_page
 from inkobold.ui.theme import DEFAULT_CSS, build_theme_css
 
 
-class MainWindow(ActionsMixin, MenusMixin, ToolOptionsMixin, SidebarMixin, EffectsMixin, FileOpsMixin, CharacterOpsMixin, DocTabsMixin, Gtk.ApplicationWindow):
+class MainWindow(
+    ActionsMixin,
+    MenusMixin,
+    ToolOptionsMixin,
+    SidebarMixin,
+    EffectsMixin,
+    FileOpsMixin,
+    CharacterOpsMixin,
+    DocTabsMixin,
+    Gtk.ApplicationWindow,
+):
+    """The application window: owns the document, tools, history and settings.
+
+    Behaviour lives in the mixins (one module each under ``inkobold.ui``); this
+    class holds the state, builds the top-level layout in ``_build_ui`` and
+    keeps the small cross-cutting helpers (history, status bar, theme, window
+    mode).
+    """
+
     def __init__(self, app: Gtk.Application) -> None:
         super().__init__(application=app, title=current_flavor().display_name)
         self.set_default_size(1280, 860)
